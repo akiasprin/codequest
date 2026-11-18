@@ -4,10 +4,14 @@ from pathlib import Path
 
 def measured_run(command,*,store=None,timeout=2400,env=None):
     proc=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
-    known={proc.pid};roles={};samples=0;tree_peak=0;host_baseline={};started=time.monotonic()
+    known={proc.pid};roles={};samples=0;tree_peak=0;host_baseline={};started=time.monotonic();phases=[]
+    project=command[command.index('--name')+1] if '--name' in command else None
+    progress_path=Path(store)/'progress'/(hashlib.sha256(str(project).encode()).hexdigest()+'.json') if store and project else None
     def discover_host():
         if store is None:return
-        address='/tmp/codequest-%s-%s.sock'%(os.geteuid(),hashlib.sha256(os.fsencode(Path(store).resolve())).hexdigest()[:24])
+        runtime_env=env or os.environ
+        scratch=runtime_env.get('CQ_TEMP_DIR',runtime_env.get('TMPDIR','/tmp'))
+        address=str(Path(scratch)/('codequest-%s-%s.sock'%(os.geteuid(),hashlib.sha256(os.fsencode(Path(store).resolve())).hexdigest()[:24])))
         try:
             with socket.socket(socket.AF_UNIX)as s:
                 s.settimeout(.05);s.connect(address);data=b'{"op":"ping"}';s.sendall(struct.pack('>I',len(data))+data)
@@ -23,6 +27,13 @@ def measured_run(command,*,store=None,timeout=2400,env=None):
     discover_host()
     def sample():
         nonlocal tree_peak,samples
+        if progress_path:
+            try:
+                v=json.loads(progress_path.read_text());key=(v.get('phase'),v.get('phase_started_ms'))
+                if not phases or (phases[-1].get('phase'),phases[-1].get('phase_started_ms'))!=key:
+                    phases.append({**v,'first_observed_seconds':time.monotonic()-started})
+                else:phases[-1].update({k:v[k] for k in ['completed','total','state','updated_ms'] if k in v})
+            except(OSError,ValueError):pass
         pending=list(known);total=0;seen=set()
         while pending:
             pid=pending.pop()
@@ -54,5 +65,5 @@ def measured_run(command,*,store=None,timeout=2400,env=None):
         try:out,err=proc.communicate(timeout=min(.05,left));break
         except subprocess.TimeoutExpired:pass
     sample()
-    metrics={'seconds':time.monotonic()-started,'sample_interval_seconds':.05,'sampled_tree_peak_rss_bytes':tree_peak,'processes':roles,'samples':samples,'scope':'sampled task process tree plus its store daemon; native allocator included in RSS, exited short processes may escape sampling; lifetime HWM is separate'}
+    metrics={'seconds':time.monotonic()-started,'sample_interval_seconds':.05,'sampled_tree_peak_rss_bytes':tree_peak,'processes':roles,'samples':samples,'phases':phases,'scope':'sampled task process tree plus its store daemon; native allocator included in RSS, exited short processes may escape sampling; lifetime HWM is separate; progress phases shorter than sampling interval may be missed'}
     return subprocess.CompletedProcess(command,proc.returncode,out,err),metrics

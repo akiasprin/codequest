@@ -5,8 +5,34 @@ use crate::{Result, model::*};
 pub trait Source: Send + Sync {
     fn visit(&self, visitor: &mut dyn FnMut(Record) -> Result<()>) -> Result<()>;
     fn get(&self, family: &str, id: &str) -> Result<Option<Record>>;
+    fn visit_family(
+        &self,
+        family: &str,
+        visitor: &mut dyn FnMut(Record) -> Result<()>,
+    ) -> Result<()> {
+        self.visit(&mut |r| {
+            if r.family() == family {
+                visitor(r)
+            } else {
+                Ok(())
+            }
+        })
+    }
+    fn family_len(&self, _family: &str) -> Result<Option<u64>> {
+        Ok(None)
+    }
 }
 pub trait Store: Source {
+    fn task_progress(
+        &self,
+        _project: &str,
+        _phase: &str,
+        _label: &str,
+        _done: u64,
+        _total: Option<u64>,
+        _unit: &str,
+    ) {
+    }
     fn progress(&self, _project: &str, _completed: u64, _total: u64) {}
     fn progress_workers(&self, project: &str, completed: u64, total: u64, _workers: usize) {
         self.progress(project, completed, total);

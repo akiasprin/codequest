@@ -104,6 +104,21 @@ impl Journal {
     }
 }
 impl Store for Journal {
+    fn task_progress(
+        &self,
+        project: &str,
+        phase: &str,
+        label: &str,
+        done: u64,
+        total: Option<u64>,
+        unit: &str,
+    ) {
+        let mut p = self.progress.lock().unwrap();
+        let p = p.get_or_insert_with(|| {
+            cq_core::progress::Progress::stage(&self.root, project, phase, label, total, unit)
+        });
+        p.task(phase, label, done, total, unit);
+    }
     fn progress(&self, project: &str, completed: u64, total: u64) {
         self.progress_workers(project, completed, total, 1);
     }
@@ -196,24 +211,55 @@ impl Store for Journal {
     }
 }
 impl Source for Journal {
+    fn family_len(&self, family: &str) -> Result<Option<u64>> {
+        let prefix = format!("{family}:");
+        let d = self.data.lock().unwrap();
+        Ok(Some(
+            d.entries
+                .range(prefix.clone()..)
+                .take_while(|(k, _)| k.starts_with(&prefix))
+                .count() as u64,
+        ))
+    }
+    fn visit_family(&self, family: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.visit_records(Some(family), f)
+    }
     fn get(&self, family: &str, id: &str) -> Result<Option<Record>> {
         let mut d = self.data.lock().unwrap();
         let e = d.entries.get(&format!("{family}:{id}")).cloned();
         e.map(|e| Self::read(&mut d, &e)).transpose()
     }
     fn visit(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
-        use std::ops::Bound::{Excluded, Unbounded};
+        self.visit_records(None, f)
+    }
+}
+impl Journal {
+    fn visit_records(
+        &self,
+        family: Option<&str>,
+        f: &mut dyn FnMut(Record) -> Result<()>,
+    ) -> Result<()> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
         let generation = self.data.lock().unwrap().sequence;
-        let mut after = None::<String>;
+        let prefix = family.map(|f| format!("{f}:"));
+        let mut after = prefix.clone();
+        let mut first = true;
         loop {
             let batch = {
                 let d = self.data.lock().unwrap();
                 d.entries
-                    .range::<String, _>((after.as_ref().map_or(Unbounded, Excluded), Unbounded))
+                    .range::<String, _>((
+                        after
+                            .as_ref()
+                            .map_or(Unbounded, |v| if first { Included(v) } else { Excluded(v) }),
+                        Unbounded,
+                    ))
+                    .take_while(|(key, _)| prefix.as_ref().is_none_or(|p| key.starts_with(p)))
                     .take(128)
                     .map(|(k, e)| (k.clone(), e.clone()))
                     .collect::<Vec<_>>()
             };
+            first = false;
             if batch.is_empty() {
                 break;
             }

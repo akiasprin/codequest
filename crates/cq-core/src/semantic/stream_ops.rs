@@ -145,7 +145,7 @@ pub fn topology(s: &mut SemanticSnapshot, store: &dyn Store) -> Result<()> {
         })
         .collect::<Result<HashMap<_, _>>>()?;
     let mut files = HashMap::new();
-    store.visit(&mut |r| {
+    store.visit_family("entity", &mut |r| {
         if let Record::Entity(e) = r
             && e.kind == EntityKind::File
         {
@@ -167,7 +167,7 @@ pub fn topology(s: &mut SemanticSnapshot, store: &dyn Store) -> Result<()> {
         }
         Ok(())
     })?;
-    store.visit(&mut |r| {
+    store.visit_family("entity", &mut |r| {
         if let Record::Entity(e) = r
             && e.kind != EntityKind::File
             && let Some(a) = e.source
@@ -191,10 +191,34 @@ pub fn topology(s: &mut SemanticSnapshot, store: &dyn Store) -> Result<()> {
 struct Declaration {
     id: String,
     unit: String,
-    name: String,
-    kind: EntityKind,
-    file: Option<String>,
     external: bool,
+}
+fn visit_documents(
+    store: &dyn Store,
+    project: &str,
+    family: &str,
+    phase: &str,
+    label: &str,
+    visitor: &mut dyn FnMut(Record) -> Result<()>,
+) -> Result<()> {
+    let unit = if family == "document" {
+        "文档"
+    } else {
+        "实体"
+    };
+    store.task_progress(project, phase, label, 0, None, unit);
+    let total = store.family_len(family)?;
+    store.task_progress(project, phase, label, 0, total, unit);
+    let mut done = 0;
+    store.visit_family(family, &mut |r| {
+        visitor(r)?;
+        done += 1;
+        store.task_progress(project, phase, label, done, total, unit);
+        Ok(())
+    })
+}
+fn needs_lookup(link: &DocumentLink) -> bool {
+    link.authority != Authority::SemanticResolution && link.target.resolved().is_none()
 }
 pub fn documents(
     s: &mut SemanticSnapshot,
@@ -215,97 +239,200 @@ pub fn documents(
         note: "repository text, not a generated attribution of intent".into(),
     };
     let repository_p = s.intern_provenance(p.clone());
-    for path in crate::documents::repository_paths(&s.root.path())? {
-        let mut fragment = s.metadata();
-        fragment.gaps.clear();
-        fragment.coverage.clear();
-        crate::documents::parse_file(&mut fragment, &path, content, max_bytes, &p)?;
-        s.sources = SourceSnapshot::seal(
-            fragment.sources.files.clone(),
-            fragment.sources.binding.clone(),
-            fragment.sources.gaps.clone(),
-        );
+    let document_paths = crate::documents::repository_paths(&s.root.path())?;
+    let mut source_files = s
+        .sources
+        .files
+        .iter()
+        .map(|f| (f.logical_path.clone(), f.clone()))
+        .collect::<BTreeMap<_, _>>();
+    store.task_progress(
+        &s.project,
+        "documents.parse",
+        "文档：读取仓库文件",
+        0,
+        Some(document_paths.len() as u64),
+        "文件",
+    );
+    for (done, path) in document_paths.iter().enumerate() {
+        let mut fragment = SemanticSnapshot::empty(s.project.clone(), s.root.clone());
+        let existing = source_files
+            .get(&NativeValue::new(path))
+            .cloned()
+            .into_iter()
+            .collect();
+        fragment.sources = SourceSnapshot::seal(existing, s.sources.binding.clone(), vec![]);
+        crate::documents::parse_file(&mut fragment, path, content, max_bytes, &p)?;
+        for file in &fragment.sources.files {
+            source_files.insert(file.logical_path.clone(), file.clone());
+        }
         s.provenance_records
             .extend(fragment.provenance_records.clone());
-        s.gaps.extend(fragment.gaps.clone());
+        s.gaps.append(&mut fragment.gaps);
         records::drain(&mut fragment, store)?;
+        store.task_progress(
+            &s.project,
+            "documents.parse",
+            "文档：读取仓库文件",
+            done as u64 + 1,
+            Some(document_paths.len() as u64),
+            "文件",
+        );
     }
+    s.sources = SourceSnapshot::seal(
+        source_files.into_values().collect(),
+        s.sources.binding.clone(),
+        s.sources.gaps.clone(),
+    );
+    let project = s.project.clone();
     let mut entity_ids = HashSet::new();
     let mut file_ids = HashSet::new();
     let mut doc_files = HashSet::new();
-    store.visit(&mut |r| {
-        if let Record::Entity(e) = r {
-            entity_ids.insert(e.id);
-            if e.kind == EntityKind::File
-                && let Some(a) = e.source
-            {
-                file_ids.insert(a.file_revision);
-            }
-        }
-        Ok(())
-    })?;
-    store.visit(&mut |r| {
-        if let Record::Document(d) = r {
-            doc_files.insert(d.file_revision.clone());
-            let owner = if let Some(id) = &d.owner {
-                store.get("entity", id)?
-            } else {
-                None
-            };
-            let owner = match owner {
-                Some(Record::Entity(e)) => Some((e.unit, e.external)),
-                _ => None,
-            };
-            if entity_ids.insert(d.id.clone()) {
-                let e = Entity {
-                    id: d.id.clone(),
-                    unit: owner.as_ref().map(|(u, _)| u.clone()).unwrap_or_default(),
-                    provider_id: d.id.clone(),
-                    kind: EntityKind::DocSection,
-                    name: d.title.clone(),
-                    qualified_name: d.title.clone(),
-                    stable_handle: None,
-                    locations: Default::default(),
-                    source: Some(d.source.clone()),
-                    extent: Some(d.source.clone()),
-                    signature: String::new(),
-                    parent: d.parent.clone(),
-                    external: owner.is_some_and(|(_, x)| x),
-                    exported: false,
-                    attributes: BTreeMap::from([("search_text".into(), d.text.clone())]),
-                    type_definitions: vec![],
-                    type_navigation: vec![],
-                    provenance: d.provenance.clone(),
+    let mut requested = HashSet::<String>::new();
+    let mut owner_units = HashMap::new();
+    let mut sections = vec![];
+    visit_documents(
+        store,
+        &project,
+        "document",
+        "documents.ownership",
+        "文档：归属与引用收集",
+        &mut |r| {
+            if let Record::Document(d) = r {
+                if d.kind == DocumentKind::Markdown {
+                    sections.push((
+                        d.file_revision.clone(),
+                        crate::documents::heading_slug(&d.title),
+                        d.id.clone(),
+                    ));
+                }
+                for link in &d.links {
+                    if needs_lookup(link) {
+                        let destination = link.destination.trim_matches('`');
+                        if !destination.starts_with("http:")
+                            && !destination.starts_with("https:")
+                            && !destination.contains('#')
+                        {
+                            requested
+                                .insert(destination.trim_start_matches("crate::").replace('`', ""));
+                        }
+                    }
+                }
+                doc_files.insert(d.file_revision.clone());
+                let owner = if let Some(id) = &d.owner {
+                    store.get("entity", id)?
+                } else {
+                    None
                 };
-                store.put(s, Record::Entity(e), false)?;
+                let owner = match owner {
+                    Some(Record::Entity(e)) => Some((e.unit, e.external)),
+                    _ => None,
+                };
+                if let (Some(id), Some((unit, _))) = (&d.owner, &owner) {
+                    owner_units.insert(id.clone(), unit.clone());
+                }
+                if entity_ids.insert(d.id.clone()) && store.get("entity", &d.id)?.is_none() {
+                    let e = Entity {
+                        id: d.id.clone(),
+                        unit: owner.as_ref().map(|(u, _)| u.clone()).unwrap_or_default(),
+                        provider_id: d.id.clone(),
+                        kind: EntityKind::DocSection,
+                        name: d.title.clone(),
+                        qualified_name: d.title.clone(),
+                        stable_handle: None,
+                        locations: Default::default(),
+                        source: Some(d.source.clone()),
+                        extent: Some(d.source.clone()),
+                        signature: String::new(),
+                        parent: d.parent.clone(),
+                        external: owner.is_some_and(|(_, x)| x),
+                        exported: false,
+                        attributes: BTreeMap::from([("search_text".into(), d.text.clone())]),
+                        type_definitions: vec![],
+                        type_navigation: vec![],
+                        provenance: d.provenance.clone(),
+                    };
+                    store.put(s, Record::Entity(e), false)?;
+                }
+                if let Some(parent) = &d.parent {
+                    relation(
+                        s,
+                        store,
+                        parent,
+                        &d.id,
+                        RelationKind::Contains,
+                        Some(d.source.clone()),
+                        None,
+                        d.provenance.clone(),
+                    )?;
+                }
+                if let Some(owner) = &d.owner {
+                    relation(
+                        s,
+                        store,
+                        &d.id,
+                        owner,
+                        RelationKind::Documents,
+                        Some(d.source.clone()),
+                        None,
+                        d.provenance.clone(),
+                    )?;
+                }
             }
-            if let Some(parent) = &d.parent {
-                relation(
-                    s,
-                    store,
-                    parent,
-                    &d.id,
-                    RelationKind::Contains,
-                    Some(d.source.clone()),
-                    None,
-                    d.provenance.clone(),
-                )?;
+            Ok(())
+        },
+    )?;
+    let paths = s
+        .sources
+        .files
+        .iter()
+        .map(|f| (f.id.clone(), f.logical_path.path()))
+        .collect::<HashMap<_, _>>();
+    let mut candidates = HashMap::<String, Vec<Declaration>>::new();
+    let mut files_by_path = HashMap::<std::path::PathBuf, Vec<String>>::new();
+    visit_documents(
+        store,
+        &project,
+        "entity",
+        "documents.symbols",
+        "文档：查找引用的符号",
+        &mut |r| {
+            if let Record::Entity(e) = r {
+                if e.kind == EntityKind::File
+                    && let Some(a) = &e.source
+                {
+                    file_ids.insert(a.file_revision.clone());
+                    if let Some(path) = paths.get(&a.file_revision) {
+                        files_by_path
+                            .entry(path.clone())
+                            .or_default()
+                            .push(e.id.clone());
+                    }
+                }
+                let name = &e.qualified_name;
+                let mut keys = vec![];
+                if requested.contains(name) {
+                    keys.push(name.as_str());
+                }
+                for (i, pair) in name.as_bytes().windows(2).enumerate() {
+                    if pair == b"::" && requested.contains(&name[i + 2..]) {
+                        keys.push(&name[i + 2..]);
+                    }
+                }
+                for key in keys {
+                    candidates
+                        .entry(key.to_owned())
+                        .or_default()
+                        .push(Declaration {
+                            id: e.id.clone(),
+                            unit: e.unit.clone(),
+                            external: e.external,
+                        });
+                }
             }
-            if let Some(owner) = &d.owner {
-                relation(
-                    s,
-                    store,
-                    &d.id,
-                    owner,
-                    RelationKind::Documents,
-                    Some(d.source.clone()),
-                    None,
-                    d.provenance.clone(),
-                )?;
-            }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
     for file in s.sources.files.clone() {
         if !file_ids.contains(&file.id) && doc_files.contains(&file.id) {
             let id = digest(&serde_json::to_vec(&(&file.id, "document-file"))?);
@@ -345,117 +472,106 @@ pub fn documents(
             )?;
         }
     }
-    let paths = s
-        .sources
-        .files
-        .iter()
-        .map(|f| (f.id.clone(), f.logical_path.path()))
-        .collect::<HashMap<_, _>>();
-    let mut declarations = vec![];
-    let mut sections = vec![];
-    let mut owner_units = HashMap::new();
-    store.visit(&mut |r| {
-        match r {
-            Record::Entity(e) => {
-                owner_units.insert(e.id.clone(), e.unit.clone());
-                declarations.push(Declaration {
-                    id: e.id,
-                    unit: e.unit,
-                    name: e.qualified_name,
-                    kind: e.kind,
-                    file: e.source.map(|a| a.file_revision),
-                    external: e.external,
-                });
-            }
-            Record::Document(d) if d.kind == DocumentKind::Markdown => sections.push((
-                d.file_revision,
-                crate::documents::heading_slug(&d.title),
-                d.id,
-            )),
-            _ => {}
+    // Newly created document-file entities also participate in path links.
+    for file in &s.sources.files {
+        if !file_ids.contains(&file.id) && doc_files.contains(&file.id) {
+            files_by_path
+                .entry(file.logical_path.path())
+                .or_default()
+                .push(digest(&serde_json::to_vec(&(&file.id, "document-file"))?));
         }
-        Ok(())
-    })?;
-    store.visit(&mut |r| {
-        if let Record::Document(mut d) = r {
-            for link in &mut d.links {
-                if link.target.resolved().is_none() {
-                    let destination = link.destination.trim_matches('`');
-                    if destination.starts_with("http:") || destination.starts_with("https:") {
-                        continue;
-                    }
-                    let (path, fragment) = destination.split_once('#').unwrap_or((destination, ""));
-                    let target = paths
-                        .get(&d.file_revision)
-                        .and_then(|p| p.parent())
-                        .map(|base| crate::documents::lexical(&base.join(path)));
-                    let candidates = if !fragment.is_empty() {
-                        let file = if path.is_empty() {
-                            paths.get(&d.file_revision)
+    }
+    let mut section_index = HashMap::<(std::path::PathBuf, String), Vec<String>>::new();
+    for (file, slug, id) in sections {
+        if let Some(path) = paths.get(&file) {
+            section_index
+                .entry((path.clone(), slug))
+                .or_default()
+                .push(id);
+        }
+    }
+    visit_documents(
+        store,
+        &project,
+        "document",
+        "documents.links",
+        "文档：写入链接关系",
+        &mut |r| {
+            if let Record::Document(mut d) = r {
+                for link in &mut d.links {
+                    if needs_lookup(link) {
+                        let destination = link.destination.trim_matches('`');
+                        if destination.starts_with("http:") || destination.starts_with("https:") {
+                            continue;
+                        }
+                        let (path, fragment) =
+                            destination.split_once('#').unwrap_or((destination, ""));
+                        let target = paths
+                            .get(&d.file_revision)
+                            .and_then(|p| p.parent())
+                            .map(|base| crate::documents::lexical(&base.join(path)));
+                        let candidates = if !fragment.is_empty() {
+                            let file = if path.is_empty() {
+                                paths.get(&d.file_revision)
+                            } else {
+                                target.as_ref()
+                            };
+                            file.and_then(|p| section_index.get(&(p.clone(), fragment.to_owned())))
+                                .cloned()
+                                .unwrap_or_default()
+                        } else if !path.is_empty()
+                            && target
+                                .as_ref()
+                                .is_some_and(|p| files_by_path.contains_key(p))
+                        {
+                            files_by_path
+                                .get(target.as_ref().unwrap())
+                                .cloned()
+                                .unwrap_or_default()
                         } else {
-                            target.as_ref()
+                            let qualified =
+                                destination.trim_start_matches("crate::").replace('`', "");
+                            let owner = d.owner.as_ref().and_then(|o| owner_units.get(o));
+                            candidates
+                                .get(&qualified)
+                                .into_iter()
+                                .flatten()
+                                .filter(|e| owner.is_none_or(|o| e.unit == *o || e.external))
+                                .map(|e| e.id.clone())
+                                .collect()
                         };
-                        sections
-                            .iter()
-                            .filter(|(f, slug, _)| paths.get(f) == file && slug == fragment)
-                            .map(|(_, _, id)| id.clone())
-                            .collect::<Vec<_>>()
-                    } else if !path.is_empty()
-                        && target
-                            .as_ref()
-                            .is_some_and(|p| paths.values().any(|f| f == p))
-                    {
-                        declarations
-                            .iter()
-                            .filter(|e| {
-                                e.kind == EntityKind::File
-                                    && e.file.as_ref().and_then(|f| paths.get(f)) == target.as_ref()
-                            })
-                            .map(|e| e.id.clone())
-                            .collect()
-                    } else {
-                        let qualified = destination.trim_start_matches("crate::").replace('`', "");
-                        let owner = d.owner.as_ref().and_then(|o| owner_units.get(o));
-                        declarations
-                            .iter()
-                            .filter(|e| {
-                                e.name == qualified || e.name.ends_with(&format!("::{qualified}"))
-                            })
-                            .filter(|e| owner.is_none_or(|o| e.unit == *o || e.external))
-                            .map(|e| e.id.clone())
-                            .collect()
-                    };
-                    link.target = if candidates.len() == 1 {
-                        Resolution::Resolved(candidates[0].clone())
-                    } else if candidates.is_empty() {
-                        Resolution::Unknown(format!(
-                            "unresolved link or section anchor: {fragment}"
-                        ))
-                    } else {
-                        Resolution::Candidates(candidates)
-                    };
-                    link.authority = Authority::AuthorStatement;
+                        link.target = if candidates.len() == 1 {
+                            Resolution::Resolved(candidates[0].clone())
+                        } else if candidates.is_empty() {
+                            Resolution::Unknown(format!(
+                                "unresolved link or section anchor: {fragment}"
+                            ))
+                        } else {
+                            Resolution::Candidates(candidates)
+                        };
+                        link.authority = Authority::AuthorStatement;
+                    }
+                    if let Some(target) = link.target.resolved() {
+                        let p = s.intern_provenance(Provenance {
+                            authority: link.authority,
+                            note: "explicit document reference; not a runtime relationship".into(),
+                            ..s.provenance_records[&d.provenance].clone()
+                        });
+                        relation(
+                            s,
+                            store,
+                            &d.id,
+                            target,
+                            RelationKind::DocReferences,
+                            Some(d.source.clone()),
+                            None,
+                            p,
+                        )?;
+                    }
                 }
-                if let Some(target) = link.target.resolved() {
-                    let p = s.intern_provenance(Provenance {
-                        authority: link.authority,
-                        note: "explicit document reference; not a runtime relationship".into(),
-                        ..s.provenance_records[&d.provenance].clone()
-                    });
-                    relation(
-                        s,
-                        store,
-                        &d.id,
-                        target,
-                        RelationKind::DocReferences,
-                        Some(d.source.clone()),
-                        None,
-                        p,
-                    )?;
-                }
+                store.put(s, Record::Document(d), true)?;
             }
-            store.put(s, Record::Document(d), true)?;
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }

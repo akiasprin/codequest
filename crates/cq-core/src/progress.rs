@@ -61,6 +61,15 @@ impl<R: std::io::Read> std::io::Read for Reader<R> {
     }
 }
 impl Progress {
+    pub fn task(&mut self, phase: &str, label: &str, done: u64, total: Option<u64>, unit: &str) {
+        self.value.as_object_mut().unwrap().remove("pipeline");
+        if self.value["phase"] != phase {
+            self.detail(phase, label, done, total, unit, 1);
+        } else {
+            self.value["total"] = json!(total);
+            self.count(done);
+        }
+    }
     pub fn begin(store: &Path, project: &str) -> Self {
         let mut p = Self::stage(store, project, "preflight", "准备索引", None, "项");
         p.value["started_ms"] = json!(cq_capture_protocol::now_ms());
