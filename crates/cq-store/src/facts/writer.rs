@@ -154,6 +154,8 @@ pub struct Writer<'a> {
     vector_model: Option<std::sync::Arc<cq_core::query::embeddings::TokenVectors>>,
     indexed: bool,
     initial_groups: Option<super::bulk::Builder>,
+    initial_facts: Option<super::bulk::Builder>,
+    scope_facts: Option<BTreeMap<String, FactRef>>,
     progress: Option<cq_core::progress::Progress>,
     completed: u64,
 }
@@ -205,6 +207,10 @@ impl ScopedSink<'_, '_> {
 impl TransferSink for ScopedSink<'_, '_> {
     fn begin(&mut self, b: &transfer::Begin) -> Result<()> {
         self.validator.begin(b)?;
+        if self.writer.initial_facts.is_some() {
+            self.writer.flush()?;
+            self.writer.scope_facts = Some(BTreeMap::new());
+        }
         self.compact = self
             .base
             .summary(&b.descriptor.key)?
@@ -321,6 +327,7 @@ impl TransferSink for ScopedSink<'_, '_> {
     fn end(&mut self, key: &ScopeKey, n: u64) -> Result<()> {
         self.validator.end(key, n)?;
         self.writer.flush()?;
+        let staged = self.writer.scope_facts.take();
         let (b, mut root) = self
             .current
             .take()
@@ -372,13 +379,17 @@ impl TransferSink for ScopedSink<'_, '_> {
             let (family, id) = k
                 .split_once(':')
                 .ok_or_else(|| Error::new("InvalidFactKey", k))?;
-            let f = reference(
-                self.writer.o,
-                &self.writer.roots,
-                family,
-                id,
-                &mut self.writer.read,
-            )?
+            let f = if let Some(staged) = &staged {
+                staged.get(k).cloned()
+            } else {
+                reference(
+                    self.writer.o,
+                    &self.writer.roots,
+                    family,
+                    id,
+                    &mut self.writer.read,
+                )?
+            }
             .ok_or_else(|| Error::new("MissingTransferredFact", k))?;
             if f.digest != r.hash || f.length != r.bytes {
                 return Err(Error::new(
@@ -514,6 +525,8 @@ impl<'a> Writer<'a> {
             vector_model: None,
             indexed,
             initial_groups: None,
+            initial_facts: None,
+            scope_facts: None,
             progress: None,
             completed: 0,
         }
@@ -553,7 +566,8 @@ impl<'a> Writer<'a> {
                 self.diagnostic_header.as_ref(),
             )?);
         }
-        if let Some(r) = reference(self.o, &self.roots, family, id, &mut self.read)?
+        if self.initial_facts.is_none()
+            && let Some(r) = reference(self.o, &self.roots, family, id, &mut self.read)?
             && r.digest == digest(&bytes)
         {
             if self.audited.insert(r.object.hash.clone()) {
@@ -608,6 +622,26 @@ impl<'a> Writer<'a> {
         self.commit_rows(rows)
     }
     fn commit_rows(&mut self, rows: Vec<(String, String, Value, FactRef)>) -> Result<()> {
+        if let Some(initial_facts) = &mut self.initial_facts {
+            let groups = self
+                .initial_groups
+                .as_mut()
+                .ok_or_else(|| Error::new("InvalidInitialWriter", "missing group builder"))?;
+            for (family, id, value, r) in rows {
+                let key = fact_key(&family, &id);
+                let value_ref = serde_json::to_value(&r)?;
+                initial_facts.push("facts", &key, value_ref.clone())?;
+                if let Some(scope) = &mut self.scope_facts {
+                    scope.insert(key.clone(), r);
+                }
+                for group in cq_core::ports::facts::groups_indexed(&family, &value, self.indexed) {
+                    groups.push(&group, &key, value_ref.clone())?;
+                }
+                self.stats.facts_changed += 1;
+            }
+            self.pending_bytes = 0;
+            return Ok(());
+        }
         let mut memberships_by_group = GroupChanges::new();
         let mut facts = vec![];
         for (family, id, value, r) in rows {
@@ -669,6 +703,15 @@ impl<'a> Writer<'a> {
     }
     fn finish(mut self, preserve_semantic: bool) -> Result<(Roots, WriteStats)> {
         self.flush()?;
+        if let Some(facts) = self.initial_facts.take() {
+            let directories = facts.build(self.o)?;
+            let group: Group = tree::get(self.o, &directories, "facts", &mut self.read)?
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default();
+            self.roots.facts = group.root;
+            self.stats.upserts = self.roots.facts.clone();
+        }
         if let Some(initial) = self.initial_groups.take() {
             self.roots.groups = initial.build(self.o)?;
             return Ok((self.roots, self.stats));
@@ -828,6 +871,11 @@ fn write(
         w.initial_groups = Some(super::bulk::Builder::new(&o.root)?);
         if let Some(b) = &mut w.initial_groups {
             b.project = Some(s.project.clone());
+        }
+        if prepared.is_some() {
+            let mut facts = super::bulk::Builder::new(&o.root)?;
+            facts.project = Some(s.project.clone());
+            w.initial_facts = Some(facts);
         }
     }
     w.vector_model = cq_core::query::embeddings::TokenVectors::configured()?;

@@ -259,7 +259,7 @@ pub(super) fn normalize(
                         }
                         let frame =
                             catalogue.render_with(&plan, |row| archive.hydrate_row_ref(row))?;
-                        native_batch::prepare_frame(
+                        let mut output = native_batch::prepare_frame(
                             template,
                             &frame,
                             mapping,
@@ -269,8 +269,14 @@ pub(super) fn normalize(
                             version,
                             files[index],
                             source_state,
-                        )
-                        .map(Some)
+                        )?;
+                        // The journal is a concurrent, conflict-checking sink.
+                        // Encode/hash/store facts in workers; the coordinator
+                        // orders source/provenance/coverage metadata only.
+                        // Downstream consumers read the journal after all
+                        // workers join and enumerate canonical record keys.
+                        crate::semantic::records::drain(&mut output.fragment, sink)?;
+                        Ok(Some(output))
                     }))
                     .unwrap_or_else(|_| {
                         Err(Error::new(

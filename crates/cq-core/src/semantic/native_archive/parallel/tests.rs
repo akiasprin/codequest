@@ -118,7 +118,7 @@ fn archive() -> Archive {
     Archive::open(file.path()).unwrap()
 }
 #[test]
-fn parallel_frames_preserve_serial_record_order_sources_and_metadata() {
+fn parallel_frames_preserve_serial_facts_sources_and_metadata() {
     let archive = archive();
     let mut seed = SemanticSnapshot::empty("parallel".into(), NativeValue::from("/repo"));
     seed.production = Some(Default::default());
@@ -158,10 +158,18 @@ fn parallel_frames_preserve_serial_record_order_sources_and_metadata() {
             serde_json::to_value(&s).unwrap(),
             serde_json::to_value(&serial).unwrap()
         );
-        assert_eq!(
-            serde_json::to_value(&*sink.records.lock().unwrap()).unwrap(),
-            serde_json::to_value(&*serial_sink.records.lock().unwrap()).unwrap()
-        );
+        let canonical = |sink: &Sink| {
+            let mut rows = sink
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| serde_json::to_string(r).unwrap())
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+        assert_eq!(canonical(&sink), canonical(&serial_sink));
         if workers > 1 {
             assert!(content.peak.load(Ordering::SeqCst) > 1);
         }

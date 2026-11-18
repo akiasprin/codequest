@@ -16,7 +16,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 const PAGE_BYTES: u64 = 16 * 1024 * 1024;
 const FACT_BYTES: u64 = 32 * 1024 * 1024;
-const FACT_ROWS: usize = 2048;
+const FACT_ROWS: usize = 16 * 1024;
 #[derive(Clone, Default, Serialize)]
 pub struct ImportStats {
     pub inventory_pages: usize,
@@ -60,6 +60,8 @@ struct Batch {
     edges: u64,
     bytes: u64,
     families: BTreeMap<String, u64>,
+    parallel_facts: bool,
+    parallel_links: bool,
 }
 impl Batch {
     fn new() -> Result<Self> {
@@ -81,6 +83,8 @@ impl Batch {
             edges: 0,
             bytes: 0,
             families: BTreeMap::new(),
+            parallel_facts: true,
+            parallel_links: true,
         };
         b.headers()?;
         Ok(b)
@@ -114,14 +118,16 @@ impl Batch {
                 .map_err(err)?;
             }
             c.query(&format!(
-                "COPY Fact FROM {} (HEADER=true,PARALLEL=false)",
-                quote(self.dir.path().join("facts.csv").to_str().unwrap())
+                "COPY Fact FROM {} (HEADER=true,PARALLEL={})",
+                quote(self.dir.path().join("facts.csv").to_str().unwrap()),
+                self.parallel_facts
             ))
             .map_err(err)?;
             if self.edges > 0 {
                 c.query(&format!(
-                    "COPY LINK FROM {} (HEADER=true,PARALLEL=false)",
-                    quote(self.dir.path().join("links.csv").to_str().unwrap())
+                    "COPY LINK FROM {} (HEADER=true,PARALLEL={})",
+                    quote(self.dir.path().join("links.csv").to_str().unwrap()),
+                    self.parallel_links
                 ))
                 .map_err(err)?;
             }
@@ -304,11 +310,15 @@ impl Projection {
                     {
                         batch.flush(&c, &mut stats, point)?;
                     }
+                    // Ladybug's parallel CSV reader rejects quoted newlines.
+                    // Keep exact document names and fall back for this batch.
+                    batch.parallel_facts &= !row.iter().any(|s| s.contains(['\n', '\r']));
                     batch.facts.write_record(row).map_err(err)?;
                     batch.rows += 1;
                     *batch.families.entry(family.into()).or_default() += 1;
                     batch.bytes += bytes;
                     if let Some(edge) = edge {
+                        batch.parallel_links &= !edge.iter().any(|s| s.contains(['\n', '\r']));
                         batch.slots.insert(edge[0].into());
                         batch.slots.insert(edge[1].into());
                         batch.links.write_record(edge).map_err(err)?;
@@ -375,7 +385,8 @@ mod tests {
             )
             .unwrap();
         }
-        for i in 0..2300 {
+        let links = FACT_ROWS + 252;
+        for i in 0..links {
             let id = format!("r{i}");
             w.append(
                 "relation",
@@ -413,11 +424,12 @@ mod tests {
         assert!(!p.receipt(&r).unwrap());
         assert!(!p.import_stats().complete);
         assert!(p.physical_counts().unwrap()["links"].as_u64().unwrap() > 0);
+        assert!(p.physical_counts().unwrap()["links"].as_u64().unwrap() < links as u64);
         p.import(&o, &r).unwrap();
         assert!(p.receipt(&r).unwrap());
         let counts = p.physical_counts().unwrap();
-        assert_eq!(counts["facts"], 2302);
-        assert_eq!(counts["links"], 2300);
+        assert_eq!(counts["facts"], links as u64 + 2);
+        assert_eq!(counts["links"], links as u64);
         assert_eq!(counts["receipts"], 1);
         let stats = p.import_stats();
         assert_eq!(stats.pages, 0);
