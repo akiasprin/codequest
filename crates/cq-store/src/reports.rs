@@ -30,6 +30,12 @@ impl LocalStore {
     pub fn analysis_records(&self) -> Option<&crate::raw::Journal> {
         self.raw.as_deref()
     }
+    /// After canonical preparation, the sealed spool owns the publication
+    /// payloads. Release the temporary raw journal before building indexes.
+    pub fn finish_streaming(mut self) -> Self {
+        self.raw = None;
+        self
+    }
     pub fn open(path: &Path) -> Result<Self> {
         crate::atomic::create_directory(path)?;
         crate::atomic::create_directory(&path.join("blobs"))?;

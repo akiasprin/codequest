@@ -60,3 +60,27 @@ fn dangling_parent_fails_after_entities_with_actionable_context() {
         .unwrap();
     record_projection::validate(&snapshot, &journal, &store.content).unwrap();
 }
+
+#[test]
+fn prepared_spool_survives_releasing_the_raw_analysis_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(temp.path()).unwrap();
+    let scoped = store.streaming_scope().unwrap();
+    let mut snapshot = paged_fixture::fixture(&scoped, 3, 1);
+    snapshot.revision.clear();
+    let raw = scoped.analysis_records().unwrap();
+    cq_core::semantic::records::drain(&mut snapshot, raw).unwrap();
+    let prepared = scoped.prepare_records(snapshot, raw).unwrap();
+    let scoped = scoped.finish_streaming();
+    assert!(scoped.analysis_records().is_none());
+    let mut entities = 0;
+    prepared
+        .spool
+        .each("entity", |_, _| {
+            entities += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(entities, 3);
+    assert!(store.analysis_records().is_none());
+}

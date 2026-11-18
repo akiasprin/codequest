@@ -147,6 +147,8 @@ HIR 分片导出使用同一个 Salsa revision 的只读分析快照并行处理
 
 发布交给 StoreHost 执行，客户端轮询有状态的提交句柄。`CQ_PUBLICATION_WAIT_MS` 控制本次客户端等待时间（默认 120000 毫秒）；超过后正常返回 `publication_in_progress` 和 revision，可用以下命令继续查询，重启后也会检查持久化提交结果。MCP 的 `index_status` 同样刷新发布状态；客户端结束不撤销已开始的提交。
 
+初次索引的排序中间文件使用带校验的 LZ4 帧和精简记录，最终事实页及 Merkle 目录格式保持不变。排序空间按实际同时存在的压缩文件计量，归并期间的新旧文件均计入；每个排序器默认上限 32 GiB，`CQ_INDEX_SCRATCH_BYTES` 可显式设置为 1..1099511627776 字节。预算耗尽会拒绝本次候选，不发布不完整目录。原始记录日志在规范化准备完成后释放；GNU/Linux 上同时归还空闲分配器页，减少后续阶段的文件缓存压力。
+
 ```bash
 cq query --store /path/to/state --project PROJECT --json \
   '{"operation":"publication_status","revision":"REVISION"}'

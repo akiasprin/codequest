@@ -110,6 +110,7 @@ pub fn index_repository(
         other => return Err(Error::new("UnsupportedLanguage", other)),
     }
     let native_ms = started.elapsed().as_millis() as u64;
+    release_scratch_memory();
     if control.is_cancelled() {
         return Err(Error::new(
             "Cancelled",
@@ -178,6 +179,9 @@ pub fn index_repository(
         1,
     );
     let prepared = store.prepare_records(snapshot, records)?;
+    let scoped = scoped.finish_streaming();
+    let store = &scoped;
+    release_scratch_memory();
     let snapshot = &prepared.header;
     if control.is_cancelled() {
         return Err(Error::new(
@@ -215,6 +219,15 @@ pub fn index_repository(
     summary["transfer"] = revision.metadata["transfer"].clone();
     summary["analysis_transport"] = transport;
     Ok(summary)
+}
+fn release_scratch_memory() {
+    // Native export/catalogue processing allocates many short-lived records.
+    // Return free GNU allocator arenas before the next large phase competes
+    // with them for the file cache. Live facts and frontend state stay owned.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 fn sibling(name: &str) -> Result<PathBuf> {
     Ok(std::env::current_exe()?.with_file_name(name))

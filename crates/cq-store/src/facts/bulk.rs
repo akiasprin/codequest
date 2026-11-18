@@ -8,12 +8,93 @@ use std::{
     cmp::Reverse,
     collections::BinaryHeap,
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{self, BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
 };
 const RUN_BYTES: usize = 8 * 1024 * 1024;
 const FAN_IN: usize = 32;
 const DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+fn disk_budget(value: Option<&str>) -> Result<u64> {
+    value.map_or(Ok(DISK_BYTES), |v| {
+        v.parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0 && *n <= 1024 * 1024 * 1024 * 1024)
+            .ok_or_else(|| {
+                Error::new(
+                    "InvalidIndexBudget",
+                    "CQ_INDEX_SCRATCH_BYTES must be 1..1099511627776 bytes per sorter",
+                )
+            })
+    })
+}
+#[derive(Debug)]
+struct ScratchBudget;
+impl std::fmt::Display for ScratchBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("initial membership sort exhausted its live compressed scratch budget")
+    }
+}
+impl std::error::Error for ScratchBudget {}
+fn scratch_error(error: io::Error) -> Error {
+    if error.get_ref().is_some_and(|e| e.is::<ScratchBudget>()) {
+        Error::new(
+            "IndexBuildBudget",
+            "initial membership sort exceeded its live compressed scratch budget; no revision published",
+        )
+    } else {
+        error.into()
+    }
+}
+struct CappedFile {
+    file: File,
+    written: u64,
+    limit: u64,
+}
+impl Write for CappedFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.limit.saturating_sub(self.written) {
+            return Err(io::Error::other(ScratchBudget));
+        }
+        let n = self.file.write(bytes)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+struct RunWriter(BufWriter<lz4_flex::frame::FrameEncoder<CappedFile>>);
+impl RunWriter {
+    fn new(path: &Path, allowance: u64) -> Result<Self> {
+        let file = CappedFile {
+            file: File::create(path)?,
+            written: 0,
+            limit: allowance,
+        };
+        let info = lz4_flex::frame::FrameInfo::new().content_checksum(true);
+        let encoder = lz4_flex::frame::FrameEncoder::with_frame_info(info, file);
+        Ok(Self(BufWriter::new(encoder)))
+    }
+    fn push(&mut self, row: &Row) -> Result<()> {
+        // Ordered hashes can be recomputed when a run is read. Persisting both
+        // prefixes for every posting needlessly adds 130 bytes per row.
+        let directory = row.directory.split_once(':').unwrap().1;
+        let key = row.key.split_once(':').unwrap().1;
+        self.0
+            .write_all(&serde_json::to_vec(&(directory, key, &row.value))?)
+            .map_err(scratch_error)?;
+        self.0.write_all(b"\n").map_err(scratch_error)?;
+        Ok(())
+    }
+    fn finish(self) -> Result<u64> {
+        let encoder = self
+            .0
+            .into_inner()
+            .map_err(|e| scratch_error(e.into_error()))?;
+        let file = encoder.finish().map_err(|e| scratch_error(e.into()))?;
+        Ok(file.written)
+    }
+}
 #[derive(Serialize, Deserialize)]
 struct Row {
     directory: String,
@@ -25,7 +106,8 @@ pub(super) struct Builder {
     rows: Vec<Row>,
     bytes: usize,
     run_bytes: usize,
-    total: u64,
+    live_bytes: u64,
+    disk_bytes: u64,
     serial: u64,
     runs: Vec<(usize, PathBuf)>,
     pub project: Option<String>,
@@ -40,7 +122,8 @@ impl Builder {
             rows: vec![],
             bytes: 0,
             run_bytes: RUN_BYTES,
-            total: 0,
+            live_bytes: 0,
+            disk_bytes: disk_budget(std::env::var("CQ_INDEX_SCRATCH_BYTES").ok().as_deref())?,
             serial: 0,
             runs: vec![],
             project: None,
@@ -57,13 +140,6 @@ impl Builder {
         if !self.rows.is_empty() && self.bytes + size > self.run_bytes {
             self.flush()?;
         }
-        self.total += size as u64;
-        if self.total > DISK_BYTES {
-            return Err(Error::new(
-                "IndexBuildBudget",
-                "initial membership sort exceeds 32 GiB; no revision published",
-            ));
-        }
         self.bytes += size;
         self.rows.push(row);
         self.count += 1;
@@ -71,7 +147,7 @@ impl Builder {
     }
     fn path(&mut self) -> PathBuf {
         self.serial += 1;
-        self.dir.path().join(format!("{}.jsonl", self.serial))
+        self.dir.path().join(format!("{}.jsonl.lz4", self.serial))
     }
     fn flush(&mut self) -> Result<()> {
         if self.rows.is_empty() {
@@ -80,12 +156,11 @@ impl Builder {
         self.rows
             .sort_unstable_by(|a, b| (&a.directory, &a.key).cmp(&(&b.directory, &b.key)));
         let path = self.path();
-        let mut out = BufWriter::new(File::create(&path)?);
+        let mut out = RunWriter::new(&path, self.disk_bytes.saturating_sub(self.live_bytes))?;
         for row in self.rows.drain(..) {
-            serde_json::to_writer(&mut out, &row)?;
-            out.write_all(b"\n")?;
+            out.push(&row)?;
         }
-        out.flush()?;
+        self.live_bytes += out.finish()?;
         self.bytes = 0;
         self.runs.push((0, path));
         // Leveled merging bounds open files and avoids repeatedly rewriting a
@@ -112,18 +187,18 @@ impl Builder {
             .map(|i| self.runs[*i].1.clone())
             .collect::<Vec<_>>();
         let path = self.path();
-        let mut out = BufWriter::new(File::create(&path)?);
+        let mut out = RunWriter::new(&path, self.disk_bytes.saturating_sub(self.live_bytes))?;
         for row in Merge::open(&paths)? {
-            serde_json::to_writer(&mut out, &row?)?;
-            out.write_all(b"\n")?;
+            out.push(&row?)?;
         }
-        out.flush()?;
-        drop(out);
+        self.live_bytes += out.finish()?;
         for i in indices.into_iter().rev() {
             self.runs.remove(i);
         }
         for old in paths {
+            let bytes = std::fs::metadata(&old)?.len();
             std::fs::remove_file(old)?;
+            self.live_bytes -= bytes;
         }
         self.runs.push((level, path));
         Ok(())
@@ -194,7 +269,7 @@ impl Builder {
     }
 }
 struct Merge {
-    readers: Vec<BufReader<File>>,
+    readers: Vec<BufReader<lz4_flex::frame::FrameDecoder<File>>>,
     rows: Vec<Option<Row>>,
     heap: BinaryHeap<Reverse<(String, String, usize)>>,
     failed: bool,
@@ -203,7 +278,7 @@ impl Merge {
     fn open(paths: &[PathBuf]) -> Result<Self> {
         let readers = paths
             .iter()
-            .map(|p| File::open(p).map(BufReader::new))
+            .map(|p| File::open(p).map(|f| BufReader::new(lz4_flex::frame::FrameDecoder::new(f))))
             .collect::<std::io::Result<Vec<_>>>()?;
         let mut s = Self {
             rows: (0..readers.len()).map(|_| None).collect(),
@@ -221,7 +296,12 @@ impl Merge {
         if self.readers[i].read_line(&mut line)? == 0 {
             return Ok(());
         }
-        let row: Row = serde_json::from_str(&line)?;
+        let (directory, key, value): (String, String, Value) = serde_json::from_str(&line)?;
+        let row = Row {
+            directory: tree::order(&directory),
+            key: tree::order(&key),
+            value,
+        };
         self.heap
             .push(Reverse((row.directory.clone(), row.key.clone(), i)));
         self.rows[i] = Some(row);
@@ -301,5 +381,118 @@ mod tests {
         b.flush().unwrap();
         std::fs::write(&b.runs[0].1, b"truncated-json\n").unwrap();
         assert!(b.build(&o).is_err());
+    }
+    #[test]
+    fn compressed_runs_keep_exact_live_byte_accounting_through_merges() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut b = Builder::new(temp.path()).unwrap();
+        b.run_bytes = 512;
+        for i in 0..140 {
+            b.push(
+                "all:entity",
+                &format!("entity:f{i}"),
+                json!({"repeated": "same-reference".repeat(32), "offset": i}),
+            )
+            .unwrap();
+        }
+        b.flush().unwrap();
+        let actual: u64 = b
+            .runs
+            .iter()
+            .map(|(_, p)| p.metadata().unwrap().len())
+            .sum();
+        assert_eq!(b.live_bytes, actual);
+        assert!(b.runs.iter().any(|(level, _)| *level > 0));
+        let count = Merge::open(&b.runs.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>())
+            .unwrap()
+            .inspect(|r| {
+                r.as_ref().unwrap();
+            })
+            .count();
+        assert_eq!(count, 140);
+    }
+    #[test]
+    fn scratch_budget_includes_merge_output_while_inputs_still_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut b = Builder::new(temp.path()).unwrap();
+        for i in 0..2 {
+            b.push("all:entity", &format!("entity:f{i}"), json!(i))
+                .unwrap();
+            b.flush().unwrap();
+        }
+        let before = b.live_bytes;
+        b.disk_bytes = before + 1;
+        let error = b.merge_runs(vec![0, 1], 1).unwrap_err();
+        assert_eq!(error.code(), "IndexBuildBudget");
+        let actual: u64 = std::fs::read_dir(b.dir.path())
+            .unwrap()
+            .map(|p| p.unwrap().metadata().unwrap().len())
+            .sum();
+        assert!(actual <= b.disk_bytes);
+        assert_eq!(b.runs.len(), 2, "inputs must survive an incomplete merge");
+    }
+    #[test]
+    fn truncated_compressed_run_cannot_return_a_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Objects::new(temp.path().join("objects")).unwrap();
+        let mut b = Builder::new(&o.root).unwrap();
+        b.push("all:entity", "f0", json!(1)).unwrap();
+        b.flush().unwrap();
+        let p = &b.runs[0].1;
+        let size = p.metadata().unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_len(size - 3)
+            .unwrap();
+        assert!(b.build(&o).is_err());
+    }
+    #[test]
+    #[ignore = "manual scratch-only replay; requires CQ_POSTING_SAMPLE and CQ_POSTING_REPORT"]
+    fn retained_real_postings_measure_scratch_without_reindexing() {
+        let input = std::env::var("CQ_POSTING_SAMPLE").unwrap();
+        let report = std::env::var("CQ_POSTING_REPORT").unwrap();
+        let rows: Vec<Value> = serde_json::from_reader(File::open(input).unwrap()).unwrap();
+        let mut result = vec![];
+        for family in ["entity", "body", "occurrence", "relation", "document"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut b = Builder::new(temp.path()).unwrap();
+            let mut count = 0;
+            let started = std::time::Instant::now();
+            for row in &rows {
+                if row["family"].as_str().unwrap().to_lowercase() != family {
+                    continue;
+                }
+                let value = &row["value"];
+                let id = value["id"].as_str().unwrap();
+                let reference = json!({"object":{"hash":cq_core::model::digest(format!("{family}-{}",count/64).as_bytes()),"bytes":4194304},"offset":(count%64)*4096,"length":serde_json::to_vec(value).unwrap().len(),"digest":cq_core::model::digest(&serde_json::to_vec(value).unwrap())});
+                for group in cq_core::ports::facts::groups(family, value) {
+                    b.push(&group, &format!("{family}:{id}"), reference.clone())
+                        .unwrap();
+                }
+                count += 1;
+            }
+            b.flush().unwrap();
+            let initial_bytes = b.live_bytes;
+            let len = b.runs.len();
+            b.merge_runs((0..len).collect(), 1).unwrap();
+            result.push(json!({"family":family,"sample_records":count,"postings":b.count,"initial_compressed_bytes":initial_bytes,"merged_compressed_bytes":b.live_bytes,"seconds":started.elapsed().as_secs_f64()}));
+        }
+        std::fs::write(report, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    }
+    #[test]
+    fn scratch_limit_is_explicit_and_invalid_limits_fail_closed() {
+        assert_eq!(disk_budget(None).unwrap(), DISK_BYTES);
+        assert_eq!(
+            disk_budget(Some("68719476736")).unwrap(),
+            64 * 1024 * 1024 * 1024
+        );
+        for value in ["", "0", "-1", "unlimited", "1099511627777"] {
+            assert_eq!(
+                disk_budget(Some(value)).unwrap_err().code(),
+                "InvalidIndexBudget"
+            );
+        }
     }
 }
