@@ -12,6 +12,7 @@ mod membership;
 mod page;
 pub struct Projection {
     db: Database,
+    buffer_bytes: u64,
     queries: Mutex<u64>,
     cache: Mutex<BTreeMap<String, Arc<Vec<u8>>>>,
     imports: Mutex<import::ImportStats>,
@@ -29,6 +30,7 @@ impl Projection {
         Self::open_limited(path, create, 16 * 1024 * 1024 * 1024)
     }
     pub fn open_limited(path: &Path, create: bool, disk_limit: u64) -> Result<Self> {
+        let buffer_bytes = residency::buffer_bytes()?;
         if !create && !path.is_file() {
             return Err(Error::new(
                 "RecoveryRequired",
@@ -45,7 +47,7 @@ impl Projection {
         let db = Database::new(
             path,
             SystemConfig::default()
-                .buffer_pool_size(residency::BUFFER_BYTES)
+                .buffer_pool_size(buffer_bytes)
                 .max_num_threads(cq_core::compute::workers()? as u64)
                 .max_db_size(disk_limit.min(16 * 1024 * 1024 * 1024))
                 .throw_on_wal_replay_failure(true),
@@ -53,6 +55,7 @@ impl Projection {
         .map_err(err)?;
         let p = Self {
             db,
+            buffer_bytes,
             queries: Mutex::new(0),
             cache: Mutex::new(BTreeMap::new()),
             imports: Mutex::new(Default::default()),

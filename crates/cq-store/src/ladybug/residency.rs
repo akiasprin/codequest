@@ -9,6 +9,33 @@ use std::{
     time::{Duration, Instant},
 };
 pub const BUFFER_BYTES: u64 = 512 * 1024 * 1024;
+/// Per resident database, not a cap on the complete native process working set.
+pub fn buffer_bytes() -> Result<u64> {
+    let value = std::env::var("CQ_LADYBUG_BUFFER_BYTES")
+        .map(Some)
+        .or_else(|e| match e {
+            std::env::VarError::NotPresent => Ok(None),
+            _ => Err(Error::new(
+                "GraphMemoryBudget",
+                "buffer budget is not UTF-8",
+            )),
+        })?;
+    parse_buffer_bytes(value.as_deref())
+}
+fn parse_buffer_bytes(value: Option<&str>) -> Result<u64> {
+    let bytes = value
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| Error::new("GraphMemoryBudget", "CQ_LADYBUG_BUFFER_BYTES must be bytes"))?
+        .unwrap_or(BUFFER_BYTES);
+    if !(64 * 1024 * 1024..=16 * 1024 * 1024 * 1024).contains(&bytes) {
+        return Err(Error::new(
+            "GraphMemoryBudget",
+            "CQ_LADYBUG_BUFFER_BYTES must be between 64 MiB and 16 GiB per database",
+        ));
+    }
+    Ok(bytes)
+}
 struct Slot {
     path: PathBuf,
     db: Arc<Projection>,
@@ -158,7 +185,9 @@ pub fn evict(path: &Path) -> bool {
 }
 pub fn diagnostics() -> serde_json::Value {
     let s = pool().state.lock().unwrap();
-    serde_json::json!({"ordinary_databases":usize::from(s.ordinary.is_some()),"maintenance_databases":usize::from(s.maintenance.is_some()),"ordinary_limit":1,"maintenance_limit":1,"buffer_pool_bytes_per_database":BUFFER_BYTES,"waiters":s.waiters,"opens":s.opens,"evictions":s.evictions})
+    let ordinary = s.ordinary.as_ref().map(|v| v.db.buffer_bytes);
+    let maintenance = s.maintenance.as_ref().map(|v| v.db.buffer_bytes);
+    serde_json::json!({"ordinary_databases":usize::from(s.ordinary.is_some()),"maintenance_databases":usize::from(s.maintenance.is_some()),"ordinary_limit":1,"maintenance_limit":1,"buffer_pool_bytes_per_database":buffer_bytes().ok(),"ordinary_buffer_pool_bytes":ordinary,"maintenance_buffer_pool_bytes":maintenance,"resident_buffer_pool_bytes":ordinary.unwrap_or(0)+maintenance.unwrap_or(0),"waiters":s.waiters,"opens":s.opens,"evictions":s.evictions})
 }
 
 pub fn evict_below(root: &Path) {
@@ -178,4 +207,33 @@ pub fn evict_below(root: &Path) {
         s.evictions += 1;
     }
     pool().changed.notify_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_buffer_budget_has_explicit_bounds_and_keeps_the_default() {
+        assert_eq!(parse_buffer_bytes(None).unwrap(), BUFFER_BYTES);
+        for bytes in [
+            64 * 1024 * 1024,
+            4 * 1024 * 1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+        ] {
+            assert_eq!(parse_buffer_bytes(Some(&bytes.to_string())).unwrap(), bytes);
+        }
+        for text in [
+            "0",
+            "1",
+            "-1",
+            "four GiB",
+            "17179869185",
+            "18446744073709551616",
+        ] {
+            assert_eq!(
+                parse_buffer_bytes(Some(text)).unwrap_err().code(),
+                "GraphMemoryBudget"
+            );
+        }
+    }
 }

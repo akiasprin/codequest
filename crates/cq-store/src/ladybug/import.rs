@@ -464,6 +464,15 @@ mod tests {
         assert!(!p.import_stats().complete);
         assert!(p.physical_counts().unwrap()["links"].as_u64().unwrap() > 0);
         assert!(p.physical_counts().unwrap()["links"].as_u64().unwrap() < links as u64);
+        // Reopen the durable partial database rather than replaying against
+        // the same live connection; publication recovery must survive restart.
+        drop(p);
+        let p = Projection::open(&t.path().join("native.lbdb"), false).unwrap();
+        assert_eq!(
+            p.buffer_bytes,
+            super::super::residency::buffer_bytes().unwrap()
+        );
+        assert!(!p.receipt(&r).unwrap());
         p.import(&o, &r).unwrap();
         assert!(p.receipt(&r).unwrap());
         let counts = p.physical_counts().unwrap();
