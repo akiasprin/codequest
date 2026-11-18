@@ -11,6 +11,15 @@ pub trait Store: Source {
     fn progress_workers(&self, project: &str, completed: u64, total: u64, _workers: usize) {
         self.progress(project, completed, total);
     }
+    fn progress_pipeline(
+        &self,
+        project: &str,
+        completed: u64,
+        total: u64,
+        pipeline: &crate::progress::Pipeline,
+    ) {
+        self.progress_workers(project, completed, total, pipeline.workers);
+    }
     fn put(&self, header: &SemanticSnapshot, record: Record, replace: bool) -> Result<()>;
     fn put_batch(
         &self,

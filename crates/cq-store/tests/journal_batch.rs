@@ -74,7 +74,15 @@ fn batch_chunks_have_correct_offsets_and_progress_reports_worker_count() {
     .unwrap();
     assert_eq!(count, records.len());
     j.progress_workers(&s.project, 0, 12, 4);
-    j.progress_workers(&s.project, 12, 12, 4);
+    j.progress_pipeline(
+        &s.project,
+        12,
+        12,
+        &cq_core::progress::Pipeline {
+            workers: 4,
+            ..Default::default()
+        },
+    );
     let p: serde_json::Value = serde_json::from_slice(
         &std::fs::read(cq_core::progress::path(t.path(), &s.project)).unwrap(),
     )
@@ -82,4 +90,6 @@ fn batch_chunks_have_correct_offsets_and_progress_reports_worker_count() {
     assert_eq!(p["workers"], 4);
     assert_eq!(p["completed"], 12);
     assert_eq!(p["total"], 12);
+    assert_eq!(p["pipeline"]["active"], 0);
+    assert_eq!(p["pipeline"]["ready"], 0);
 }

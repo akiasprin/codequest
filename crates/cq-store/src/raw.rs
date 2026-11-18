@@ -136,6 +136,26 @@ impl Store for Journal {
     fn put(&self, header: &SemanticSnapshot, r: Record, replace: bool) -> Result<()> {
         self.put_batch(header, vec![r], replace)
     }
+    fn progress_pipeline(
+        &self,
+        project: &str,
+        completed: u64,
+        total: u64,
+        pipeline: &cq_core::progress::Pipeline,
+    ) {
+        let mut p = self.progress.lock().unwrap();
+        let p = p.get_or_insert_with(|| {
+            cq_core::progress::Progress::stage(
+                &self.root,
+                project,
+                "normalize",
+                "还原符号与引用",
+                Some(total),
+                "文件",
+            )
+        });
+        p.pipeline(completed, pipeline);
+    }
     fn put_batch(
         &self,
         header: &SemanticSnapshot,

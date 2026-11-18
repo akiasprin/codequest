@@ -7,6 +7,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Task states, not sampled CPU utilization. These counters are telemetry only.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Pipeline {
+    pub workers: usize,
+    pub active: usize,
+    pub planning: usize,
+    pub preparing: usize,
+    pub waiting_admission: usize,
+    pub queued: usize,
+    pub ready: usize,
+    pub merging: usize,
+    pub inflight_bytes: u64,
+    pub budget_bytes: u64,
+}
+
 pub fn path(store: &Path, project: &str) -> PathBuf {
     store
         .join("progress")
@@ -83,6 +98,11 @@ impl Progress {
             self.persist();
         }
     }
+    pub fn pipeline(&mut self, completed: u64, pipeline: &Pipeline) {
+        self.value["workers"] = json!(pipeline.workers);
+        self.value["pipeline"] = json!(pipeline);
+        self.count(completed);
+    }
     pub fn detail(
         &mut self,
         phase: &str,
@@ -144,5 +164,20 @@ pub fn format(value: &Value, elapsed_secs: u64, tick: usize) -> String {
             format!("已完成 {done} {unit}，总量统计中"),
         )
     };
-    format!("{label} [{bar}] {count} | {elapsed_secs}s | {workers} workers")
+    let detail = value
+        .get("pipeline")
+        .filter(|p| p.is_object())
+        .map(|p| {
+            format!(
+                " | 活跃 {}（规划 {} / 还原 {}）待领取 {} 待准入 {} 待合并 {}",
+                p["active"],
+                p["planning"],
+                p["preparing"],
+                p["queued"],
+                p["waiting_admission"],
+                p["ready"]
+            )
+        })
+        .unwrap_or_default();
+    format!("{label} [{bar}] {count} | {elapsed_secs}s | {workers} workers{detail}")
 }

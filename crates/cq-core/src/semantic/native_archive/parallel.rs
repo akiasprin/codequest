@@ -2,7 +2,10 @@
 //! source metadata and records are committed in provider order by one owner.
 use super::*;
 use crate::semantic::native_batch::{self, Catalogue, FrameOutput, FrameSources};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::{
+    sync::{Condvar, Mutex, mpsc},
+    time::Duration,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct Config {
@@ -40,10 +43,23 @@ impl Config {
     }
 }
 
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum Stage {
+    Planning,
+    Waiting,
+    Preparing,
+    Ready,
+    Merging,
+}
 #[derive(Default)]
 struct Usage {
     bytes: u64,
     tasks: usize,
+    next_issue: usize,
+    next_admit: usize,
+    completed: u64,
+    stages: [usize; 5],
     cancelled: bool,
 }
 struct Budget {
@@ -53,45 +69,114 @@ struct Budget {
     tasks: usize,
 }
 impl Budget {
-    fn reserve(&self, bytes: u64) -> Option<Permit<'_>> {
+    fn claim(&self, total: usize) -> Option<Permit<'_>> {
         let mut state = self.state.lock().unwrap();
-        // A frame bigger than the estimate budget runs alone. This is a bound
-        // on estimated frame working sets, not a process RSS or fact-size cap.
-        while !state.cancelled
-            && (state.tasks >= self.tasks
-                || (state.tasks != 0 && bytes > self.bytes.saturating_sub(state.bytes)))
-        {
+        while !state.cancelled && state.next_issue < total && state.tasks >= self.tasks {
             state = self.changed.wait(state).unwrap();
         }
-        if state.cancelled {
+        if state.cancelled || state.next_issue == total {
             return None;
         }
+        let index = state.next_issue;
+        state.next_issue += 1;
         state.tasks += 1;
-        state.bytes = state.bytes.saturating_add(bytes);
+        state.stages[Stage::Planning as usize] += 1;
         Some(Permit {
             budget: self,
-            bytes,
+            index,
+            bytes: 0,
+            stage: Stage::Planning,
+            released: false,
         })
     }
     fn cancel(&self) {
         self.state.lock().unwrap().cancelled = true;
         self.changed.notify_all();
     }
-    fn cancelled(&self) -> bool {
-        self.state.lock().unwrap().cancelled
+    fn report(&self, project: &str, total: usize, workers: usize, sink: &dyn Store) {
+        let (completed, pipeline) = {
+            let s = self.state.lock().unwrap();
+            (
+                s.completed,
+                crate::progress::Pipeline {
+                    workers,
+                    active: s.stages[0] + s.stages[2],
+                    planning: s.stages[0],
+                    preparing: s.stages[2],
+                    waiting_admission: s.stages[1],
+                    queued: total - s.next_issue,
+                    ready: s.stages[3],
+                    merging: s.stages[4],
+                    inflight_bytes: s.bytes,
+                    budget_bytes: self.bytes,
+                },
+            )
+        };
+        sink.progress_pipeline(project, completed, total as u64, &pipeline);
     }
 }
 struct Permit<'a> {
     budget: &'a Budget,
+    index: usize,
     bytes: u64,
+    stage: Stage,
+    released: bool,
 }
-type FrameResult<'a> = (usize, Result<FrameOutput>, Option<Permit<'a>>);
+type FrameResult<'a> = (usize, Result<FrameOutput>, Permit<'a>);
+impl Permit<'_> {
+    fn admit(&mut self, bytes: u64) -> bool {
+        let mut s = self.budget.state.lock().unwrap();
+        s.stages[self.stage as usize] -= 1;
+        self.stage = Stage::Waiting;
+        s.stages[self.stage as usize] += 1;
+        // Plans finish out of order, but payload reservations must follow file
+        // order. Otherwise later results can fill the budget and prevent the
+        // earliest outstanding frame from ever being admitted or merged.
+        while !s.cancelled
+            && (self.index != s.next_admit
+                || (s.bytes != 0 && bytes > self.budget.bytes.saturating_sub(s.bytes)))
+        {
+            s = self.budget.changed.wait(s).unwrap();
+        }
+        if s.cancelled {
+            return false;
+        }
+        s.bytes += bytes;
+        self.bytes = bytes;
+        s.next_admit += 1;
+        s.stages[self.stage as usize] -= 1;
+        self.stage = Stage::Preparing;
+        s.stages[self.stage as usize] += 1;
+        self.budget.changed.notify_all();
+        true
+    }
+    fn transition(&mut self, stage: Stage) {
+        let mut s = self.budget.state.lock().unwrap();
+        s.stages[self.stage as usize] -= 1;
+        self.stage = stage;
+        s.stages[self.stage as usize] += 1;
+    }
+    fn release(&mut self, complete: bool) {
+        if self.released {
+            return;
+        }
+        let mut s = self.budget.state.lock().unwrap();
+        s.tasks -= 1;
+        s.bytes -= self.bytes;
+        s.stages[self.stage as usize] -= 1;
+        if complete {
+            s.completed += 1;
+        }
+        self.released = true;
+        self.budget.changed.notify_all();
+    }
+    fn complete(mut self) {
+        self.release(true);
+    }
+}
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        let mut state = self.budget.state.lock().unwrap();
-        state.tasks -= 1;
-        state.bytes -= self.bytes;
-        self.budget.changed.notify_all();
+        self.release(false);
     }
 }
 struct Cancel<'a>(&'a Budget);
@@ -102,13 +187,8 @@ impl Drop for Cancel<'_> {
 }
 
 impl Archive {
-    fn frame_estimate(&self, selected: &Value) -> u64 {
-        let bytes = selected
-            .as_object()
-            .into_iter()
-            .flat_map(|m| m.values())
-            .filter_map(Value::as_array)
-            .flatten()
+    fn frame_estimate<'a>(&self, rows: impl Iterator<Item = &'a Value>) -> u64 {
+        let bytes = rows
             .filter_map(|v| v["__cq_row"].as_u64())
             .filter_map(|i| self.rows.get(i as usize))
             .fold(0u64, |n, row| n.saturating_add(row.bytes));
@@ -155,57 +235,42 @@ pub(super) fn normalize(
     let mut first = true;
     let mut gaps = HashSet::new();
     sink.progress_workers(&s.project, 0, files.len() as u64, workers);
+    let project = s.project.clone();
+    budget.report(&project, files.len(), workers, sink);
     let result = std::thread::scope(|scope| -> Result<()> {
-        // Drop before scope joins, including early sink errors: no producer or
-        // worker may wait forever for a reservation held by the reorder queue.
         let _cancel = Cancel(&budget);
-        let (jobs_tx, jobs_rx) = mpsc::channel();
-        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
         let (results_tx, results_rx) = mpsc::channel::<FrameResult<'_>>();
-        let dispatch_results = results_tx.clone();
-        let budget_ref = &budget;
-        let files_ref = &files;
-        let catalogue_ref = &catalogue;
-        scope.spawn(move || {
-            for (index, file) in files_ref.iter().copied().enumerate() {
-                if budget_ref.cancelled() {
-                    break;
-                }
-                let selected = match catalogue_ref.frame(file) {
-                    Ok(frame) => frame,
-                    Err(e) => {
-                        let _ = dispatch_results.send((index, Err(e), None));
-                        break;
-                    }
-                };
-                let Some(permit) = budget_ref.reserve(archive.frame_estimate(&selected)) else {
-                    break;
-                };
-                if jobs_tx.send((index, file, selected, permit)).is_err() {
-                    break;
-                }
-            }
-        });
         for _ in 0..workers {
-            let jobs_rx = Arc::clone(&jobs_rx);
             let tx = results_tx.clone();
             let template = &template;
-            let sources = &initial_sources;
+            let source_state = &initial_sources;
+            let budget = &budget;
+            let files = &files;
+            let catalogue = &catalogue;
             scope.spawn(move || {
-                loop {
-                    let job = jobs_rx.lock().unwrap().recv();
-                    let Ok((index, file, selected, permit)) = job else {
-                        break;
-                    };
-                    if budget_ref.cancelled() {
-                        break;
-                    }
+                while let Some(mut permit) = budget.claim(files.len()) {
+                    let index = permit.index;
                     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let frame = archive.hydrate(selected)?;
+                        // Expensive closure discovery is worker work. Only row
+                        // numbers are retained until ordered memory admission.
+                        let plan = catalogue.plan(files[index])?;
+                        if !permit.admit(archive.frame_estimate(catalogue.plan_rows(&plan))) {
+                            return Ok(None);
+                        }
+                        let frame =
+                            catalogue.render_with(&plan, |row| archive.hydrate_row_ref(row))?;
                         native_batch::prepare_frame(
-                            template, &frame, mapping, content, provider, language, version, file,
-                            sources,
+                            template,
+                            &frame,
+                            mapping,
+                            content,
+                            provider,
+                            language,
+                            version,
+                            files[index],
+                            source_state,
                         )
+                        .map(Some)
                     }))
                     .unwrap_or_else(|_| {
                         Err(Error::new(
@@ -213,7 +278,13 @@ pub(super) fn normalize(
                             "source frame worker panicked",
                         ))
                     });
-                    if tx.send((index, output, Some(permit))).is_err() {
+                    let output = match output {
+                        Ok(None) => break,
+                        Ok(Some(output)) => Ok(output),
+                        Err(e) => Err(e),
+                    };
+                    permit.transition(Stage::Ready);
+                    if tx.send((index, output, permit)).is_err() {
                         break;
                     }
                 }
@@ -223,19 +294,29 @@ pub(super) fn normalize(
         let mut pending = BTreeMap::new();
         let mut next = 0;
         while next < files.len() {
-            let (index, result, permit) = results_rx.recv().map_err(|_| {
-                Error::new(
-                    "NormalizationWorkerStopped",
-                    "source frame results incomplete",
-                )
-            })?;
-            pending.insert(index, (result, permit));
-            while let Some((result, _permit)) = pending.remove(&next) {
+            match results_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok((index, result, permit)) => {
+                    pending.insert(index, (result, permit));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    budget.report(&project, files.len(), workers, sink);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::new(
+                        "NormalizationWorkerStopped",
+                        "source frame results incomplete",
+                    ));
+                }
+            }
+            while let Some((result, mut permit)) = pending.remove(&next) {
+                permit.transition(Stage::Merging);
                 let output = result?;
                 peak = peak.max(output.peak);
                 native_batch::merge_frame(s, output, sink, &mut first, &mut gaps, &mut sources)?;
+                permit.complete();
                 next += 1;
-                sink.progress_workers(&s.project, next as u64, files.len() as u64, workers);
+                budget.report(&project, files.len(), workers, sink);
             }
         }
         Ok(())

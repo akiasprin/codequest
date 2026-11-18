@@ -248,6 +248,9 @@ impl Archive {
         Ok(serde_json::from_slice(&b)?)
     }
     fn hydrate_row(&self, v: Value) -> Result<Value> {
+        self.hydrate_row_ref(&v)
+    }
+    fn hydrate_row_ref(&self, v: &Value) -> Result<Value> {
         if let Some(index) = v["__cq_row"].as_u64() {
             let mut actual = self.row(index as usize)?;
             if v.get("call_index").is_some() {
@@ -255,21 +258,7 @@ impl Archive {
             }
             return Ok(actual);
         }
-        Ok(v)
-    }
-    fn hydrate(&self, mut v: Value) -> Result<Value> {
-        // Coordinates belong only to top-level array rows. Provider-owned
-        // nested JSON must never be interpreted as archive control data.
-        if let Some(m) = v.as_object_mut() {
-            for value in m.values_mut() {
-                if let Some(a) = value.as_array_mut() {
-                    for row in a {
-                        *row = self.hydrate_row(std::mem::take(row))?;
-                    }
-                }
-            }
-        }
-        Ok(v)
+        Ok(v.clone())
     }
     pub fn header(&self) -> Result<Value> {
         let mut value = self

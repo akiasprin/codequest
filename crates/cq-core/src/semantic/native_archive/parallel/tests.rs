@@ -47,6 +47,7 @@ impl ContentRepository for Content {
 struct Sink {
     records: Mutex<Vec<Record>>,
     fail: bool,
+    progress: Mutex<Vec<(u64, u64, crate::progress::Pipeline)>>,
 }
 impl Source for Sink {
     fn get(&self, family: &str, id: &str) -> Result<Option<Record>> {
@@ -66,6 +67,18 @@ impl Source for Sink {
     }
 }
 impl Store for Sink {
+    fn progress_pipeline(
+        &self,
+        _: &str,
+        completed: u64,
+        total: u64,
+        pipeline: &crate::progress::Pipeline,
+    ) {
+        self.progress
+            .lock()
+            .unwrap()
+            .push((completed, total, pipeline.clone()));
+    }
     fn put(&self, _: &SemanticSnapshot, record: Record, _: bool) -> Result<()> {
         if self.fail {
             return Err(Error::new("InjectedSinkFailure", "test"));
@@ -152,11 +165,34 @@ fn parallel_frames_preserve_serial_record_order_sources_and_metadata() {
         if workers > 1 {
             assert!(content.peak.load(Ordering::SeqCst) > 1);
         }
+        let samples = sink.progress.lock().unwrap();
+        for (done, total, p) in samples.iter() {
+            assert_eq!(p.active, p.planning + p.preparing);
+            assert!(p.active <= p.workers);
+            assert_eq!(
+                *done
+                    + (p.queued
+                        + p.planning
+                        + p.preparing
+                        + p.waiting_admission
+                        + p.ready
+                        + p.merging) as u64,
+                *total
+            );
+        }
+        let (done, total, p) = samples.last().unwrap();
+        assert_eq!(done, total);
+        assert_eq!(
+            p.active + p.waiting_admission + p.ready + p.queued + p.merging,
+            0
+        );
+        assert_eq!(p.inflight_bytes, 0);
     }
 }
 #[test]
 fn oversized_estimated_frame_runs_alone_without_deadlock() {
     let content = Content::default();
+    let sink = Sink::default();
     normalize(
         &archive(),
         &mut SemanticSnapshot::empty("budget".into(), NativeValue::from("/repo")),
@@ -165,7 +201,7 @@ fn oversized_estimated_frame_runs_alone_without_deadlock() {
         "test",
         Language::Rust,
         "1",
-        &Sink::default(),
+        &sink,
         Config {
             workers: 4,
             inflight_bytes: 1,
@@ -173,6 +209,63 @@ fn oversized_estimated_frame_runs_alone_without_deadlock() {
     )
     .unwrap();
     assert_eq!(content.peak.load(Ordering::SeqCst), 1);
+    for (_, _, p) in sink.progress.lock().unwrap().iter() {
+        assert!(p.preparing + p.ready + p.merging <= 1);
+    }
+}
+
+#[test]
+fn later_plans_cannot_reserve_ahead_of_the_earliest_unadmitted_file() {
+    let budget = Budget {
+        state: Mutex::new(Usage::default()),
+        changed: Condvar::new(),
+        bytes: 8,
+        tasks: 4,
+    };
+    let mut first = budget.claim(2).unwrap();
+    let mut later = budget.claim(2).unwrap();
+    std::thread::scope(|scope| {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        scope.spawn(move || {
+            started_tx.send(()).unwrap();
+            assert!(later.admit(8));
+            tx.send(()).unwrap();
+            later.complete();
+        });
+        started_rx.recv().unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert!(first.admit(8));
+        assert!(rx.try_recv().is_err());
+        first.complete();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    });
+    let s = budget.state.lock().unwrap();
+    assert_eq!((s.completed, s.bytes, s.tasks), (2, 0, 0));
+    assert_eq!(s.stages, [0; 5]);
+}
+
+#[test]
+fn cancellation_releases_unadmitted_plans_and_wakes_ordered_waiters() {
+    let budget = Budget {
+        state: Mutex::new(Usage::default()),
+        changed: Condvar::new(),
+        bytes: 8,
+        tasks: 4,
+    };
+    let first = budget.claim(2).unwrap();
+    let mut later = budget.claim(2).unwrap();
+    std::thread::scope(|scope| {
+        let budget = &budget;
+        scope.spawn(move || {
+            assert!(!later.admit(8));
+        });
+        budget.cancel();
+    });
+    drop(first);
+    let s = budget.state.lock().unwrap();
+    assert_eq!((s.bytes, s.tasks), (0, 0));
+    assert_eq!(s.stages, [0; 5]);
 }
 #[test]
 fn sink_failure_and_worker_panic_cancel_backpressured_workers() {

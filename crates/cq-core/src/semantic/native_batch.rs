@@ -217,6 +217,11 @@ impl<'a> FrameSources<'a> {
     }
 }
 type Span = (u64, u64, u64);
+/// Planning retains row numbers only. JSON payloads are materialized after
+/// ordered memory admission, not while other source plans are still running.
+pub(super) struct FramePlan {
+    rows: BTreeMap<&'static str, Vec<usize>>,
+}
 /// Built once per native export; indexes contain row offsets and identities,
 /// never another copy of provider payloads.
 pub(super) struct Catalogue<'a> {
@@ -308,16 +313,47 @@ impl<'a> Catalogue<'a> {
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
-    fn selected_rows(&self, name: &str, indices: impl IntoIterator<Item = usize>) -> Value {
-        let indices = indices.into_iter().collect::<BTreeSet<_>>();
-        json!(
-            indices
-                .into_iter()
-                .map(|i| &rows(self.raw, name)[i])
-                .collect::<Vec<_>>()
-        )
-    }
     pub fn frame(&self, file: Option<u64>) -> Result<Value> {
+        self.render_with(&self.plan(file)?, |row| Ok(row.clone()))
+    }
+    pub fn plan_rows<'b>(&'b self, plan: &'b FramePlan) -> impl Iterator<Item = &'b Value> {
+        plan.rows
+            .iter()
+            .flat_map(move |(name, indices)| indices.iter().map(move |i| &rows(self.raw, name)[*i]))
+    }
+    pub fn render_with(
+        &self,
+        plan: &FramePlan,
+        mut hydrate: impl FnMut(&Value) -> Result<Value>,
+    ) -> Result<Value> {
+        let mut frame = self
+            .raw
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, v)| !v.is_array())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        let calls = &plan.rows["calls"];
+        for (name, indices) in &plan.rows {
+            let mut values = Vec::with_capacity(indices.len());
+            for i in indices {
+                let mut row = hydrate(&rows(self.raw, name)[*i])?;
+                if *name == "references"
+                    && let Some(old) = row["call_index"].as_u64()
+                {
+                    row["call_index"] = calls
+                        .binary_search(&(old as usize))
+                        .ok()
+                        .map_or(Value::Null, |i| json!(i));
+                }
+                values.push(row);
+            }
+            frame.insert((*name).into(), Value::Array(values));
+        }
+        Ok(Value::Object(frame))
+    }
+    pub fn plan(&self, file: Option<u64>) -> Result<FramePlan> {
         use std::collections::VecDeque;
         let raw = self.raw;
         let mut selected = BTreeSet::<u64>::new();
@@ -401,18 +437,24 @@ impl<'a> Catalogue<'a> {
                 }
             }
         }
-        let mut frame = raw
-            .as_object()
-            .unwrap()
-            .iter()
-            .filter(|(_, v)| !v.is_array())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<serde_json::Map<_, _>>();
-        frame.insert(
-            "symbols".into(),
-            self.selected_rows(
-                "symbols",
-                selected.iter().filter_map(|t| self.tokens.get(t)).copied(),
+        let sorted = |indices: Vec<usize>| {
+            indices
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let mut plan = FramePlan {
+            rows: BTreeMap::new(),
+        };
+        plan.rows.insert(
+            "symbols",
+            sorted(
+                selected
+                    .iter()
+                    .filter_map(|t| self.tokens.get(t))
+                    .copied()
+                    .collect(),
             ),
         );
         let mut calls = self
@@ -425,28 +467,8 @@ impl<'a> Catalogue<'a> {
                 calls.insert(c as usize);
             }
         }
-        let remap = calls
-            .iter()
-            .enumerate()
-            .map(|(new, old)| (*old, new))
-            .collect::<BTreeMap<_, _>>();
-        frame.insert("calls".into(), self.selected_rows("calls", calls));
-        frame.insert(
-            "references".into(),
-            json!(
-                references
-                    .iter()
-                    .map(|i| {
-                        let mut r = rows(raw, "references")[*i].clone();
-                        if let Some(old) = r["call_index"].as_u64() {
-                            r["call_index"] =
-                                remap.get(&(old as usize)).map_or(Value::Null, |i| json!(i));
-                        }
-                        r
-                    })
-                    .collect::<Vec<_>>()
-            ),
-        );
+        plan.rows.insert("calls", calls.into_iter().collect());
+        plan.rows.insert("references", references.to_vec());
         for name in [
             "relations",
             "doc_links",
@@ -455,16 +477,13 @@ impl<'a> Catalogue<'a> {
             "scoped_documentation",
             "lexical_parents",
         ] {
-            frame.insert(
-                name.into(),
-                self.selected_rows(name, self.file_indices(name, file).iter().copied()),
-            );
+            plan.rows
+                .insert(name, self.file_indices(name, file).to_vec());
         }
         for name in ["parents", "nominal_members"] {
-            frame.insert(
-                name.into(),
-                self.selected_rows(
-                    name,
+            plan.rows.insert(
+                name,
+                sorted(
                     selected
                         .iter()
                         .flat_map(|t| self.child_indices(name, *t).iter().copied())
@@ -473,36 +492,47 @@ impl<'a> Catalogue<'a> {
                                 || rows(raw, name)[*i]["owner"]
                                     .as_u64()
                                     .is_some_and(|t| selected.contains(&t))
-                        }),
+                        })
+                        .collect(),
                 ),
             );
         }
-        frame.insert(
-            "parameters".into(),
-            self.selected_rows(
-                "parameters",
+        plan.rows.insert(
+            "parameters",
+            sorted(
                 selected
                     .iter()
                     .filter_map(|t| self.tokens.get(t))
                     .filter_map(|i| span(&rows(raw, "symbols")[*i]["definition"]))
-                    .flat_map(|p| self.parameters.get(&p).into_iter().flatten().copied()),
+                    .flat_map(|p| self.parameters.get(&p).into_iter().flatten().copied())
+                    .collect(),
             ),
         );
         let mut used = BTreeSet::new();
-        for v in frame.values() {
+        for (_, v) in raw
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, v)| !v.is_array())
+        {
             file_refs(v, &mut used);
+        }
+        for row in self.plan_rows(&plan) {
+            file_refs(row, &mut used);
         }
         if let Some(f) = file {
             used.insert(f);
         }
-        frame.insert(
-            "files".into(),
-            self.selected_rows(
-                "files",
-                used.iter().filter_map(|f| self.file_rows.get(f)).copied(),
+        plan.rows.insert(
+            "files",
+            sorted(
+                used.iter()
+                    .filter_map(|f| self.file_rows.get(f))
+                    .copied()
+                    .collect(),
             ),
         );
-        Ok(Value::Object(frame))
+        Ok(plan)
     }
 }
 #[allow(clippy::too_many_arguments)]
