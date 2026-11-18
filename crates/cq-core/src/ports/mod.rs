@@ -44,6 +44,11 @@ pub trait ContentReader: Send + Sync {
 }
 pub trait ContentRepository: ContentReader {
     fn freeze(&self, path: &Path, origin: &str, budget: u64) -> Result<FileRevision>;
+    /// Native producer output has its own cumulative reservation, separate from
+    /// the source bytes that the producer analyzed.
+    fn freeze_evidence(&self, path: &Path, origin: &str, budget: u64) -> Result<FileRevision> {
+        self.freeze(path, origin, budget)
+    }
     fn put(&self, bytes: &[u8], budget: u64) -> Result<BlobId>;
 }
 pub trait CaptureReportRepository {

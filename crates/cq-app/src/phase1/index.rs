@@ -9,6 +9,8 @@ use std::{
 pub struct IndexRequest {
     #[serde(default)]
     pub capture_run: Option<String>,
+    #[serde(default)]
+    pub reuse_hir: bool,
     pub root: PathBuf,
     pub name: String,
     pub language: String,
@@ -43,6 +45,7 @@ impl IndexRequest {
         }
         Ok(Self {
             capture_run: o.text("--capture-run"),
+            reuse_hir: o.yes("--reuse-hir"),
             root,
             name,
             language: o.text("--language").unwrap_or_else(|| "auto".into()),
@@ -258,6 +261,7 @@ fn rust(
             root: request.root.clone(),
             build_args: request.build_args.clone(),
             capture_run: request.capture_run.clone(),
+            reuse_hir: request.reuse_hir,
             provider,
             recorder,
             allow_partial: request.allow_partial,

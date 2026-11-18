@@ -12,6 +12,19 @@ pub fn path(store: &Path, project: &str) -> PathBuf {
         .join("progress")
         .join(format!("{}.json", digest(project.as_bytes())))
 }
+pub fn finish(store: &Path, project: &str, state: &str) {
+    let p = path(store, project);
+    if let Ok(bytes) = std::fs::read(&p)
+        && let Ok(mut value) = serde_json::from_slice::<Value>(&bytes)
+    {
+        value["state"] = json!(state);
+        value["updated_ms"] = json!(cq_capture_protocol::now_ms());
+        let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(tmp, p);
+        }
+    }
+}
 pub struct Progress {
     path: PathBuf,
     value: Value,

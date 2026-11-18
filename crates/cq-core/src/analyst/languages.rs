@@ -100,7 +100,7 @@ pub(super) fn consume(
     let version = raw["version"].as_str().unwrap_or("native-v1");
     let blob = store
         .content()
-        .freeze(output, "native_export_evidence", 1024 * 1024 * 1024)?
+        .freeze_evidence(output, "native_export_evidence", 1024 * 1024 * 1024)?
         .blob;
     s.providers.push(ProviderRecord {
         analysis: None,

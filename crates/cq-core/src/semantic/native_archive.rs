@@ -184,6 +184,24 @@ impl<'de> Visitor<'de> for Top<'_> {
     }
 }
 impl Archive {
+    pub fn validate_reuse_paths(&self, root: &Path, mapping: &[MaterializedInput]) -> Result<()> {
+        let paths = mapping
+            .iter()
+            .map(|m| m.path.as_str())
+            .collect::<HashSet<_>>();
+        for f in self.metadata["files"].as_array().into_iter().flatten() {
+            if let Some(path) = f["path"].as_str()
+                && Path::new(path).starts_with(root)
+                && !paths.contains(path)
+            {
+                return Err(Error::new(
+                    "NativeReplayBindingMismatch",
+                    format!("retained HIR path is outside the captured input map: {path}"),
+                ));
+            }
+        }
+        Ok(())
+    }
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_with_progress(path, None)
     }

@@ -8,6 +8,7 @@ pub struct RustAnalysisRequest {
     pub root: PathBuf,
     pub build_args: Vec<String>,
     pub capture_run: Option<String>,
+    pub reuse_hir: bool,
     pub provider: PathBuf,
     pub recorder: PathBuf,
 }
@@ -25,6 +26,12 @@ pub fn analyze(
     control: &CaptureControl,
     snapshot: &mut SemanticSnapshot,
 ) -> Result<()> {
+    if request.reuse_hir && request.capture_run.is_none() {
+        return Err(Error::new(
+            "MissingCaptureRun",
+            "--reuse-hir requires the original --capture-run",
+        ));
+    }
     let mut progress = crate::progress::Progress::stage(
         workspace.directory(),
         &snapshot.project,
@@ -226,14 +233,28 @@ pub fn analyze(
     let output = workspace
         .run_directory(&report.run.id)?
         .join("hir-export.json");
-    super::session::export_tracked(
-        &worker,
-        &view.root,
-        &output,
-        control,
-        workspace.directory(),
-        &snapshot.project,
-    )?;
+    if request.reuse_hir {
+        if !output.is_file()
+            || !output
+                .with_extension("hir-shards")
+                .join("timings.json")
+                .is_file()
+        {
+            return Err(Error::new(
+                "IncompleteNativeExport",
+                "retained HIR export and completed shard manifest are required; do not reuse a partial export",
+            ));
+        }
+    } else {
+        super::session::export_tracked(
+            &worker,
+            &view.root,
+            &output,
+            control,
+            workspace.directory(),
+            &snapshot.project,
+        )?;
+    }
     progress.detail("archive", "解析 HIR 导出", 0, None, "字节", 1);
     let metadata = std::fs::metadata(&output)?;
     let export_limit = crate::semantic::native_archive::export_limit()?;
@@ -289,9 +310,33 @@ pub fn analyze(
         raw["base_commit"].as_str().unwrap_or("unknown"),
         patch
     );
+    let worker_digest = digest(&std::fs::read(&worker)?);
+    if request.reuse_hir {
+        let build_path=[worker.with_file_name("rust-hir-build.json"),worker.parent().and_then(Path::parent).unwrap_or(Path::new(".")).join("built.json")]
+            .into_iter().find(|p|p.is_file()).ok_or_else(||Error::new("MissingProducerIdentity","retained HIR replay requires rust-hir-build.json alongside the producer or its built.json"))?;
+        let build: Value = serde_json::from_slice(&std::fs::read(build_path)?)?;
+        if build["binary_digest"] != worker_digest
+            || build["patch_digest"] != patch
+            || build["commit"] != raw["base_commit"]
+        {
+            return Err(Error::new(
+                "NativeReplayBindingMismatch",
+                "retained export does not match the installed producer identity",
+            ));
+        }
+        archive
+            .as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    "StreamingReplayRequired",
+                    "retained HIR replay requires a record sink",
+                )
+            })?
+            .validate_reuse_paths(&view.root, &view.mapping)?;
+    }
     let blob = workspace
         .content()
-        .freeze(&output, "native_export_evidence", export_limit)?
+        .freeze_evidence(&output, "native_export_evidence", export_limit)?
         .blob;
     snapshot.providers.push(ProviderRecord {
         analysis: raw
@@ -299,10 +344,15 @@ pub fn analyze(
             .cloned()
             .map(serde_json::from_value)
             .transpose()?,
-        reused_from: None,
+        reused_from: request.reuse_hir.then(|| {
+            format!(
+                "capture:{};retained_native_export:{};source_bytes_revalidated",
+                report.run.id, blob.digest
+            )
+        }),
         name: "rust-analyzer-hir".into(),
         version: version.clone(),
-        binary_digest: digest(&std::fs::read(worker)?),
+        binary_digest: worker_digest,
         input_digest: view.digest,
         protocol: format!("codequest-hir-export/v1; raw={}", blob.digest),
     });

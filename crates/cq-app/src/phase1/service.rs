@@ -47,6 +47,10 @@ impl Service {
             Err(Error::PublicationInProgress { project, revision }) => Ok(
                 json!({"state":"publication_in_progress","project":project,"revision":revision,"continue_with":{"operation":"publication_status","revision":revision}}),
             ),
+            Err(error) => {
+                cq_core::progress::finish(&self.store.root, &request.name, "failed");
+                Err(error)
+            }
             other => other,
         }
     }

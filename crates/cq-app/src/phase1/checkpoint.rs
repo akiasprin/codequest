@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, path::PathBuf, process::Command};
 fn fingerprint(r: &IndexRequest) -> Result<String> {
     let mut request = r.clone();
     request.capture_run = None;
+    request.reuse_hir = false;
     let mut tools = BTreeMap::new();
     tools.insert(
         "codequest".to_owned(),
@@ -100,6 +101,7 @@ fn fingerprint(r: &IndexRequest) -> Result<String> {
 pub fn saved_request(store: &cq_store::LocalStore, r: &IndexRequest) -> Result<serde_json::Value> {
     let mut saved = r.clone();
     saved.capture_run = None;
+    saved.reuse_hir = false;
     if saved.build_args.is_empty()
         && let Some(run) = &r.capture_run
     {

@@ -45,6 +45,7 @@ impl Options {
             }
             if [
                 "--no-docs",
+                "--reuse-hir",
                 "--allow-partial",
                 "--regex",
                 "--include-candidates",

@@ -14,6 +14,7 @@ use std::{
 pub struct BlobStore {
     root: PathBuf,
     usage: Mutex<Usage>,
+    evidence_usage: Mutex<Usage>,
 }
 
 #[derive(Default)]
@@ -48,6 +49,7 @@ impl BlobStore {
         Self {
             root,
             usage: Mutex::new(Usage::default()),
+            evidence_usage: Mutex::new(Usage::default()),
         }
     }
     /// A separate accounting scope over the same immutable content address space.
@@ -98,7 +100,13 @@ impl ContentRepository for BlobStore {
             return Ok(id);
         }
         if id.len > budget.saturating_sub(usage.bytes) {
-            return Err(Error::new("ContentLimit", "fixed content budget exceeded"));
+            return Err(Error::new(
+                "ContentLimit",
+                format!(
+                    "source content budget exceeded: used={} requested={} limit={} bytes; blob={}",
+                    usage.bytes, id.len, budget, id.digest
+                ),
+            ));
         }
         if path.exists() {
             self.verify(&id)?;
@@ -110,6 +118,27 @@ impl ContentRepository for BlobStore {
         Ok(id)
     }
     fn freeze(&self, path: &Path, origin: &str, budget: u64) -> Result<FileRevision> {
+        self.freeze_into(path, origin, budget, &self.usage, "source")
+    }
+    fn freeze_evidence(&self, path: &Path, origin: &str, budget: u64) -> Result<FileRevision> {
+        self.freeze_into(
+            path,
+            origin,
+            budget,
+            &self.evidence_usage,
+            "native_evidence",
+        )
+    }
+}
+impl BlobStore {
+    fn freeze_into(
+        &self,
+        path: &Path,
+        origin: &str,
+        budget: u64,
+        account: &Mutex<Usage>,
+        category: &str,
+    ) -> Result<FileRevision> {
         use sha2::{Digest, Sha256};
         use std::io::Write;
         std::fs::create_dir_all(&self.root)?;
@@ -125,7 +154,13 @@ impl ContentRepository for BlobStore {
             }
             total += n as u64;
             if total > budget {
-                return Err(Error::new("ContentLimit", path.display().to_string()));
+                return Err(Error::new(
+                    "ContentLimit",
+                    format!(
+                        "{category} file budget exceeded: path={} read={total} limit={budget} bytes",
+                        path.display()
+                    ),
+                ));
             }
             hash.update(&block[..n]);
             tmp.write_all(&block[..n])?;
@@ -136,12 +171,19 @@ impl ContentRepository for BlobStore {
             len: total,
         };
         let target = self.path(&blob)?;
-        let mut usage = self.usage.lock().unwrap();
+        let mut usage = account.lock().unwrap();
         if usage.seen.contains(&blob.digest) {
             self.verify(&blob)?;
         } else {
             if total > budget.saturating_sub(usage.bytes) {
-                return Err(Error::new("ContentLimit", "fixed content budget exceeded"));
+                return Err(Error::new(
+                    "ContentLimit",
+                    format!(
+                        "{category} content budget exceeded: used={} requested={total} limit={budget} bytes; path={}",
+                        usage.bytes,
+                        path.display()
+                    ),
+                ));
             }
             if target.exists() {
                 self.verify(&blob)?;
@@ -184,5 +226,28 @@ mod tests {
         assert!(inputs.put(b"def", 4).is_err());
         assert_eq!(inputs.read_blob(&first).unwrap(), b"abc");
         assert_eq!(output.read_blob(&first).unwrap(), b"abc");
+    }
+    #[test]
+    fn native_export_larger_than_source_budget_does_not_poison_source_normalization() {
+        let t = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(t.path().join("blobs"));
+        store.put(b"abc", 4).unwrap();
+        let export = t.path().join("hir.json");
+        std::fs::write(&export, b"native-output").unwrap();
+        let evidence = store
+            .freeze_evidence(&export, "native_export_evidence", 16)
+            .unwrap();
+        store.put(b"d", 4).unwrap();
+        assert_eq!(store.read_blob(&evidence.blob).unwrap(), b"native-output");
+        let error = store.put(b"e", 4).unwrap_err();
+        assert_eq!(error.code(), "ContentLimit");
+        assert!(error.message().contains("used=4 requested=1 limit=4"));
+        let other = t.path().join("other.json");
+        std::fs::write(&other, b"more").unwrap();
+        let error = store
+            .freeze_evidence(&other, "native_export_evidence", 16)
+            .unwrap_err();
+        assert!(error.message().contains("native_evidence"));
+        assert!(error.message().contains("used=13 requested=4 limit=16"));
     }
 }
