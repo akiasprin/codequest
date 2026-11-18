@@ -156,6 +156,16 @@ impl Permit<'_> {
         self.stage = stage;
         s.stages[self.stage as usize] += 1;
     }
+    fn ready(&mut self, retained_bytes: u64) {
+        let mut s = self.budget.state.lock().unwrap();
+        let retained = retained_bytes.min(self.bytes);
+        s.bytes -= self.bytes - retained;
+        self.bytes = retained;
+        s.stages[self.stage as usize] -= 1;
+        self.stage = Stage::Ready;
+        s.stages[self.stage as usize] += 1;
+        self.budget.changed.notify_all();
+    }
     fn release(&mut self, complete: bool) {
         if self.released {
             return;
@@ -184,6 +194,21 @@ impl Drop for Cancel<'_> {
     fn drop(&mut self) {
         self.0.cancel();
     }
+}
+fn metadata_estimate(snapshot: &SemanticSnapshot) -> Result<u64> {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, snapshot)?;
+    Ok(count.0.saturating_mul(4).max(1024 * 1024))
 }
 
 impl Archive {
@@ -276,7 +301,9 @@ pub(super) fn normalize(
                         // Downstream consumers read the journal after all
                         // workers join and enumerate canonical record keys.
                         crate::semantic::records::drain(&mut output.fragment, sink)?;
-                        Ok(Some(output))
+                        drop(frame);
+                        let retained = metadata_estimate(&output.fragment)?;
+                        Ok(Some((output, retained)))
                     }))
                     .unwrap_or_else(|_| {
                         Err(Error::new(
@@ -284,12 +311,15 @@ pub(super) fn normalize(
                             "source frame worker panicked",
                         ))
                     });
-                    let output = match output {
+                    let (output, retained) = match output {
                         Ok(None) => break,
-                        Ok(Some(output)) => Ok(output),
-                        Err(e) => Err(e),
+                        Ok(Some((output, retained))) => (Ok(output), retained),
+                        Err(e) => (Err(e), 0),
                     };
-                    permit.transition(Stage::Ready);
+                    // Payloads have been persisted and dropped. Keep only the
+                    // metadata estimate until the ordered coordinator merges
+                    // it; the task-window bound remains in force independently.
+                    permit.ready(retained);
                     if tx.send((index, output, permit)).is_err() {
                         break;
                     }

@@ -198,6 +198,32 @@ fn parallel_frames_preserve_serial_facts_sources_and_metadata() {
     }
 }
 #[test]
+fn drained_payload_releases_budget_while_metadata_keeps_its_task_slot() {
+    let budget = Budget {
+        state: Mutex::new(Usage::default()),
+        changed: Condvar::new(),
+        bytes: 10,
+        tasks: 4,
+    };
+    let mut first = budget.claim(2).unwrap();
+    let mut next = budget.claim(2).unwrap();
+    assert!(first.admit(8));
+    first.ready(1);
+    {
+        let state = budget.state.lock().unwrap();
+        assert_eq!(state.bytes, 1);
+        assert_eq!(state.tasks, 2);
+        assert_eq!(state.completed, 0);
+        assert_eq!(state.stages[Stage::Ready as usize], 1);
+    }
+    assert!(next.admit(8));
+    assert_eq!(budget.state.lock().unwrap().bytes, 9);
+    first.complete();
+    next.complete();
+    let state = budget.state.lock().unwrap();
+    assert_eq!((state.bytes, state.tasks, state.completed), (0, 0, 2));
+}
+#[test]
 fn oversized_estimated_frame_runs_alone_without_deadlock() {
     let content = Content::default();
     let sink = Sink::default();
