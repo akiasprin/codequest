@@ -17,8 +17,40 @@ use std::collections::{BTreeMap, BTreeSet};
 const PAGE_BYTES: u64 = 16 * 1024 * 1024;
 const FACT_BYTES: u64 = 32 * 1024 * 1024;
 const FACT_ROWS: usize = 16 * 1024;
+fn query_timeout_ms() -> Result<u64> {
+    let value = std::env::var("CQ_LADYBUG_IMPORT_QUERY_TIMEOUT_MS")
+        .map(Some)
+        .or_else(|e| match e {
+            std::env::VarError::NotPresent => Ok(None),
+            _ => Err(cq_core::Error::new(
+                "GraphImportBudget",
+                "timeout is not UTF-8",
+            )),
+        })?;
+    parse_query_timeout(value.as_deref())
+}
+fn parse_query_timeout(value: Option<&str>) -> Result<u64> {
+    let ms = value
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| {
+            cq_core::Error::new(
+                "GraphImportBudget",
+                "CQ_LADYBUG_IMPORT_QUERY_TIMEOUT_MS must be milliseconds",
+            )
+        })?
+        .unwrap_or(300_000);
+    if !(1..=86_400_000).contains(&ms) {
+        return Err(cq_core::Error::new(
+            "GraphImportBudget",
+            "import query timeout must be 1..86400000 milliseconds",
+        ));
+    }
+    Ok(ms)
+}
 #[derive(Clone, Default, Serialize)]
 pub struct ImportStats {
+    pub query_timeout_ms: u64,
     pub inventory_pages: usize,
     pub inventory_facts: usize,
     pub payload_pages_decoded: usize,
@@ -36,12 +68,13 @@ pub struct ImportStats {
     pub complete: bool,
 }
 fn transaction<T>(c: &Connection<'_>, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    c.query("BEGIN TRANSACTION").map_err(err)?;
+    c.query("BEGIN TRANSACTION")
+        .map_err(|e| err(format!("native BEGIN: {e}")))?;
     match f() {
         Ok(v) => {
             if let Err(e) = c.query("COMMIT") {
                 let _ = c.query("ROLLBACK");
-                return Err(err(e));
+                return Err(err(format!("native COMMIT: {e}")));
             }
             Ok(v)
         }
@@ -136,21 +169,21 @@ impl Batch {
                     "UNWIND {} AS id MERGE (:Slot {{id:id}})",
                     serde_json::to_string(&self.slots)?
                 ))
-                .map_err(err)?;
+                .map_err(|e| err(format!("native Slot MERGE: {e}")))?;
             }
             c.query(&format!(
                 "COPY Fact FROM {} (HEADER=true,PARALLEL={})",
                 quote(self.dir.path().join("facts.csv").to_str().unwrap()),
                 self.parallel_facts
             ))
-            .map_err(err)?;
+            .map_err(|e| err(format!("native COPY Fact: {e}")))?;
             if self.edges > 0 {
                 c.query(&format!(
                     "COPY LINK FROM {} (HEADER=true,PARALLEL={})",
                     quote(self.dir.path().join("links.csv").to_str().unwrap()),
                     self.parallel_links
                 ))
-                .map_err(err)?;
+                .map_err(|e| err(format!("native COPY LINK: {e}")))?;
             }
             Ok(())
         })?;
@@ -181,6 +214,7 @@ impl Projection {
     ) -> Result<u64> {
         let _write = self.import_lock.lock().unwrap();
         let mut stats = ImportStats {
+            query_timeout_ms: query_timeout_ms()?,
             page_batch_budget_bytes: PAGE_BYTES,
             fact_batch_budget_bytes: FACT_BYTES,
             fact_batch_row_limit: FACT_ROWS,
@@ -194,6 +228,9 @@ impl Projection {
                 return Ok(0);
             }
             let c = self.connection()?;
+            // Maintenance writes and checkpoints have their own finite budget.
+            // Interactive reads retain their independent 10-second default.
+            c.set_query_timeout(stats.query_timeout_ms);
             let incremental = r
                 .parent
                 .as_ref()
@@ -412,6 +449,40 @@ mod tests {
     use cq_core::Error;
     use serde_json::json;
     #[test]
+    fn maintenance_query_timeout_is_finite_configurable_and_separate_from_reads() {
+        assert_eq!(parse_query_timeout(None).unwrap(), 300_000);
+        for ms in [1, 10_000, 300_000, 86_400_000] {
+            assert_eq!(parse_query_timeout(Some(&ms.to_string())).unwrap(), ms);
+        }
+        for value in ["0", "-1", "86400001", "forever", "18446744073709551616"] {
+            assert_eq!(
+                parse_query_timeout(Some(value)).unwrap_err().code(),
+                "GraphImportBudget"
+            );
+        }
+    }
+    #[test]
+    fn native_interruption_budget_can_recover_on_a_new_maintenance_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Projection::open(&dir.path().join("timeout.lbdb"), true).unwrap();
+        let sql = "UNWIND range(0,10000000) AS n RETURN sum(n)";
+        let interrupted = p.connection().unwrap();
+        interrupted.set_query_timeout(1);
+        assert!(
+            interrupted
+                .query(sql)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Interrupted")
+        );
+        drop(interrupted);
+        let maintenance = p.connection().unwrap();
+        maintenance.set_query_timeout(query_timeout_ms().unwrap());
+        let rows: Vec<_> = maintenance.query(sql).unwrap().collect();
+        assert_eq!(rows[0][0], lbug::Value::Int128(50_000_005_000_000));
+    }
+    #[test]
     fn interrupted_native_batches_have_no_receipt_and_replay_without_duplicate_edges() {
         let t = tempfile::tempdir().unwrap();
         let o = Objects::buffered(t.path().join("objects")).unwrap();
@@ -480,6 +551,7 @@ mod tests {
         assert_eq!(counts["links"], links as u64);
         assert_eq!(counts["receipts"], 1);
         let stats = p.import_stats();
+        assert_eq!(stats.query_timeout_ms, query_timeout_ms().unwrap());
         assert_eq!(stats.pages, 0);
         assert!(stats.payload_pages_decoded <= stats.inventory_pages);
         assert_eq!(stats.facts_by_family.values().sum::<u64>(), stats.facts);
