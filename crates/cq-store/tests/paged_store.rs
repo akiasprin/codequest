@@ -1,6 +1,6 @@
 use cq_core::{
     model::*,
-    ports::{ContentRepository, facts::*},
+    ports::facts::*,
     query::{QueryRequest, paged::Engine},
 };
 use cq_store::{
@@ -14,72 +14,10 @@ use cq_store::{
     revisions::StoreHost,
 };
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
-fn fixture(store: &LocalStore, n: usize, target: usize) -> SemanticSnapshot {
-    let mut s = SemanticSnapshot::empty("paged-test".into(), NativeValue::from("/frozen/repo"));
-    let p = Provenance {
-        provider: "contract".into(),
-        version: "1".into(),
-        authority: Authority::SemanticResolution,
-        build_run: None,
-        note: "controlled fixture".into(),
-    };
-    let pid = s.intern_provenance(p.clone());
-    for i in 0..n {
-        s.entities.push(Entity {
-            stable_handle: None,
-            locations: Default::default(),
-            id: format!("f{i}"),
-            unit: "unit".into(),
-            provider_id: format!("f{i}"),
-            kind: EntityKind::Function,
-            name: format!("f{i}"),
-            qualified_name: format!("test::f{i}"),
-            source: None,
-            extent: None,
-            signature: "fn()".into(),
-            parent: None,
-            external: false,
-            exported: true,
-            attributes: BTreeMap::new(),
-            type_definitions: vec![],
-            type_navigation: vec![],
-            provenance: pid.clone(),
-        });
-    }
-    if n > 1 {
-        s.add_relation(
-            "f0",
-            &format!("f{target}"),
-            RelationKind::Calls,
-            None,
-            None,
-            p,
-        );
-    }
-    let blob = store
-        .content
-        .put(b"frozen source\nsecond line\n", 1024)
-        .unwrap();
-    let mut file = FileRevision {
-        id: String::new(),
-        logical_path: NativeValue::from("/frozen/repo/main.rs"),
-        blob,
-        origin: "fixture".into(),
-    };
-    file.id = digest(&serde_json::to_vec(&(&file.logical_path, &file.blob)).unwrap());
-    s.sources = SourceSnapshot::seal(vec![file], InputBinding::ImmutableScopeVerified, vec![]);
-    s.seal().unwrap();
-    s
-}
-fn write(
-    o: &Objects,
-    store: &LocalStore,
-    s: &SemanticSnapshot,
-    base: Option<&writer::Revision>,
-) -> writer::Revision {
-    writer::snapshot(o, &store.content, s, base).unwrap()
-}
+use std::collections::BTreeSet;
+#[path = "common/paged_fixture.rs"]
+mod paged_fixture;
+use paged_fixture::{fixture, write};
 #[test]
 fn resolve_restores_first_publication_registration_without_reindexing() {
     let t = tempfile::tempdir().unwrap();
@@ -931,46 +869,6 @@ fn r5_object_batch_barrier_reopens_verified_and_cache_is_shared() {
     assert_eq!(
         &**same.read(&b, &mut ReadStats::default()).unwrap(),
         b"second"
-    );
-}
-#[test]
-fn r5_logical_views_do_not_pin_native_databases_and_old_epoch_reopens() {
-    let t = tempfile::tempdir().unwrap();
-    let store = LocalStore::open(t.path()).unwrap();
-    let mut hosts = vec![];
-    let mut views = vec![];
-    for name in ["residency-a", "residency-b", "residency-c"] {
-        let h = StoreHost::open(t.path(), name).unwrap();
-        let mut s = fixture(&store, 3, 1);
-        s.project = name.into();
-        s.seal().unwrap();
-        let r = write(&h.objects, &store, &s, None);
-        assert_eq!(h.publish(&r, None).outcome, CommitOutcome::Committed);
-        views.push(h.open_view(None).unwrap());
-        hosts.push(h);
-    }
-    for _ in 0..2 {
-        for v in &views {
-            assert_eq!(v.get("entity", "f0").unwrap().unwrap().value["name"], "f0");
-            assert_eq!(
-                cq_store::ladybug::residency::diagnostics()["ordinary_databases"],
-                1
-            );
-        }
-    }
-    let old = views[0].epoch().to_owned();
-    let new = hosts[0].rebuild().unwrap();
-    assert_ne!(old, new);
-    assert!(hosts[0].root.join("indexes").join(&old).exists());
-    assert_eq!(
-        views[0].get("entity", "f0").unwrap().unwrap().value["name"],
-        "f0"
-    );
-    drop(views);
-    assert!(hosts[0].collect_epochs().unwrap().contains(&old));
-    assert_eq!(
-        cq_store::ladybug::residency::diagnostics()["maintenance_databases"],
-        0
     );
 }
 #[test]

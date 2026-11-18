@@ -81,10 +81,33 @@ pub fn group(kind: &str, subject: &str) -> String {
 /// Index keys describe objective symbols, owners, and references. No inferred
 /// responsibility grouping is used to remove facts or decide reachability.
 pub fn groups(family: &str, value: &Value) -> Vec<String> {
+    groups_indexed(family, value, true)
+}
+pub fn groups_indexed(family: &str, value: &Value, indexed: bool) -> Vec<String> {
     let mut out = vec![format!("all:{family}")];
     let s = |k: &str| value[k].as_str().unwrap_or("");
     match family {
         "entity" => {
+            for term in crate::query::search::tokenize(&format!(
+                "{} {} {} {}",
+                s("name"),
+                s("qualified_name"),
+                s("signature"),
+                value["attributes"]["search_text"].as_str().unwrap_or("")
+            ))
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            {
+                out.push(group("search_term", &term));
+            }
+            for gram in
+                crate::query::search::grams(&format!("{} {}", s("name"), s("qualified_name")))
+            {
+                out.push(group("search_gram", &gram));
+            }
+            for key in [s("name"), s("qualified_name")] {
+                out.push(group("lookup_folded", &key.to_lowercase()));
+            }
             if value["external"] == false {
                 out.push("internal:entity".into());
             }
@@ -139,12 +162,39 @@ pub fn groups(family: &str, value: &Value) -> Vec<String> {
         "build_dependencies" => {
             out.push(group("build_dependency", s("consumer")));
         }
-        "document" if !s("owner").is_empty() => {
-            out.push(group("document", s("owner")));
+        "document" => {
+            if !s("owner").is_empty() {
+                out.push(group("document", s("owner")));
+            }
+            for gram in crate::query::search::grams(&format!("{} {}", s("title"), s("text"))) {
+                out.push(group("document_gram", &gram));
+            }
+        }
+        "entity_vector" => {
+            for bucket in value["buckets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                out.push(group("vector_bucket", bucket));
+            }
         }
         _ => {}
     }
     out.sort();
     out.dedup();
+    if !indexed {
+        out.retain(|g| {
+            ![
+                "search_term:",
+                "search_gram:",
+                "lookup_folded:",
+                "document_gram:",
+            ]
+            .iter()
+            .any(|prefix| g.starts_with(prefix))
+        });
+    }
     out
 }

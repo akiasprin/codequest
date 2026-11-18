@@ -1,6 +1,10 @@
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(
+        "PublicationInProgress: {project} revision {revision}: publication continues in StoreHost"
+    )]
+    PublicationInProgress { project: String, revision: String },
     #[error("CommitUnknown: revision {revision}: {message}")]
     CommitUnknown { revision: String, message: String },
     #[error("{code}: {message}")]
@@ -15,6 +19,7 @@ pub enum Error {
 impl Error {
     pub fn code(&self) -> &str {
         match self {
+            Self::PublicationInProgress { .. } => "PublicationInProgress",
             Self::CommitUnknown { .. } => "CommitUnknown",
             Self::Domain { code, .. } => code,
             Self::Remote { code, .. } => code,

@@ -15,6 +15,12 @@ use std::{
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     #[serde(default)]
+    ranking_after: Option<(f64, String)>,
+    #[serde(default)]
+    rank_more: bool,
+    #[serde(default)]
+    query_vector: Option<Vec<f32>>,
+    #[serde(default)]
     code: Option<CodeScan>,
     #[serde(default)]
     at: Option<(String, u64)>,
@@ -52,6 +58,32 @@ struct Step {
     reported: bool,
     after: Option<String>,
     direction: usize,
+}
+const RANK_WINDOW: usize = 1000;
+fn rank_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    b["score"]
+        .as_f64()
+        .unwrap_or(0.)
+        .total_cmp(&a["score"].as_f64().unwrap_or(0.))
+        .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+}
+fn retain_ranked(state: &mut State, value: Value) {
+    if let Some((score, id)) = &state.ranking_after {
+        let s = value["score"].as_f64().unwrap_or(0.);
+        if s > *score || s == *score && value["id"].as_str().unwrap_or("") <= id.as_str() {
+            return;
+        }
+    }
+    match state.ranked.binary_search_by(|a| rank_order(a, &value)) {
+        Ok(_) => {}
+        Err(at) => {
+            state.ranked.insert(at, value);
+            if state.ranked.len() > RANK_WINDOW {
+                state.ranked.pop();
+                state.rank_more = true;
+            }
+        }
+    }
 }
 pub struct Engine<'a> {
     pub reader: &'a dyn FactReader,
@@ -275,6 +307,55 @@ impl<'a> Engine<'a> {
         })
     }
     fn entity_groups(&self, q: &QueryRequest) -> Result<Vec<String>> {
+        if self.reader.metadata()["search_index"]["version"] == 1 {
+            if q.operation == "semantic" && !q.regex {
+                let index = search::SearchIndex::with_model(&[], self.model.clone());
+                if self.reader.metadata()["search_index"]["vector_model"] == index.model_name() {
+                    return Ok(if q.exact_semantic {
+                        vec!["all:entity_vector".into()]
+                    } else {
+                        search::vector_buckets(&index.prepare_vector(&search::tokenize(&q.text)))
+                            .into_iter()
+                            .map(|b| group("vector_bucket", &b))
+                            .collect()
+                    });
+                }
+                return Err(Error::new(
+                    "VectorIndexModelMismatch",
+                    "query model differs from the frozen vector index; configure its original model",
+                ));
+            }
+            if q.operation == "search" && !q.text.is_empty() {
+                if q.regex {
+                    if let Some(name) = search::literal_regex(&q.text) {
+                        return Ok(vec![group("lookup_folded", &name.to_lowercase())]);
+                    }
+                } else {
+                    if search::grams(&q.text).is_empty() {
+                        return Ok(vec![
+                            if q.include_external {
+                                "all:entity"
+                            } else {
+                                "internal:entity"
+                            }
+                            .into(),
+                        ]);
+                    }
+                    let mut groups = search::tokenize(&q.text)
+                        .into_iter()
+                        .map(|t| group("search_term", &t))
+                        .collect::<Vec<_>>();
+                    if let Some(gram) = search::grams(&q.text).into_iter().next() {
+                        groups.push(group("search_gram", &gram));
+                    }
+                    groups.sort();
+                    groups.dedup();
+                    if !groups.is_empty() {
+                        return Ok(groups);
+                    }
+                }
+            }
+        }
         if let Some(path) = &q.file {
             let mut after = None;
             let mut result = vec![];
@@ -481,7 +562,26 @@ impl<'a> Engine<'a> {
                         vec![group("document", &e.id)]
                     }
                 } else {
-                    vec!["all:document".into()]
+                    if q.operation == "doc_search"
+                        && self.reader.metadata()["search_index"]["version"] == 1
+                    {
+                        let mut chosen = None;
+                        for gram in search::grams(&q.text) {
+                            let g = group("document_gram", &gram);
+                            let n = self.reader.count(&g)?;
+                            if chosen.as_ref().is_none_or(|(_, best)| n < *best) {
+                                chosen = Some((g, n));
+                            }
+                            if n == 0 {
+                                break;
+                            }
+                        }
+                        chosen
+                            .map(|(g, _)| vec![g])
+                            .unwrap_or_else(|| vec!["all:document".into()])
+                    } else {
+                        vec!["all:document".into()]
+                    }
                 }
             }
             "bodies" => vec![group("body", &self.subject(q)?.id)],
@@ -590,6 +690,9 @@ impl<'a> Engine<'a> {
             let one = search::SearchIndex::with_model(std::slice::from_ref(e), self.model.clone());
             return Ok(one.semantic(0, &q.text) * 2. + bm * 0.1);
         }
+        if q.operation == "semantic_lexical" {
+            return Ok(bm);
+        }
         Ok(bm
             + if e.name.eq_ignore_ascii_case(&q.text) {
                 20.
@@ -624,6 +727,10 @@ impl<'a> Engine<'a> {
                 if !self.selected(&e, q, ctx)? || !self.allowed(&e.provenance, q)? {
                     return Ok(None);
                 }
+                if ["search", "semantic", "entrypoints"].contains(&q.operation.as_str()) {
+                    let score = self.score(&e, q)?;
+                    return Ok((score > 0.).then(|| json!({"id":e.id,"score":score})));
+                }
                 let mut value = self.summary(&e)?;
                 if q.operation == "members" {
                     let owner = self.subject(q)?;
@@ -648,14 +755,6 @@ impl<'a> Engine<'a> {
                     return Ok(None);
                 }
 
-                if ["search", "semantic", "entrypoints"].contains(&q.operation.as_str()) {
-                    let score = self.score(&e, q)?;
-                    if score <= 0. {
-                        return Ok(None);
-                    }
-                    value["score"] = json!(score);
-                    value["entity_ref"] = json!(e.id);
-                }
                 Ok(Some(value))
             }
             "callers" | "callees" | "implementations" | "relations" => {
@@ -1088,7 +1187,20 @@ impl<'a> Engine<'a> {
                     "query cancelled; no partial cursor published",
                 ));
             }
-            if let Some(v) = state.pending.pop_front() {
+            if let Some(mut v) = state.pending.pop_front() {
+                if ranked && state.ranking_done && v.get("qualified_name").is_none() {
+                    let id = v["id"]
+                        .as_str()
+                        .ok_or_else(|| Error::new("InvalidCursor", "rank identity"))?
+                        .to_owned();
+                    let score = v["score"].as_f64().unwrap_or(0.);
+                    let e = self
+                        .entity(&id)?
+                        .ok_or_else(|| Error::new("MissingEntity", &id))?;
+                    v = self.summary(&e)?;
+                    v["score"] = json!(score);
+                    v["entity_ref"] = json!(id);
+                }
                 let size = serde_json::to_vec(&v)?.len();
                 if size > q.max_bytes && items.is_empty() {
                     state.pending.push_front(v);
@@ -1102,14 +1214,34 @@ impl<'a> Engine<'a> {
                     break;
                 }
                 if state.skip > 0 {
+                    if ranked {
+                        state.ranking_after = Some((
+                            v["score"].as_f64().unwrap_or(0.),
+                            v["id"].as_str().unwrap_or("").into(),
+                        ));
+                    }
                     state.skip -= 1;
                     continue;
                 }
                 bytes += size;
+                if ranked {
+                    state.ranking_after = Some((
+                        v["score"].as_f64().unwrap_or(0.),
+                        v["id"].as_str().unwrap_or("").into(),
+                    ));
+                }
                 items.push(v);
                 continue;
             }
             if state.exhausted {
+                if ranked && state.rank_more {
+                    state.exhausted = false;
+                    state.rank_more = false;
+                    state.ranking_done = false;
+                    state.group_index = 0;
+                    state.after = None;
+                    continue;
+                }
                 break;
             }
             if is_walk {
@@ -1163,6 +1295,39 @@ impl<'a> Engine<'a> {
             }
             if let Some(row) = state.input.pop_front() {
                 work += 1;
+                if row.key.starts_with("entity_vector:") && q.operation == "semantic" {
+                    let e: Entity = serde_json::from_value(row.value["entity"].clone())?;
+                    if !self.selected(&e, q, ctx.as_ref())? || !self.allowed(&e.provenance, q)? {
+                        continue;
+                    }
+                    let index = search::SearchIndex::with_model(&[], self.model.clone());
+                    if row.value["model"] != index.model_name() {
+                        return Err(Error::new(
+                            "VectorIndexModelMismatch",
+                            "reindex with the configured token model",
+                        ));
+                    }
+                    let query = state
+                        .query_vector
+                        .get_or_insert_with(|| index.prepare_vector(&search::tokenize(&q.text)));
+                    let vector: Vec<f32> = serde_json::from_value(row.value["vector"].clone())?;
+                    if vector.len() != query.len() {
+                        return Err(Error::new("IndexIncomplete", "vector dimensions"));
+                    }
+                    let similarity = vector
+                        .iter()
+                        .zip(query.iter())
+                        .map(|(a, b)| (*a * *b) as f64)
+                        .sum::<f64>()
+                        .max(0.);
+                    let mut lexical = q.clone();
+                    lexical.operation = "semantic_lexical".into();
+                    let score = similarity * 2. + self.score(&e, &lexical)? * 0.1;
+                    if score > 0. {
+                        retain_ranked(&mut state, json!({"id":e.id,"score":score}));
+                    }
+                    continue;
+                }
                 if ["references", "occurrences"].contains(&q.operation.as_str())
                     && !state.visited.insert(row.key.clone())
                 {
@@ -1241,14 +1406,14 @@ impl<'a> Engine<'a> {
                     }
 
                     if ranked {
-                        state.ranked.push(v);
+                        retain_ranked(&mut state, v);
                     } else {
                         state.pending.push_back(v);
                     }
                 }
             }
         }
-        let complete = state.exhausted && state.pending.is_empty();
+        let complete = state.exhausted && state.pending.is_empty() && !state.rank_more;
         let mut hidden = vec![];
         if !complete {
             hidden.push(HiddenGroup {
@@ -1335,6 +1500,12 @@ impl<'a> Engine<'a> {
             .map(|r| serde_json::from_value(r.value).map_err(Into::into))
             .collect::<Result<_>>()?;
         gaps.extend(state.extra_gaps.clone());
+        if q.operation == "semantic"
+            && !q.exact_semantic
+            && state.groups.iter().any(|g| g.starts_with("vector_bucket:"))
+        {
+            gaps.push(Gap::new("ApproximateVectorCandidates",self.reader.revision(),"LSH candidate retrieval; exact_semantic=true scans the frozen vectors with bounded resumable ranking"));
+        }
         let knowledge_partial = self.reader.metadata()["production"]["partial"] == true;
         if knowledge_partial {
             gaps.push(Gap::new("IncompleteKnowledge",self.reader.project(),"partial compilation coverage: an exhausted query does not establish absence in unavailable scopes"));

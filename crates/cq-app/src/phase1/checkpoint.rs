@@ -11,7 +11,13 @@ fn fingerprint(r: &IndexRequest) -> Result<String> {
     let mut tools = BTreeMap::new();
     tools.insert(
         "codequest".to_owned(),
-        digest(&std::fs::read(std::env::current_exe()?)?),
+        // On Linux an atomic binary upgrade unlinks the running executable's
+        // path. /proc/self/exe still opens the exact image that did this work.
+        digest(&std::fs::read(if cfg!(target_os = "linux") {
+            PathBuf::from("/proc/self/exe")
+        } else {
+            std::env::current_exe()?
+        })?),
     );
     let language = if r.language == "auto" {
         if r.root.join("Cargo.toml").exists() {

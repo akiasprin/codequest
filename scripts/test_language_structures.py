@@ -44,6 +44,57 @@ class NativeFixture(unittest.TestCase):
         return matches
 
 
+class RustShardBoundaries(unittest.TestCase):
+    """More than one export shard, with native identities shared across crates."""
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix="cq-rust-shards-")
+        cls.addClassCleanup(cls.temp.cleanup)
+        root = Path(cls.temp.name)
+        (root / "api/src").mkdir(parents=True)
+        (root / "app/src").mkdir(parents=True)
+        (root / "Cargo.toml").write_text('[workspace]\nmembers=["api","app"]\nresolver="2"\n')
+        (root / "api/Cargo.toml").write_text('[package]\nname="shard-api"\nversion="0.1.0"\nedition="2021"\n')
+        (root / "api/src/lib.rs").write_text('pub trait Execute { fn execute(&self)->u32; }\npub fn terminal()->u32 { 42 }\n')
+        (root / "app/Cargo.toml").write_text('[package]\nname="shard-app"\nversion="0.1.0"\nedition="2021"\n[dependencies]\nshard-api={path="../api"}\n')
+        declarations = ''.join(f'pub mod m{i:02};\n' for i in range(40))
+        (root / "app/src/lib.rs").write_text(declarations+'pub fn entry()->u32 { m00::stage_00() + m00::Worker.step() }\n')
+        for i in range(40):
+            target = f'crate::m{i+1:02}::stage_{i+1:02}()' if i < 39 else 'shard_api::terminal()'
+            text = f'pub fn stage_{i:02}()->u32 {{ {target} }}\n'
+            if i == 0:
+                text += 'pub struct Worker;\n'
+            if i == 35:
+                text += 'impl crate::m00::Worker { pub fn step(&self)->u32 { shard_api::terminal() } }\nimpl shard_api::Execute for crate::m00::Worker { fn execute(&self)->u32 { self.step() } }\n'
+            (root / f'app/src/m{i:02}.rs').write_text(text)
+        cls.project = NativeProject(ARGS.cq, root, ARGS.output / "rust-shards", "rust-shards",
+            language="rust", build_args=["check", "--workspace", "--offline"])
+        cls.addClassCleanup(cls.project.close)
+
+    def test_all_forty_cross_file_calls_and_cross_crate_terminal_resolve(self):
+        target = self.project.one("terminal", kind="Function")
+        for i in reversed(range(40)):
+            caller = self.project.one(f"stage_{i:02}", kind="Function")
+            self.assertIn(target["id"], {r["entity"]["id"] for r in self.project.calls(caller)}, i)
+            target = caller
+
+    def test_nominal_owner_and_trait_impl_cross_shards(self):
+        worker = self.project.one("Worker", kind="Struct")
+        members = self.project.query("members", subject=worker["id"])
+        self.assertTrue({"step", "execute"}.issubset({r["name"] for r in members}), members)
+        trait = self.project.one("Execute", kind="Trait")
+        self.assertIn(worker["id"], {r["entity"]["id"] for r in self.project.query("implementations", subject=trait["id"])})
+
+    def test_raw_export_remaps_tokens_and_preserves_all_source_shards(self):
+        raw = self.project.native_exports()[0]
+        self.assertGreaterEqual(len(raw["shards"]), 3)
+        self.assertTrue(all(s["source_files"] <= 32 for s in raw["shards"]))
+        symbols = {s["token"]: s for s in raw["symbols"]}
+        self.assertTrue(raw["references"])
+        self.assertTrue(all(r["target"] in symbols for r in raw["references"]))
+        self.assertEqual(sum(s["name"] == "terminal" for s in symbols.values()), 1)
+
+
 class RustStructures(NativeFixture):
     fixture, language = "structures-rust", "rust"
 
@@ -396,7 +447,7 @@ class UpstreamGoWorkspace(NativeFixture):
 
 if __name__ == "__main__":
     suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(c)
-        for language,c in [("rust",RustStructures),("go",GoStructures),("cpp",CppStructures),("go",UpstreamGoWorkspace)]
+        for language,c in [("rust",RustStructures),("rust",RustShardBoundaries),("go",GoStructures),("cpp",CppStructures),("go",UpstreamGoWorkspace)]
         if not ARGS.only or language in ARGS.only)
     result = unittest.TextTestRunner(verbosity=2, resultclass=EvidenceResult).run(suite)
     (ARGS.output / "results.json").write_text(json.dumps({"tests": result.testsRun,

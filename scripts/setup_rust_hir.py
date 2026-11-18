@@ -56,6 +56,9 @@ patch=subprocess.check_output(['git','-C',str(source),'diff','--','crates/ide/sr
 digest=hashlib.sha256(overlay+patch).hexdigest();env=os.environ.copy();env.update(CARGO_TARGET_DIR=str(build),CQ_PRODUCER_PATCH_SHA=digest,CARGO_BUILD_JOBS='4',RUSTUP_TOOLCHAIN=lock['rust_toolchain'])
 if args.fetch: subprocess.run(['cargo','fetch','--locked'],cwd=source,env=env,check=True)
 subprocess.run(['cargo','build','--release','-p','rust-analyzer','--offline'],cwd=source,env=env,check=True)
-binary=tools/'bin/cq-rust-hir';binary.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(build/'release/rust-analyzer',binary)
+binary=tools/'bin/cq-rust-hir';binary.parent.mkdir(parents=True,exist_ok=True)
+# Replace the executable atomically: an existing HIR session may still run the
+# previous inode while the next session starts the newly built producer.
+temporary=binary.with_name(binary.name+'.new');shutil.copy2(build/'release/rust-analyzer',temporary);temporary.replace(binary)
 (tools/'built.json').write_text(json.dumps({**lock,'patch_digest':digest,'binary_digest':hashlib.sha256(binary.read_bytes()).hexdigest()},indent=2)+'\n')
 print(binary)

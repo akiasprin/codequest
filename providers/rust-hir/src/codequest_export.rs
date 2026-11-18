@@ -51,6 +51,7 @@ pub fn run() -> anyhow::Result<()> {
         &host,
         &vfs,
         json!({"database_reused":false,"changed_files":0,"workspace_reloaded":true}),
+        None,
     )
 }
 
@@ -60,15 +61,216 @@ fn emit(
     host: &AnalysisHost,
     vfs: &vfs::Vfs,
     incremental: Value,
+    progress: Option<&Value>,
 ) -> anyhow::Result<()> {
+    use std::collections::{BTreeMap, HashMap};
+    use std::io::Write;
     let analysis = host.analysis();
     let workspace = vfs::VfsPath::from(vfs::AbsPathBuf::assert_utf8(root.to_path_buf()));
-    let index = StaticIndex::compute_graph(
+    let files = StaticIndex::graph_source_files(
         &analysis,
         VendoredLibrariesConfig::Included {
             workspace_root: &workspace,
         },
     );
+    let input: Value = serde_json::from_slice(&std::fs::read(root.join("input-map.json"))?)?;
+    let owners: HashMap<_, _> = input
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            Some((
+                v["path"].as_str()?.to_owned(),
+                v["unit"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    let mut groups = BTreeMap::<String, Vec<FileId>>::new();
+    for file in files {
+        let path = vfs.file_path(file).to_string();
+        groups
+            .entry(
+                owners
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or_else(|| "native-source-root".into()),
+            )
+            .or_default()
+            .push(file);
+    }
+    let dir = output.with_extension("hir-shards");
+    std::fs::create_dir_all(&dir)?;
+    let mut parts = vec![];
+    let mut timings = vec![];
+    for (unit, files) in groups {
+        for chunk in files.chunks(32) {
+            let index = parts.len();
+            let path = dir.join(format!("{index:06}.json"));
+            let started = std::time::Instant::now();
+            emit_part(root, &path, host, vfs, incremental.clone(), chunk)?;
+            let item = json!({"unit":unit,"shard":index,"source_files":chunk.len(),"elapsed_ms":started.elapsed().as_millis()as u64,"bytes":std::fs::metadata(&path)?.len(),"path":path});
+            if let Some(id) = progress {
+                println!(
+                    "{}",
+                    json!({"protocol":"codequest-session","version":1,"id":id,"state":"progress","phase":"crate_export","shard":item})
+                );
+                std::io::stdout().flush()?;
+            }
+            timings.push(item);
+            parts.push(path);
+        }
+    }
+    // Token IDs are local to a shard. Reconcile exact native key + declaration
+    // coordinates before concatenation, keeping ambiguous declarations distinct.
+    let mut tokens = HashMap::<String, u64>::new();
+    let mut symbols = Vec::<Value>::new();
+    let mut remaps = vec![];
+    let mut call_bases = vec![];
+    let mut calls = 0u64;
+    for part in &parts {
+        let data: Value =
+            serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(part)?))?;
+        let mut map = HashMap::new();
+        for symbol in data["symbols"].as_array().unwrap() {
+            let key = serde_json::to_string(&(
+                &symbol["key"],
+                &symbol["definition"],
+                &symbol["body"],
+                &symbol["kind"],
+            ))?;
+            let token = *tokens.entry(key).or_insert_with(|| {
+                let id = symbols.len() as u64;
+                let mut row = symbol.clone();
+                row["token"] = json!(id);
+                symbols.push(row);
+                id
+            });
+            map.insert(symbol["token"].as_u64().unwrap(), token);
+            if symbols[token as usize]["external"] == true && symbol["external"] == false {
+                let mut row = symbol.clone();
+                row["token"] = json!(token);
+                symbols[token as usize] = row;
+            }
+        }
+        remaps.push(map);
+        call_bases.push(calls);
+        calls += data["calls"].as_array().unwrap().len() as u64;
+    }
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(output)?);
+    let header = json!({"protocol":"codequest-hir-export","schema_version":1,"base_commit":"2850ecba80311bebd4cdaa9fedc5321533b5b1e7","patch_digest":option_env!("CQ_PRODUCER_PATCH_SHA"),"incremental":incremental,"shards":timings});
+    writer.write_all(b"{")?;
+    let mut separator = false;
+    for (k, v) in header.as_object().unwrap() {
+        if separator {
+            writer.write_all(b",")?
+        }
+        separator = true;
+        serde_json::to_writer(&mut writer, k)?;
+        writer.write_all(b":")?;
+        serde_json::to_writer(&mut writer, v)?;
+    }
+    writer.write_all(b",\"symbols\":")?;
+    serde_json::to_writer(&mut writer, &symbols)?;
+    drop(symbols);
+    let fields = [
+        "references",
+        "parents",
+        "relations",
+        "bodies",
+        "calls",
+        "doc_links",
+        "files",
+        "comments",
+        "parameters",
+        "diagnostics",
+        "scoped_documentation",
+        "nominal_members",
+        "lexical_parents",
+    ];
+    let mut streams = fields
+        .iter()
+        .map(|field| {
+            let path = dir.join(format!("merge-{field}.json"));
+            Ok((
+                std::io::BufWriter::new(std::fs::File::create(&path)?),
+                path,
+                false,
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut seen_files = BTreeSet::new();
+    // Read each shard once for all arrays. Re-parsing the entire export for
+    // every field multiplied JSON decoding cost by the number of fields.
+    for (i, part) in parts.iter().enumerate() {
+        let mut data: Value =
+            serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(part)?))?;
+        for (field, (stream, _, comma)) in fields.iter().zip(&mut streams) {
+            for mut row in data[*field]
+                .as_array_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+            {
+                if *field == "files" && !seen_files.insert(row["id"].as_u64().unwrap()) {
+                    continue;
+                }
+                let fields: &[&str] = match *field {
+                    "references" => &["target"],
+                    "parents" => &["child", "parent_token"],
+                    "nominal_members" => &["child", "owner"],
+                    _ => &[],
+                };
+                for key in fields {
+                    if let Some(old) = row[*key].as_u64() {
+                        row[*key] = json!(
+                            remaps[i]
+                                .get(&old)
+                                .ok_or_else(|| anyhow::anyhow!("unbound shard token"))?
+                        );
+                    }
+                }
+                if *field == "references"
+                    && let Some(index) = row["call_index"].as_u64()
+                {
+                    row["call_index"] = json!(index + call_bases[i]);
+                }
+                if *comma {
+                    stream.write_all(b",")?
+                }
+                *comma = true;
+                serde_json::to_writer(&mut *stream, &row)?;
+            }
+        }
+    }
+    for (field, (mut stream, path, _)) in fields.iter().zip(streams) {
+        stream.flush()?;
+        drop(stream);
+        writer.write_all(b",")?;
+        serde_json::to_writer(&mut writer, field)?;
+        writer.write_all(b":[")?;
+        std::io::copy(&mut std::fs::File::open(&path)?, &mut writer)?;
+        writer.write_all(b"]")?;
+        std::fs::remove_file(path)?;
+    }
+    writer.write_all(b"}")?;
+    writer.flush()?;
+    std::fs::write(
+        dir.join("timings.json"),
+        serde_json::to_vec_pretty(&timings)?,
+    )?;
+    Ok(())
+}
+
+fn emit_part(
+    root: &std::path::Path,
+    output: &std::path::Path,
+    host: &AnalysisHost,
+    vfs: &vfs::Vfs,
+    incremental: Value,
+    files: &[FileId],
+) -> anyhow::Result<()> {
+    let analysis = host.analysis();
+    let _ = root;
+    let index = StaticIndex::compute_graph_files(&analysis, files);
     let kind_tags: std::collections::HashMap<_, _> =
         index.codequest_definition_kinds().into_iter().collect();
     let mut file_ids = BTreeSet::new();
@@ -466,7 +668,7 @@ pub fn serve() -> anyhow::Result<()> {
                 }
             }
             let stats = json!({"database_reused":reused,"changed_files":changed,"workspace_reloaded":!reused});
-            emit(&root, &output, host, vfs, stats.clone())?;
+            emit(&root, &output, host, vfs, stats.clone(), Some(&id))?;
             Ok(stats)
         })();
         let reply = match result {

@@ -1,6 +1,7 @@
 mod index;
 mod languages;
 mod mcp;
+mod progress;
 mod query;
 mod repl;
 pub mod service;
@@ -97,7 +98,11 @@ impl Options {
 }
 pub fn run(args: Vec<OsString>) -> Result<(Value, i32)> {
     let options = Options::parse(args)?;
+    let opening = (options.command == "repl")
+        .then(|| progress::Progress::start(format!("打开存储 {}", options.store().display())))
+        .flatten();
     let service = std::sync::Arc::new(Service::open(&options.store())?);
+    drop(opening);
     match options.command.as_str() {
         "export-snapshot" => {
             let project = options
@@ -182,10 +187,17 @@ pub fn run(args: Vec<OsString>) -> Result<(Value, i32)> {
             let snapshot: cq_core::model::SemanticSnapshot =
                 serde_json::from_slice(&std::fs::read(path)?)?;
             let expected = snapshot.previous.clone();
-            service
+            match service
                 .store
-                .publish_paged_semantics(&snapshot, expected.as_deref())?;
-            Ok((service::index_summary(&snapshot), 0))
+                .publish_paged_semantics(&snapshot, expected.as_deref())
+            {
+                Ok(_) => Ok((service::index_summary(&snapshot), 0)),
+                Err(Error::PublicationInProgress { project, revision }) => Ok((
+                    json!({"state":"publication_in_progress","project":project,"revision":revision,"continue_with":{"operation":"publication_status","revision":revision}}),
+                    0,
+                )),
+                Err(e) => Err(e),
+            }
         }
         "index" => {
             let request = IndexRequest::from_options(&options)?;

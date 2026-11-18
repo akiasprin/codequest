@@ -92,13 +92,13 @@ fn validate_impl(raw: &Value, ranges: bool) -> Result<()> {
         if !r["is_definition"].is_null() && !r["is_definition"].is_boolean() {
             return Err(invalid("reference definition flag"));
         }
-        if !r["target"].as_u64().is_some_and(|t| tokens.contains(&t)) {
+        if r["target"].as_u64().is_none_or(|t| !tokens.contains(&t)) {
             return Err(invalid("reference target absent"));
         }
         if !r["call_index"].is_null()
-            && !r["call_index"]
+            && r["call_index"]
                 .as_u64()
-                .is_some_and(|i| i < raw["calls"].as_array().unwrap().len() as u64)
+                .is_none_or(|i| i >= raw["calls"].as_array().unwrap().len() as u64)
         {
             return Err(invalid("reference call index absent"));
         }
@@ -112,7 +112,7 @@ fn validate_impl(raw: &Value, ranges: bool) -> Result<()> {
             return Err(invalid("parent token must be native integer"));
         }
         if p["parent_token"].is_null()
-            && (!p["key"].as_str().is_some_and(|k| !k.is_empty()) || !p["kind"].is_string())
+            && (p["key"].as_str().is_none_or(|k| k.is_empty()) || !p["kind"].is_string())
         {
             return Err(invalid("unindexed parent requires native key/kind"));
         }

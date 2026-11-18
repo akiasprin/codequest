@@ -16,8 +16,100 @@ pub(crate) enum Node {
     Leaf(BTreeMap<String, Value>),
     Branch(BTreeMap<u8, ObjectRef>),
 }
-fn order(key: &str) -> String {
+pub(crate) fn order(key: &str) -> String {
     format!("{}:{key}", digest(key.as_bytes()))
+}
+/// Build an initial immutable map once from strictly ordered keys. Only a
+/// leaf-sized lookahead and the branch stack are retained, not the whole map.
+pub(crate) fn build_sorted(
+    o: &Objects,
+    rows: impl Iterator<Item = Result<(String, Value)>>,
+) -> Result<(Root, u64)> {
+    struct Input<I: Iterator<Item = Result<(String, Value)>>> {
+        rows: std::iter::Peekable<I>,
+        replay: std::collections::VecDeque<(String, Value)>,
+        last: Option<String>,
+    }
+    impl<I: Iterator<Item = Result<(String, Value)>>> Input<I> {
+        fn peek(&mut self) -> Result<Option<&str>> {
+            if !self.replay.is_empty() {
+                return Ok(self.replay.front().map(|r| r.0.as_str()));
+            }
+            if self.rows.peek().is_some_and(Result::is_err) {
+                return Err(self.rows.next().unwrap().unwrap_err());
+            }
+            Ok(self
+                .rows
+                .peek()
+                .and_then(|r| r.as_ref().ok())
+                .map(|r| r.0.as_str()))
+        }
+        fn take(&mut self) -> Result<Option<(String, Value)>> {
+            if let Some(row) = self.replay.pop_front() {
+                return Ok(Some(row));
+            }
+            let Some(row) = self.rows.next().transpose()? else {
+                return Ok(None);
+            };
+            if self.last.as_ref().is_some_and(|k| k >= &row.0) {
+                return Err(Error::new(
+                    "InvalidSortedIndex",
+                    "unordered or duplicate key",
+                ));
+            }
+            self.last = Some(row.0.clone());
+            Ok(Some(row))
+        }
+    }
+    fn build<I: Iterator<Item = Result<(String, Value)>>>(
+        o: &Objects,
+        input: &mut Input<I>,
+        prefix: &str,
+    ) -> Result<(Root, u64)> {
+        let mut batch = vec![];
+        while batch.len() <= LEAF && input.peek()?.is_some_and(|k| k.starts_with(prefix)) {
+            batch.push(input.take()?.unwrap());
+        }
+        if batch.len() <= LEAF {
+            let count = batch.len() as u64;
+            let root = if count == 0 {
+                None
+            } else {
+                Some(o.json(&Node::Leaf(batch.into_iter().collect()))?)
+            };
+            return Ok((root, count));
+        }
+        if prefix.len() >= 64 {
+            return Err(Error::new("HashCollision", "initial index collision"));
+        }
+        for row in batch.into_iter().rev() {
+            input.replay.push_front(row);
+        }
+        let mut children = BTreeMap::new();
+        let mut count = 0;
+        while let Some(key) = input.peek()? {
+            if !key.starts_with(prefix) {
+                break;
+            }
+            let n = nibble(key, prefix.len())?;
+            let (root, size) = build(o, input, &format!("{prefix}{n:x}"))?;
+            children.insert(
+                n,
+                root.ok_or_else(|| Error::new("InvalidSortedIndex", "empty branch"))?,
+            );
+            count += size;
+        }
+        Ok((Some(o.json(&Node::Branch(children))?), count))
+    }
+    build(
+        o,
+        &mut Input {
+            rows: rows.peekable(),
+            replay: Default::default(),
+            last: None,
+        },
+        "",
+    )
 }
 fn nibble(key: &str, depth: usize) -> Result<u8> {
     key.as_bytes()

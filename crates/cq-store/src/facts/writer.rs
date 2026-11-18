@@ -11,7 +11,7 @@ use cq_core::semantic::{
 use cq_core::{
     Error, Result,
     model::*,
-    ports::facts::{FactRef, ReadStats, fact_key, groups},
+    ports::facts::{FactRef, ReadStats, fact_key},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -151,6 +151,9 @@ pub struct Writer<'a> {
     audited: BTreeSet<String>,
     diagnostic_header: Option<SemanticSnapshot>,
     preserve_terms: bool,
+    vector_model: Option<std::sync::Arc<cq_core::query::embeddings::TokenVectors>>,
+    indexed: bool,
+    initial_groups: Option<super::bulk::Builder>,
 }
 struct NativeSink<'a, 'b> {
     writer: &'a mut Writer<'b>,
@@ -348,11 +351,16 @@ impl TransferSink for ScopedSink<'_, '_> {
                 next.iter().filter(|(k, r)| old.get(*k) == Some(*r)).count() as u64;
         }
         let mut edits = vec![];
-        for k in old.keys().filter(|k| !next.contains_key(*k)) {
-            edits.push((k.clone(), None));
+        let full = matches!(b.receipt.output, Output::Full(_));
+        if full {
+            root = None;
+        } else {
+            for k in old.keys().filter(|k| !next.contains_key(*k)) {
+                edits.push((k.clone(), None));
+            }
         }
         for (k, r) in &next {
-            if old.get(k) == Some(r) {
+            if !full && old.get(k) == Some(r) {
                 continue;
             }
             let (family, id) = k
@@ -373,22 +381,6 @@ impl TransferSink for ScopedSink<'_, '_> {
                 ));
             }
             edits.push((k.clone(), Some(serde_json::to_value(f)?)));
-        }
-        if matches!(b.receipt.output, Output::Full(_)) {
-            root = None;
-            edits.clear();
-            for k in next.keys() {
-                let (family, id) = k.split_once(':').unwrap();
-                let f = reference(
-                    self.writer.o,
-                    &self.writer.roots,
-                    family,
-                    id,
-                    &mut self.writer.read,
-                )?
-                .ok_or_else(|| Error::new("MissingTransferredFact", k))?;
-                edits.push((k.clone(), Some(serde_json::to_value(f)?)));
-            }
         }
         root = tree::edit(self.writer.o, &root, edits, &mut self.writer.read)?;
         let mode = if b.descriptor.completion != Completion::Complete {
@@ -454,7 +446,16 @@ impl<'a> Writer<'a> {
                 "delete batch repeats a key",
             ));
         }
-        for batch in keys.chunks(production::BATCH_ROWS) {
+        let mut expanded = keys.iter().cloned().collect::<BTreeSet<_>>();
+        for key in keys {
+            if let Some(id) = key.strip_prefix("entity:")
+                && reference(self.o, &self.roots, "entity_vector", id, &mut self.read)?.is_some()
+            {
+                expanded.insert(fact_key("entity_vector", id));
+            }
+        }
+        let expanded = expanded.into_iter().collect::<Vec<_>>();
+        for batch in expanded.chunks(production::BATCH_ROWS) {
             let mut changes = GroupChanges::new();
             let mut deletes = vec![];
             let mut removals = vec![];
@@ -465,7 +466,7 @@ impl<'a> Writer<'a> {
                 let old = reference(self.o, &self.roots, family, id, &mut self.read)?
                     .ok_or_else(|| Error::new("DeleteUnknownFact", key))?;
                 let value = decode(self.o, &old, &mut self.read)?;
-                for group in groups(family, &value) {
+                for group in cq_core::ports::facts::groups_indexed(family, &value, self.indexed) {
                     changes.entry(group).or_default().insert(key.clone(), None);
                 }
                 deletes.push((key.clone(), Some(serde_json::to_value(old)?)));
@@ -480,6 +481,13 @@ impl<'a> Writer<'a> {
     }
     pub fn new(o: &'a Objects, base: Roots) -> Self {
         let initial = base.facts.is_none();
+        let indexed = tree::get(
+            o,
+            &base.groups,
+            "all:entity_vector",
+            &mut ReadStats::default(),
+        )
+        .is_ok_and(|v| v.is_some());
         Self {
             o,
             roots: base,
@@ -497,9 +505,23 @@ impl<'a> Writer<'a> {
             audited: BTreeSet::new(),
             diagnostic_header: None,
             preserve_terms: false,
+            vector_model: None,
+            indexed,
+            initial_groups: None,
         }
     }
     pub fn append<T: Serialize>(&mut self, family: &str, id: &str, value: &T) -> Result<()> {
+        if family == "entity" && self.indexed {
+            let value = serde_json::to_value(value)?;
+            if let Ok(e) = serde_json::from_value::<Entity>(value) {
+                let index =
+                    cq_core::query::search::SearchIndex::with_model(&[], self.vector_model.clone());
+                let terms = cq_core::query::search::terms(&e);
+                let vector = index.prepare_vector(&terms[..terms.len().min(4096)]);
+                let buckets = cq_core::query::search::vector_buckets(&vector);
+                self.append("entity_vector", id, &json!({"entity":e,"vector":vector,"buckets":buckets,"model":index.model_name()}))?;
+            }
+        }
         let key = fact_key(family, id);
         if !self.seen.insert(key.clone()) {
             return Err(Error::new("DuplicateFact", key));
@@ -576,9 +598,11 @@ impl<'a> Writer<'a> {
         let mut facts = vec![];
         for (family, id, value, r) in rows {
             let key = fact_key(&family, &id);
-            if let Some(old) = reference(self.o, &self.roots, &family, &id, &mut self.read)? {
+            if self.initial_groups.is_none()
+                && let Some(old) = reference(self.o, &self.roots, &family, &id, &mut self.read)?
+            {
                 let previous = decode(self.o, &old, &mut self.read)?;
-                for g in groups(&family, &previous) {
+                for g in cq_core::ports::facts::groups_indexed(&family, &previous, self.indexed) {
                     memberships_by_group
                         .entry(g)
                         .or_default()
@@ -587,7 +611,7 @@ impl<'a> Writer<'a> {
             }
             let value_ref = serde_json::to_value(&r)?;
             facts.push((key.clone(), Some(value_ref.clone())));
-            for g in groups(&family, &value) {
+            for g in cq_core::ports::facts::groups_indexed(&family, &value, self.indexed) {
                 memberships_by_group
                     .entry(g)
                     .or_default()
@@ -596,13 +620,28 @@ impl<'a> Writer<'a> {
             self.stats.facts_changed += 1;
         }
         self.roots.facts = tree::edit(self.o, &self.roots.facts, facts.clone(), &mut self.read)?;
-        self.stats.upserts = tree::edit(self.o, &self.stats.upserts, facts, &mut self.read)?;
-        memberships(
-            self.o,
-            &mut self.roots,
-            memberships_by_group,
-            &mut self.read,
-        )?;
+        self.stats.upserts = if self.initial_groups.is_some() {
+            self.roots.facts.clone()
+        } else {
+            tree::edit(self.o, &self.stats.upserts, facts, &mut self.read)?
+        };
+        if let Some(initial) = &mut self.initial_groups {
+            for (name, changes) in memberships_by_group {
+                for (key, value) in changes {
+                    let value = value.ok_or_else(|| {
+                        Error::new("InitialIndexConflict", "initial build attempted a deletion")
+                    })?;
+                    initial.push(&name, &key, value)?;
+                }
+            }
+        } else {
+            memberships(
+                self.o,
+                &mut self.roots,
+                memberships_by_group,
+                &mut self.read,
+            )?;
+        }
         self.pending_bytes = 0;
         Ok(())
     }
@@ -616,6 +655,10 @@ impl<'a> Writer<'a> {
     }
     fn finish(mut self, preserve_semantic: bool) -> Result<(Roots, WriteStats)> {
         self.flush()?;
+        if let Some(initial) = self.initial_groups.take() {
+            self.roots.groups = initial.build(self.o)?;
+            return Ok((self.roots, self.stats));
+        }
         if preserve_semantic {
             for family in [
                 "scope",
@@ -636,11 +679,12 @@ impl<'a> Writer<'a> {
                 "working_tree",
                 "term_df",
                 "search_stats",
+                "entity_vector",
                 "metadata",
                 "observation_unit",
                 "observation_provenance",
             ] {
-                if family == "term_df" && self.preserve_terms {
+                if family == "entity_vector" || family == "term_df" && self.preserve_terms {
                     continue;
                 }
                 let group: Group = tree::get(
@@ -692,7 +736,7 @@ impl<'a> Writer<'a> {
                 }
                 let r = serde_json::from_value(v.clone())?;
                 let value = decode(self.o, &r, &mut self.read)?;
-                for g in groups(family, &value) {
+                for g in cq_core::ports::facts::groups_indexed(family, &value, self.indexed) {
                     membership_changes
                         .entry(g)
                         .or_default()
@@ -745,6 +789,22 @@ fn write(
     prepared: Option<&crate::analysis::Prepared>,
 ) -> Result<Revision> {
     let mut w = Writer::new(o, prior.map(|r| r.roots.clone()).unwrap_or_default());
+    if prior.is_none() {
+        w.initial_groups = Some(super::bulk::Builder::new(&o.root)?);
+    }
+    w.vector_model = cq_core::query::embeddings::TokenVectors::configured()?;
+    w.indexed = prior.is_none_or(|r| r.metadata["search_index"]["version"] == 1);
+    let vector_model =
+        cq_core::query::search::SearchIndex::with_model(&[], w.vector_model.clone()).model_name();
+    if prior.is_some_and(|r| {
+        r.metadata["search_index"]["version"] == 1
+            && r.metadata["search_index"]["vector_model"] != vector_model
+    }) {
+        return Err(Error::new(
+            "VectorIndexModelMismatch",
+            "keep the original token model for incremental publication, or index into a fresh project namespace",
+        ));
+    }
     w.diagnostic_header = Some(s.metadata());
     let mut aggregate = if let Some(p) = prepared {
         super::statistics::Incremental::new(o, s, prior, &p.spool.universe)?
@@ -950,6 +1010,8 @@ fn write(
     source_meta.files.clear();
     w.append("metadata", "source_snapshot", &source_meta)?;
     w.append("metadata", "analysis_request", &s.analysis_request)?;
+    let vector_model =
+        cq_core::query::search::SearchIndex::with_model(&[], w.vector_model.clone()).model_name();
     let (mut roots, stats) = if prepared.is_some() {
         w.finish_scoped()?
     } else {
@@ -965,6 +1027,8 @@ fn write(
         *relations.entry(r.kind.label().into()).or_default() += 1;
     }
     let mut meta = json!({"project":s.project,"revision":s.revision,"schema_version":s.schema_version,"root":s.root,"created_ms":s.created_ms,"previous":s.previous,"counts":{"entities":s.entities.len(),"relations":s.relations.len(),"occurrences":s.occurrences.len(),"bodies":s.bodies.len(),"documents":s.documents.len(),"contexts":s.contexts.len(),"units":s.units.len(),"external":s.entities.iter().filter(|e|e.external).count(),"coverage":s.coverage.len(),"gaps":s.gaps.len()},"entity_kinds":kinds,"relation_kinds":relations});
+    let indexed = prior.is_none_or(|r| r.metadata["search_index"]["version"] == 1);
+    meta["search_index"] = json!({"version":if indexed{1}else{0},"vector_model":vector_model,"upgrade_required":!indexed,"ranking_window":1000});
     if let Some(stats) = &statistics {
         meta["counts"] = stats.counts.clone();
         meta["entity_kinds"] = json!(stats.entity_kinds);
@@ -1090,7 +1154,7 @@ pub fn export(o: &Objects, r: &Revision) -> Result<SemanticSnapshot> {
                 s.working_tree_manifest
                     .insert(id.into(), serde_json::from_value(v)?);
             }
-            "term_df" | "search_stats" | "context_stats" => {}
+            "term_df" | "search_stats" | "context_stats" | "entity_vector" => {}
             "order" => {
                 orderings.insert(id.into(), serde_json::from_value(v)?);
             }

@@ -142,7 +142,7 @@ fn sweep(o: &Objects, hashes: &[String]) -> Result<()> {
             File::open(dir)?.sync_all()?;
         }
     }
-    Ok(())
+    o.remove_packed(hashes)
 }
 impl StoreHost {
     pub fn pin_cursor(&self, id: &str, revision: &str) -> Result<()> {
@@ -270,6 +270,13 @@ impl StoreHost {
                 }
             }
         }
+        self.objects.visit_packed(|r| {
+            if !live.live.contains(&r.hash) && !self.objects.path(&r)?.exists() {
+                bytes += r.bytes;
+                remove.push(r.hash);
+            }
+            Ok(())
+        })?;
         remove.sort();
         Ok((remove, bytes))
     }

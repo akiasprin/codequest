@@ -602,6 +602,36 @@ pub(super) fn emit_frame(
         .iter()
         .map(|e| (e.id.clone(), e.unit.clone()))
         .collect::<HashMap<_, _>>();
+    // Explicit native relationships belong to their use/impl file. Both ends
+    // can be declarations in other files (e.g. an impl of an imported trait
+    // for a type declared in another module). Endpoint ownership alone would
+    // silently discard those relationships from every source frame.
+    let native_relations = rows(frame, "relations")
+        .iter()
+        .filter_map(|r| {
+            Some((
+                r["from"].as_str()?,
+                r["to"].as_str()?,
+                RelationKind::parse(r["kind"].as_str()?)?,
+            ))
+        })
+        .collect::<HashSet<_>>();
+    let identities = fragment
+        .entities
+        .iter()
+        .map(|e| (e.id.as_str(), e.provider_id.as_str()))
+        .collect::<HashMap<_, _>>();
+    let explicit_edges = fragment
+        .relations
+        .iter()
+        .filter_map(|r| {
+            let from = *identities.get(r.from.as_str())?;
+            let to = *identities.get(r.to.as_str())?;
+            native_relations
+                .contains(&(from, to, r.kind))
+                .then(|| r.id.clone())
+        })
+        .collect::<HashSet<_>>();
     fragment.entities.retain(|e| owned.contains(&e.id));
     fragment
         .bodies
@@ -616,7 +646,7 @@ pub(super) fn emit_frame(
         .collect::<HashSet<_>>();
     fragment.relations.retain(|r| {
         r.occurrence.as_ref().map_or_else(
-            || owned.contains(&r.from) || owned.contains(&r.to),
+            || owned.contains(&r.from) || owned.contains(&r.to) || explicit_edges.contains(&r.id),
             |o| occurrences.contains(o),
         )
     });

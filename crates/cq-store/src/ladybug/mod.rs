@@ -8,6 +8,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+mod membership;
 mod page;
 pub struct Projection {
     db: Database,

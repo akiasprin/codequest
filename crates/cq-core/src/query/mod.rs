@@ -32,6 +32,8 @@ pub struct QueryRequest {
     pub offset: usize,
     pub regex: bool,
     pub include_candidates: bool,
+    /// Scan persisted vectors exactly instead of approximate LSH candidates.
+    pub exact_semantic: bool,
     pub line: Option<usize>,
     pub column: Option<usize>,
     pub max_lines: usize,
@@ -61,6 +63,7 @@ impl Default for QueryRequest {
             offset: 0,
             regex: false,
             include_candidates: false,
+            exact_semantic: false,
             line: None,
             column: None,
             max_lines: 80,

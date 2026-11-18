@@ -31,7 +31,7 @@ pub fn validate_report(report: &CaptureReport, content: &dyn ContentRepository) 
             "report.probes" => report.probes.len(),
             _ => return Err(Error::new("InvalidEvidence", "unknown evidence source")),
         };
-        if e.run_id != report.run.id || !e.index.is_some_and(|i| i < limit) {
+        if e.run_id != report.run.id || e.index.is_none_or(|i| i >= limit) {
             return Err(Error::new(
                 "InvalidEvidence",
                 "evidence run or index out of bounds",

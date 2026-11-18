@@ -252,8 +252,10 @@ fn output(v: Value) -> Result<()> {
 /// Input/control stays live while the worker executes. Cancellation is scoped to
 /// an exact request generation, so a late cancel cannot hit a reused connection.
 pub fn run(service: Arc<Service>, options: &Options) -> Result<()> {
+    let terminal = io::stdin().is_terminal();
     let mut session = Session::default();
     if let Some(p) = options.text("--project") {
+        let _opening = super::progress::Progress::start(format!("连接 StoreHost 并打开项目 {p}"));
         session.switch(&service, &p, None, None)?;
     }
     if options.yes("--watch")
@@ -261,7 +263,22 @@ pub fn run(service: Arc<Service>, options: &Options) -> Result<()> {
     {
         service.watch(p)?;
     }
-    let terminal = io::stdin().is_terminal();
+    if terminal {
+        eprintln!(
+            "CodeQuest 已就绪 · 项目 {} · 版本 {}",
+            session.project.as_deref().unwrap_or("未选择"),
+            session
+                .revision
+                .as_deref()
+                .map(|r| &r[..r.len().min(12)])
+                .unwrap_or("—")
+        );
+        eprintln!(
+            "输入 help 查看命令；quit 退出；Ctrl+C 取消查询。\n日志：{}",
+            service.store.root.join("store-host.log").display()
+        );
+        prompt(&session)?;
+    }
     let old_signal = if terminal {
         Some(unsafe { libc::signal(libc::SIGINT, interrupt as *const () as libc::sighandler_t) })
     } else {
@@ -299,6 +316,9 @@ pub fn run(service: Arc<Service>, options: &Options) -> Result<()> {
                 let line: String = line;
                 let line = line.trim().to_owned();
                 if line.is_empty() {
+                    if terminal {
+                        prompt(&session)?;
+                    }
                     continue;
                 }
                 if ["quit", "exit", ":q"].contains(&line.as_str()) {
@@ -312,6 +332,10 @@ pub fn run(service: Arc<Service>, options: &Options) -> Result<()> {
                 let done = tx.clone();
                 active = Some((id.clone(), control));
                 std::thread::spawn(move || {
+                    let _waiting = super::progress::Progress::waiting(format!(
+                        "执行 {}",
+                        line.split_whitespace().next().unwrap_or("查询")
+                    ));
                     let result = worker_session.execute(&worker_service, &line, &worker_control);
                     let _ = done.send(Event::Complete(id, Box::new(worker_session), result));
                 });
@@ -362,6 +386,9 @@ pub fn run(service: Arc<Service>, options: &Options) -> Result<()> {
                 }
                 output(v)?;
                 active = None;
+                if terminal && queued.is_empty() && !ended {
+                    prompt(&session)?;
+                }
             }
             Ok(Event::End) => ended = true,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -375,5 +402,10 @@ pub fn run(service: Arc<Service>, options: &Options) -> Result<()> {
         unsafe { libc::signal(libc::SIGINT, old) };
     }
     service.shutdown();
+    Ok(())
+}
+fn prompt(session: &Session) -> Result<()> {
+    eprint!("cq[{}]> ", session.project.as_deref().unwrap_or("未选择"));
+    io::stderr().flush()?;
     Ok(())
 }

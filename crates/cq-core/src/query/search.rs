@@ -31,6 +31,44 @@ pub fn terms(entity: &Entity) -> Vec<String> {
             .unwrap_or("")
     ))
 }
+/// Unicode trigrams preserve the existing literal-substring search semantics.
+pub fn grams(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(3)
+        .map(|s| s.iter().collect())
+        .collect()
+}
+pub fn literal_regex(text: &str) -> Option<&str> {
+    let s = text.strip_prefix('^')?.strip_suffix('$')?;
+    (!s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || "_:#-".contains(c))).then_some(s)
+}
+/// Deterministic locality-sensitive signatures. They are retrieval candidates,
+/// never confidence or proof of a relationship. Exact mode remains available.
+pub fn vector_buckets(vector: &[f32]) -> Vec<String> {
+    (0..8)
+        .map(|table| {
+            let mut bits = 0;
+            for bit in 0..6 {
+                let projection: f32 = vector
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let mut x = (i as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15)
+                            ^ ((table * 6 + bit + 1) as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+                        x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                        if x & 1 == 0 { *v } else { -*v }
+                    })
+                    .sum();
+                if projection >= 0. {
+                    bits |= 1 << bit;
+                }
+            }
+            format!("{table}:{bits}")
+        })
+        .collect()
+}
 pub struct SearchIndex {
     documents: Vec<Vec<String>>,
     df: HashMap<String, usize>,

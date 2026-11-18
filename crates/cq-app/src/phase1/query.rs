@@ -62,6 +62,7 @@ pub fn arguments(options: &Options) -> Result<Value> {
         ("--regex", "regex"),
         ("--include-candidates", "include_candidates"),
         ("--include-external", "include_external"),
+        ("--exact-semantic", "exact_semantic"),
     ] {
         if options.yes(flag) {
             value.insert(key.into(), json!(true));

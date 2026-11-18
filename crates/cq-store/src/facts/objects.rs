@@ -5,9 +5,9 @@ use cq_core::{
     ports::facts::{ObjectRef, ReadStats},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    fs::{File, OpenOptions},
-    io::{Read, Write},
+    collections::{BTreeMap, HashMap, VecDeque},
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, Weak,
@@ -25,9 +25,8 @@ struct Cache {
 pub struct Objects {
     pub root: PathBuf,
     cache: Arc<Mutex<Cache>>,
-    pending: Option<Mutex<BTreeSet<PathBuf>>>,
+    packed: Option<Mutex<super::packed::Writer>>,
     syncs: AtomicU64,
-    writebacks: AtomicU64,
     writes: AtomicU64,
     written_bytes: AtomicU64,
 }
@@ -53,9 +52,8 @@ impl Objects {
         Ok(Self {
             root,
             cache,
-            pending: None,
+            packed: None,
             syncs: AtomicU64::new(0),
-            writebacks: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             written_bytes: AtomicU64::new(0),
         })
@@ -64,56 +62,21 @@ impl Objects {
     /// and its staging root is installed. Ordinary callers stay synchronous.
     pub fn buffered(root: PathBuf) -> Result<Self> {
         let mut o = Self::new(root)?;
-        o.pending = Some(Mutex::new(BTreeSet::new()));
+        o.packed = Some(Mutex::new(super::packed::Writer::new(&o.root)?));
         Ok(o)
     }
     pub fn sync_pending(&self) -> Result<()> {
-        let Some(pending) = &self.pending else {
+        if let Some(packed) = &self.packed {
+            let mut p = packed.lock().unwrap();
+            p.sync()?;
+            self.syncs.store(p.syncs, Ordering::Relaxed);
             return Ok(());
-        };
-        let mut pending = pending.lock().unwrap();
-        let mut directories = BTreeSet::new();
-        // Start data writeback for the whole batch before the durability pass.
-        // Every file still gets fsync below. This hint is never the commit
-        // barrier and unsupported filesystems retain the synchronous path.
-        #[cfg(target_os = "linux")]
-        for path in pending.iter() {
-            use std::os::fd::AsRawFd;
-            let file = File::open(path)?;
-            if unsafe { libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE) }
-                != 0
-            {
-                let e = std::io::Error::last_os_error();
-                if !matches!(
-                    e.raw_os_error(),
-                    Some(libc::ENOSYS | libc::EOPNOTSUPP | libc::EINVAL | libc::EBADF)
-                ) {
-                    return Err(e.into());
-                }
-            } else {
-                self.writebacks.fetch_add(1, Ordering::Relaxed);
-            }
         }
-        for path in pending.iter() {
-            File::open(path)?.sync_all()?;
-            self.syncs.fetch_add(1, Ordering::Relaxed);
-            directories.insert(path.parent().unwrap().to_owned());
-        }
-        for dir in directories {
-            File::open(dir)?.sync_all()?;
-            self.syncs.fetch_add(1, Ordering::Relaxed);
-        }
-        if !pending.is_empty() {
-            File::open(&self.root)?.sync_all()?;
-            File::open(self.root.parent().unwrap())?.sync_all()?;
-            self.syncs.fetch_add(2, Ordering::Relaxed);
-        }
-        pending.clear();
         Ok(())
     }
     pub fn resource_stats(&self) -> serde_json::Value {
         let c = self.cache.lock().unwrap();
-        serde_json::json!({"cache_bytes":c.bytes,"cache_limit":CACHE_BYTES,"sync_calls":self.syncs.load(Ordering::Relaxed),"writeback_calls":self.writebacks.load(Ordering::Relaxed)})
+        serde_json::json!({"cache_bytes":c.bytes,"cache_limit":CACHE_BYTES,"sync_calls":self.syncs.load(Ordering::Relaxed),"encoding":"packed-segments-v1"})
     }
     pub fn path(&self, r: &ObjectRef) -> Result<PathBuf> {
         if !valid_hash(&r.hash) || r.bytes > MAX_OBJECT as u64 {
@@ -135,36 +98,20 @@ impl Objects {
                 return Err(Error::new("DigestMismatch", &r.hash));
             }
         } else {
-            if self.pending.is_some() {
-                let parent = path.parent().unwrap();
-                std::fs::create_dir_all(parent)?;
-                let tmp = parent.join(format!(".tmp-{}", cq_capture_protocol::new_id()?));
-                let result = (|| {
-                    let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-                    f.write_all(bytes)?;
-                    match std::fs::hard_link(&tmp, &path) {
-                        Ok(()) => Ok(()),
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                            if std::fs::read(&path)? != bytes {
-                                Err(Error::new("ConflictingContent", path.display().to_string()))
-                            } else {
-                                Ok(())
-                            }
-                        }
-                        Err(e) => Err(e.into()),
-                    }
-                })();
-                let _ = std::fs::remove_file(tmp);
-                result?;
-            } else {
-                immutable_write(&path, bytes)?;
+            if let Some(packed) = &self.packed {
+                let mut p = packed.lock().unwrap();
+                if p.put(&r, bytes)? {
+                    self.writes.fetch_add(1, Ordering::Relaxed);
+                    self.written_bytes
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                }
+                self.syncs.store(p.syncs, Ordering::Relaxed);
+                return Ok(r);
             }
+            immutable_write(&path, bytes)?;
             self.writes.fetch_add(1, Ordering::Relaxed);
             self.written_bytes
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        }
-        if let Some(p) = &self.pending {
-            p.lock().unwrap().insert(path);
         }
         Ok(r)
     }
@@ -183,17 +130,7 @@ impl Objects {
                 return Ok(b.clone());
             }
         }
-        let mut bytes = Vec::new();
-        File::open(&p)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    Error::new("MissingFactPage", p.display().to_string())
-                } else {
-                    e.into()
-                }
-            })?
-            .take(r.bytes + 1)
-            .read_to_end(&mut bytes)?;
+        let bytes = self.load(r)?;
         if bytes.len() as u64 != r.bytes || digest(&bytes) != r.hash {
             return Err(Error::new("DigestMismatch", p.display().to_string()));
         }
@@ -233,14 +170,32 @@ impl Objects {
         self.audit_bytes(r).map(|_| ())
     }
     pub(crate) fn audit_bytes(&self, r: &ObjectRef) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        File::open(self.path(r)?)?
-            .take(r.bytes + 1)
-            .read_to_end(&mut bytes)?;
+        let bytes = self.load(r)?;
         if bytes.len() as u64 != r.bytes || digest(&bytes) != r.hash {
             return Err(Error::new("DigestMismatch", &r.hash));
         }
         Ok(bytes)
+    }
+    fn load(&self, r: &ObjectRef) -> Result<Vec<u8>> {
+        let path = self.path(r)?;
+        if path.is_file() {
+            let mut b = Vec::new();
+            File::open(path)?.take(r.bytes + 1).read_to_end(&mut b)?;
+            return Ok(b);
+        }
+        if let Some(p) = &self.packed
+            && let Some(b) = p.lock().unwrap().read(r)?
+        {
+            return Ok(b);
+        }
+        super::packed::read(&self.root, r)?
+            .ok_or_else(|| Error::new("MissingFactPage", r.hash.clone()))
+    }
+    pub(crate) fn visit_packed(&self, f: impl FnMut(ObjectRef) -> Result<()>) -> Result<()> {
+        super::packed::visit(&self.root, f)
+    }
+    pub(crate) fn remove_packed(&self, hashes: &[String]) -> Result<()> {
+        super::packed::remove(&self.root, hashes)
     }
     pub fn directory(&self) -> &Path {
         &self.root

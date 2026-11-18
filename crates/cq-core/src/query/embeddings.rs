@@ -8,6 +8,29 @@ pub struct TokenVectors {
     pub digest: String,
 }
 impl TokenVectors {
+    pub fn configured() -> Result<Option<std::sync::Arc<Self>>> {
+        let dir = std::env::var_os("CQ_TOKEN_VECTORS")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe().ok().and_then(|e| {
+                    Some(
+                        e.parent()?
+                            .parent()?
+                            .parent()?
+                            .join(".codequest-tools/embeddings"),
+                    )
+                })
+            });
+        dir.filter(|d| d.join("code_vectors.bin").is_file())
+            .map(|d| {
+                Self::load(
+                    &std::fs::read_to_string(d.join("code_tokens.txt"))?,
+                    std::fs::read(d.join("code_vectors.bin"))?,
+                )
+                .map(std::sync::Arc::new)
+            })
+            .transpose()
+    }
     pub fn load(vocabulary: &str, bytes: Vec<u8>) -> Result<Self> {
         if bytes.len() < 8 {
             return Err(Error::new("InvalidEmbeddingModel", "missing header"));

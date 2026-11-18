@@ -28,24 +28,7 @@ struct Job {
 }
 impl Service {
     pub fn open(root: &Path) -> Result<Self> {
-        let model_dir = std::env::var_os("CQ_TOKEN_VECTORS")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::current_exe().ok().and_then(|e| {
-                    e.parent()?
-                        .parent()?
-                        .parent()
-                        .map(|p| p.join(".codequest-tools/embeddings"))
-                })
-            });
-        let model = if let Some(dir) = model_dir.filter(|d| d.join("code_vectors.bin").exists()) {
-            Some(Arc::new(cq_core::query::embeddings::TokenVectors::load(
-                &std::fs::read_to_string(dir.join("code_tokens.txt"))?,
-                std::fs::read(dir.join("code_vectors.bin"))?,
-            )?))
-        } else {
-            None
-        };
+        let model = cq_core::query::embeddings::TokenVectors::configured()?;
         Ok(Self {
             store: LocalStore::open(root)?,
             jobs: Mutex::new(HashMap::new()),
@@ -60,7 +43,12 @@ impl Service {
         Ok(Arc::new(self.store.load_semantics(project, Some(&rev))?))
     }
     pub fn index(&self, request: IndexRequest) -> Result<Value> {
-        index_repository(&request, &self.store, &CaptureControl::default())
+        match index_repository(&request, &self.store, &CaptureControl::default()) {
+            Err(Error::PublicationInProgress { project, revision }) => Ok(
+                json!({"state":"publication_in_progress","project":project,"revision":revision,"continue_with":{"operation":"publication_status","revision":revision}}),
+            ),
+            other => other,
+        }
     }
     fn load_request(&self, project: &str) -> Result<IndexRequest> {
         let request: IndexRequest = serde_json::from_value(self.store.index_request(project)?)?;
@@ -74,6 +62,14 @@ impl Service {
         Ok(request)
     }
     pub fn refresh(&self, project: &str) -> Result<Value> {
+        match self.refresh_inner(project) {
+            Err(Error::PublicationInProgress { project, revision }) => Ok(
+                json!({"state":"publication_in_progress","project":project,"revision":revision,"continue_with":{"operation":"publication_status","revision":revision}}),
+            ),
+            other => other,
+        }
+    }
+    fn refresh_inner(&self, project: &str) -> Result<Value> {
         let request = self.load_request(project)?;
         if self.store.paged_enabled(project) {
             if let Some(value) = super::checkpoint::restore_paged(self, &request)? {
@@ -89,11 +85,25 @@ impl Service {
         self.index(request)
     }
     pub fn start(self: &Arc<Self>, request: IndexRequest) -> Result<Value> {
+        let pending = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, job)| job.state["state"] == "publication_in_progress")
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in pending {
+            self.job(&id, false)?;
+        }
         let mut jobs = self.jobs.lock().unwrap();
         {
             for (id, job) in jobs.iter() {
-                if job.state["state"] == "running" && job.state["project"] == request.name {
-                    return Ok(json!({"job":id,"state":"running","joined":true}));
+                if (job.state["state"] == "running"
+                    || job.state["state"] == "publication_in_progress")
+                    && job.state["project"] == request.name
+                {
+                    return Ok(json!({"job":id,"state":job.state["state"],"joined":true}));
                 }
             }
             if jobs
@@ -124,6 +134,9 @@ impl Service {
             let result = index_repository(&request, &service.store, &control);
             let state = match result {
                 Ok(v) => json!({"state":"complete","result":v}),
+                Err(Error::PublicationInProgress { project, revision }) => {
+                    json!({"state":"publication_in_progress","project":project,"revision":revision,"continue_with":{"operation":"publication_status","revision":revision}})
+                }
                 Err(e) => {
                     if let Some(revision) = e.candidate_revision() {
                         json!({"state":"commit_unknown","revision":revision,"project":request.name,"error":e.to_string(),"continue_with":{"operation":"resolve","revision":revision}})
@@ -216,7 +229,26 @@ impl Service {
         if cancel {
             j.control.cancel();
         }
-        Ok(json!({"job":id,"status":j.state,"cancellation_requested":j.control.is_cancelled()}))
+        let mut state = j.state.clone();
+        let cancelled = j.control.is_cancelled();
+        drop(jobs);
+        if state["state"] == "publication_in_progress" {
+            let project = state["project"].as_str().unwrap_or_default();
+            let revision = state["revision"].as_str().unwrap_or_default();
+            let status = self.dispatch(
+                project,
+                "publication_status",
+                json!({"revision":revision}),
+                None,
+            )?;
+            if let Some(outcome) = status["result"]["outcome"].as_str() {
+                state = json!({"state":match outcome {"Committed"=>"complete","NotCommitted"=>"failed",_=>"commit_unknown"},"project":project,"revision":revision,"result":status});
+                if let Some(j) = self.jobs.lock().unwrap().get_mut(id) {
+                    j.state = state.clone();
+                }
+            }
+        }
+        Ok(json!({"job":id,"status":state,"cancellation_requested":cancelled}))
     }
     pub fn dispatch(
         &self,
@@ -275,6 +307,13 @@ impl Service {
                 "query arguments must be an object",
             ));
         }
+        let selected_operation = if operation == "query" {
+            args["operation"].as_str().unwrap_or("overview")
+        } else {
+            operation
+        }
+        .to_owned();
+        let operation = selected_operation.as_str();
         if operation == "resolve" {
             let revision = args["revision"].as_str().or(revision).ok_or_else(|| {
                 Error::new("MissingRevision", "resolve needs the candidate revision")
@@ -282,6 +321,20 @@ impl Service {
             return Ok(serde_json::to_value(
                 self.store.resolve_publication(project, revision)?,
             )?);
+        }
+        if operation == "publication_status" {
+            let revision = args["revision"].as_str().or(revision).ok_or_else(|| {
+                Error::new(
+                    "MissingRevision",
+                    "publication_status requires a revision handle",
+                )
+            })?;
+            let result = cq_store::runtime::Client::new(&self.store.root)?
+                .call(json!({"op":"publication_status","project":project,"revision":revision}))?;
+            if result["result"]["outcome"] == "Committed" {
+                self.store.resolve_publication(project, revision)?;
+            }
+            return Ok(result);
         }
         if operation == "next" {
             let token = args["cursor"]
@@ -315,13 +368,6 @@ impl Service {
                 guard,
             );
         }
-        let selected_operation = if operation == "query" {
-            args["operation"].as_str().unwrap_or("overview")
-        } else {
-            operation
-        }
-        .to_owned();
-        let operation = selected_operation.as_str();
         if operation == "delete" {
             self.store.delete_project_index(project)?;
             return Ok(json!({"state":"index_deleted","project":project}));
@@ -384,9 +430,13 @@ impl Service {
             let max_work = args["max_work"].as_u64().unwrap_or(1_000_000);
             let max_job_bytes = args["max_job_bytes"].as_u64().unwrap_or(64 * 1024 * 1024);
             if records > max_work || r.changes.inventory_bytes > max_job_bytes {
+                let mut retry = args.clone();
+                retry["operation"] = json!(operation);
+                retry["max_work"] = json!(records.max(max_work));
+                retry["max_job_bytes"] = json!(r.changes.inventory_bytes.max(max_job_bytes));
                 return Err(Error::new(
                     "QueryWorkBudget",
-                    "global/compatibility job exceeds max_work or max_job_bytes; raise the explicit job budget or select a local query",
+                    json!({"message":"global/compatibility job requires explicit export; the suggested budgets permit admission, not a latency guarantee", "revision":r.revision,"required_records":records,"required_inventory_bytes":r.changes.inventory_bytes,"continue_with":retry}).to_string(),
                 ));
             }
         }
@@ -577,6 +627,16 @@ impl Service {
             owned.as_ref().unwrap()
         };
         let metadata = reader.metadata();
+        if operation == "cypher"
+            && let Some((column, count)) = cq_core::query::architecture::cypher_count(
+                metadata,
+                args["text"].as_str().unwrap_or(""),
+            )
+        {
+            return Ok(Some(
+                json!({"revision":reader.revision(),"context":null,"items":[{"columns":[column],"values":[count]}],"total":1,"total_kind":"exact","truncated":false,"next_cursor":null,"state":"results","coverage":[],"gaps":[],"hidden":[],"work":0,"elapsed_ms":0,"read_stats":reader.stats(),"execution_path":"precomputed_revision_statistics"}),
+            ));
+        }
         if operation == "annotations" {
             return Ok(Some(json!(self.store.paged_annotations(project, reader)?)));
         }

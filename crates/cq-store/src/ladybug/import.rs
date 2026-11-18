@@ -11,7 +11,7 @@ use cq_core::{
     model::digest,
     ports::facts::{FactRef, ReadStats},
 };
-use lbug::{Connection, Value};
+use lbug::Connection;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 const PAGE_BYTES: u64 = 16 * 1024 * 1024;
@@ -229,6 +229,7 @@ impl Projection {
                 return Err(e);
             }
             let mut batch = Batch::new()?;
+            let existing = super::membership::Membership::load(&c)?;
             let mut chunk = Vec::<(String, FactRef)>::new();
             let mut consume = |chunk: &mut Vec<(String, FactRef)>, bytes: &[u8]| -> Result<()> {
                 if chunk.is_empty() {
@@ -238,19 +239,8 @@ impl Projection {
                     .iter()
                     .map(|(key, f)| digest(format!("{key}:{}", f.digest).as_bytes()))
                     .collect::<Vec<_>>();
-                let existing = c
-                    .query(&format!(
-                        "MATCH (f:Fact) WHERE f.id IN {} RETURN f.id",
-                        serde_json::to_string(&ids)?
-                    ))
-                    .map_err(err)?
-                    .filter_map(|r| match r.into_iter().next() {
-                        Some(Value::String(v)) => Some(v),
-                        _ => None,
-                    })
-                    .collect::<BTreeSet<_>>();
                 for ((key, f), id) in std::mem::take(chunk).into_iter().zip(ids) {
-                    if existing.contains(&id) {
+                    if existing.contains(&super::membership::key(&id)?)? {
                         continue;
                     }
                     let v = decode_bytes(bytes, &f)?;
@@ -312,7 +302,6 @@ impl Projection {
                 // the bounded native CSV transaction spans several pages.
                 consume(&mut chunk, &bytes)?;
             }
-            drop(consume);
             batch.flush(&c, &mut stats, point)?;
             point("native-before-receipt")?;
             transaction(&c, || {

@@ -110,6 +110,8 @@ trace {"subject":"完整实体ID","depth":5,"include_candidates":true}
 
 终端中按 `Ctrl+C`：正在查询时请求取消，空闲时退出；也可输入 `quit` 或按 `Ctrl+D` 退出。活客户端的空闲会话保留固定版本，并为仍有效的会话租约续期。共享 StoreHost 使用独立进程组，一个终端的中断或退出不会终止其他客户端。
 
+交互终端会显示启动阶段、耗时、已就绪状态和 `cq[项目]>` 提示符；慢查询每两秒提示等待时间。提示写入 stderr，stdout 保留 JSON 响应。后台 StoreHost 的启动、慢请求和错误日志保存在 store 目录的 `store-host.log`。
+
 其他语言：
 
 ```bash
@@ -118,6 +120,27 @@ target/release/cq index --root /path/to/cxx-repo --language cpp --name cpp-demo 
 ```
 
 C/C++ 会真实重放 compilation database 中的编译命令，包含原有编译输出的写入。应使用项目自己的分析构建目录。索引也会执行项目的 build script、proc macro 或 Go 构建工具。
+
+### 大仓库索引与检索
+
+以下能力当前属于开发实现：已完成构建与局部回归，brocade 的全量索引、发布和查询性能验收尚未完成。首次索引的关系目录采用磁盘分段排序和批量建树；后续增量更新沿用按变更更新的路径。
+
+Rust HIR 复用原生数据库，按编译单元、每片最多 32 个源码文件导出；各片的文件数、字节数和耗时保存在 run 目录的 `hir-export.progress.jsonl` 与 `hir-export.hir-shards/timings.json`。总超时默认为 `900 + 20 × crate 数` 秒，可用正整数环境变量 `CQ_HIR_TIMEOUT_SECS` 覆盖。分片仍共享编译器前端的项目状态，不能据此声称前端内存与项目规模无关。
+
+整个磁盘导出流及解析归档的默认预算为 8 GiB，可通过 `CQ_NATIVE_EXPORT_MAX_BYTES` 设置（字节数，最大 16 GiB）；超过预算会保留原始文件并拒绝发布。它与单条事实的 8 MiB 限制分别计算，超大 Value 仍报告原文位置。
+
+新索引将实体词项、名称三元组、文档三元组和实体向量随 revision 固化；名称查询和文档子串查询先查候选，再用原条件验证。短于三个字符的子串、一般正则仍可能扫描。语义查询默认使用 LSH 近似候选，并返回 `ApproximateVectorCandidates` 缺口；需要穷尽存量向量时传 `"exact_semantic":true`（REPL 可在 JSON 参数中设置）。排名按有界窗口分页，继续查询可能重新扫描候选。近似检索不保证召回率。查询与增量发布必须使用该索引原有的向量模型，换模型需新建索引，不能混合两个模型的向量。
+
+旧 revision 没有这些倒排项时保留原查询路径；增量更新不会把缺项的旧索引冒充新索引。要启用新索引，请在新的 store 目录或新的项目名下重新执行 `index`；可通过 revision 元数据的 `search_index.version` 检查版本。已有旧版 loose objects 继续可读，新发布使用不可变段文件与哈希定位表，减少物理文件数；回收目前释放完全失效的段，部分失效段仍保留。
+
+发布交给 StoreHost 执行，客户端轮询有状态的提交句柄。`CQ_PUBLICATION_WAIT_MS` 控制本次客户端等待时间（默认 120000 毫秒）；超过后正常返回 `publication_in_progress` 和 revision，可用以下命令继续查询，重启后也会检查持久化提交结果。MCP 的 `index_status` 同样刷新发布状态；客户端结束不撤销已开始的提交。
+
+```bash
+cq query --store /path/to/state --project PROJECT --json \
+  '{"operation":"publication_status","revision":"REVISION"}'
+```
+
+无条件的节点、关系及种类计数使用固定 revision 的预计算统计；其他 Cypher 仍是显式的全图作业，受 `max_work` 和 `max_job_bytes` 限制。例如按实际记录数和发布清单大小调整 `{"operation":"cypher","text":"...","max_work":10000000,"max_job_bytes":1073741824,"timeout_ms":30000}`，它不会自动变成局部、常量成本查询。
 
 ## MCP 与单次查询
 

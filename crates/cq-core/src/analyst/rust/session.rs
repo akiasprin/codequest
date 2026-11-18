@@ -115,7 +115,15 @@ impl Worker {
         Ok((child, output))
     }
     fn request(&mut self, root: &Path, output: &Path, control: &CaptureControl) -> Result<()> {
-        self.request_with_deadline(root, output, control, Duration::from_secs(900))
+        let project = root.join("rust-project.json");
+        let crates = std::fs::read(&project)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["crates"].as_array().map(Vec::len))
+            .unwrap_or(0);
+        let seconds =
+            timeout_seconds(std::env::var("CQ_HIR_TIMEOUT_SECS").ok().as_deref(), crates)?;
+        self.request_with_deadline(root, output, control, Duration::from_secs(seconds))
     }
     fn request_with_deadline(
         &mut self,
@@ -152,6 +160,16 @@ impl Worker {
                             "stale/malformed native session reply",
                         ));
                     }
+                    if reply["state"] == "progress" {
+                        if let Ok(mut log) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(output.with_extension("progress.jsonl"))
+                        {
+                            let _ = writeln!(log, "{}", reply);
+                        }
+                        continue;
+                    }
                     if reply["ok"] != true {
                         return Err(Error::new(
                             "ProviderFailed",
@@ -167,6 +185,17 @@ impl Worker {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+}
+fn timeout_seconds(config: Option<&str>, crates: usize) -> Result<u64> {
+    match config {
+        Some(v) => v.parse::<u64>().ok().filter(|n| *n > 0).ok_or_else(|| {
+            Error::new(
+                "InvalidProviderBudget",
+                "CQ_HIR_TIMEOUT_SECS must be a positive integer",
+            )
+        }),
+        None => Ok(900u64.saturating_add((crates as u64).saturating_mul(20))),
     }
 }
 impl Drop for Worker {
@@ -238,6 +267,15 @@ pub fn export(provider: &Path, root: &Path, output: &Path, control: &CaptureCont
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hir_deadline_scales_with_observed_crates_and_validates_override() {
+        assert_eq!(timeout_seconds(None, 0).unwrap(), 900);
+        assert_eq!(timeout_seconds(None, 100).unwrap(), 2900);
+        assert_eq!(timeout_seconds(Some("123"), 100).unwrap(), 123);
+        for v in ["0", "", "-1", "not-a-number"] {
+            assert!(timeout_seconds(Some(v), 100).is_err());
+        }
+    }
     use std::os::unix::fs::PermissionsExt;
     fn fixture(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();

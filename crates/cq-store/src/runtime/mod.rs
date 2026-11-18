@@ -10,7 +10,7 @@ use std::{
     collections::BTreeMap,
     io::{Read, Write},
     os::unix::{
-        fs::PermissionsExt,
+        fs::{OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
         process::CommandExt,
     },
@@ -92,6 +92,12 @@ impl Client {
                     "build cq-store-host alongside cq or set CQ_STORE_HOST",
                 )
             })?;
+        let log_path = self.root.join("store-host.log");
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&log_path)?;
         let mut child = std::process::Command::new(executable)
             .arg("--store")
             .arg(&self.root)
@@ -100,7 +106,7 @@ impl Client {
             .process_group(0)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(log)
             .spawn()?;
         std::thread::spawn(move || {
             let _ = child.wait();
@@ -114,7 +120,7 @@ impl Client {
         }
         Err(Error::new(
             "StoreHostUnavailable",
-            "host startup failed; run cq-store-host --store PATH for diagnostics",
+            format!("host startup failed; inspect {}", log_path.display()),
         ))
     }
     pub fn call(&self, v: Value) -> Result<Value> {
@@ -125,6 +131,7 @@ impl Client {
             v["op"].as_str(),
             Some(
                 "ping"
+                    | "publication_status"
                     | "get"
                     | "scan"
                     | "count"
@@ -211,16 +218,58 @@ impl Client {
         })
     }
     pub fn publish(&self, r: &Revision, expected: Option<&str>) -> Result<CommitResult> {
-        match self
-            .call(json!({"op":"publish","project":r.project,"manifest":r,"expected":expected}))
-        {
-            Ok(v) => Ok(serde_json::from_value(v)?),
-            Err(e) => Ok(CommitResult {
-                revision: r.revision.clone(),
-                outcome: CommitOutcome::Unknown,
-                detail: Some(e.to_string()),
-            }),
+        let wait_ms = std::env::var("CQ_PUBLICATION_WAIT_MS")
+            .ok()
+            .map(|s| s.parse::<u64>())
+            .transpose()
+            .map_err(|_| {
+                Error::new(
+                    "InvalidPublicationBudget",
+                    "CQ_PUBLICATION_WAIT_MS must be milliseconds",
+                )
+            })?
+            .unwrap_or(120_000);
+        let started = Instant::now();
+        let result = (|| -> Result<CommitResult> {
+            if let Err(e) = self.call(
+                json!({"op":"publish_start","project":r.project,"manifest":r,"expected":expected}),
+            ) {
+                if !matches!(e, Error::Io(_)) {
+                    return Ok(CommitResult {
+                        revision: r.revision.clone(),
+                        outcome: CommitOutcome::NotCommitted,
+                        detail: Some(e.to_string()),
+                    });
+                }
+                return Err(e);
+            }
+            loop {
+                let v = self.call(
+                    json!({"op":"publication_status","project":r.project,"revision":r.revision}),
+                )?;
+                if let Some(result) = v.get("result") {
+                    return Ok(serde_json::from_value(result.clone())?);
+                }
+                if started.elapsed() >= Duration::from_millis(wait_ms) {
+                    return Err(Error::PublicationInProgress {
+                        project: r.project.clone(),
+                        revision: r.revision.clone(),
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })();
+        if matches!(&result, Err(Error::PublicationInProgress { .. })) {
+            return result;
         }
+        Ok(result.unwrap_or_else(|e| CommitResult {
+            revision: r.revision.clone(),
+            outcome: CommitOutcome::Unknown,
+            detail: Some(format!(
+                "{e}; recover with publication_status for project {} revision {}",
+                r.project, r.revision
+            )),
+        }))
     }
 }
 pub struct RemoteView {
@@ -347,6 +396,11 @@ struct Server {
     root: PathBuf,
     hosts: Mutex<BTreeMap<String, Arc<StoreHost>>>,
     views: Mutex<BTreeMap<String, HeldView>>,
+    publications: Mutex<BTreeMap<String, Publication>>,
+}
+struct Publication {
+    seal: String,
+    result: Arc<Mutex<Option<CommitResult>>>,
 }
 impl Server {
     fn prune_views(&self) {
@@ -388,7 +442,16 @@ impl Server {
                 ));
             }
         }
+        eprintln!(
+            "{}",
+            json!({"event":"project_opening","project":project,"phase":"open database and recover revisions","time_ms":cq_capture_protocol::now_ms()})
+        );
+        let started = Instant::now();
         let host = StoreHost::open(&self.root, project)?;
+        eprintln!(
+            "{}",
+            json!({"event":"project_ready","project":project,"elapsed_ms":started.elapsed().as_millis()as u64,"time_ms":cq_capture_protocol::now_ms()})
+        );
         hosts.insert(project.into(), host.clone());
         Ok(host)
     }
@@ -399,7 +462,88 @@ impl Server {
         };
         let op = s("op")?;
         if op == "ping" {
-            return Ok(json!({"pid":std::process::id(),"format":2}));
+            return Ok(json!({"pid":std::process::id(),"format":2,"publication_protocol":1}));
+        }
+        if op == "publish_start" {
+            let r: Revision = serde_json::from_value(v["manifest"].clone())?;
+            if r.project != s("project")? {
+                return Err(Error::new("WrongProject", "publication binding"));
+            }
+            let key = format!("{}:{}", r.project, r.revision);
+            let h = self.host(&r.project)?;
+            let mut tasks = self.publications.lock().unwrap();
+            if tasks.get(&key).is_some_and(|p| {
+                p.result
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|r| r.outcome == CommitOutcome::NotCommitted)
+            }) {
+                tasks.remove(&key);
+            }
+            if let Some(old) = tasks.get(&key) {
+                if old.seal != r.seal {
+                    return Err(Error::new(
+                        "RevisionConflict",
+                        "publication handle has a different seal",
+                    ));
+                }
+            } else {
+                if tasks.len() >= 128 {
+                    tasks.retain(|_, p| p.result.lock().unwrap().is_none());
+                }
+                if tasks.len() >= 128 {
+                    return Err(Error::new("StoreBusy", "publication handle budget"));
+                }
+                let result = Arc::new(Mutex::new(None));
+                tasks.insert(
+                    key,
+                    Publication {
+                        seal: r.seal.clone(),
+                        result: result.clone(),
+                    },
+                );
+                let expected = v["expected"].as_str().map(str::to_owned);
+                std::thread::spawn(move || {
+                    let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||h.publish(&r, expected.as_deref()))).unwrap_or_else(|_|CommitResult{revision:r.revision.clone(),outcome:CommitOutcome::Unknown,detail:Some("publication worker panicked; resolve the durable candidate before retrying".into())});
+                    *result.lock().unwrap() = Some(committed);
+                });
+            }
+            return Ok(
+                json!({"state":"in_progress","handle":{"project":v["project"],"revision":v["manifest"]["revision"]},"continue_with":{"operation":"publication_status","revision":v["manifest"]["revision"]}}),
+            );
+        }
+        if op == "publication_status" {
+            let project = s("project")?;
+            let revision = s("revision")?;
+            let task = self
+                .publications
+                .lock()
+                .unwrap()
+                .get(&format!("{project}:{revision}"))
+                .map(|p| p.result.clone());
+            if let Some(task) = task {
+                let mut decision = task.lock().unwrap().clone();
+                if decision
+                    .as_ref()
+                    .is_some_and(|r| r.outcome == CommitOutcome::Unknown)
+                {
+                    let recovered = self.host(project)?.resolve(revision)?;
+                    if recovered.outcome != CommitOutcome::Unknown {
+                        *task.lock().unwrap() = Some(recovered.clone());
+                        decision = Some(recovered);
+                    }
+                }
+                return Ok(match decision {
+                    Some(result) => json!({"state":"finished","result":result}),
+                    None => {
+                        json!({"state":"in_progress","handle":{"project":project,"revision":revision},"continue_with":{"operation":"publication_status","revision":revision}})
+                    }
+                });
+            }
+            return Ok(
+                json!({"state":"recovered","result":self.host(project)?.resolve(revision)?}),
+            );
         }
         if op == "delete" {
             let project = s("project")?;
@@ -532,7 +676,26 @@ impl Server {
                     let r: Revision = serde_json::from_value(v["manifest"].clone())?;
                     Ok(serde_json::to_value(h.publish(&r, v["expected"].as_str()))?)
                 }
-                "resolve" => Ok(serde_json::to_value(h.resolve(s("revision")?)?)?),
+                "resolve" => {
+                    let revision = s("revision")?;
+                    let result = h.resolve(revision)?;
+                    if result.outcome != CommitOutcome::Unknown
+                        && let Some(task) = self
+                            .publications
+                            .lock()
+                            .unwrap()
+                            .get(&format!("{}:{revision}", s("project")?))
+                    {
+                        let mut cached = task.result.lock().unwrap();
+                        if cached
+                            .as_ref()
+                            .is_some_and(|r| r.outcome == CommitOutcome::Unknown)
+                        {
+                            *cached = Some(result.clone());
+                        }
+                    }
+                    Ok(serde_json::to_value(result)?)
+                }
                 "rebuild" => Ok(json!({"epoch":h.rebuild()?})),
                 "compact" => h.compact(),
                 "export" => {
@@ -618,10 +781,15 @@ pub fn serve(root: &Path) -> Result<()> {
     }
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    eprintln!(
+        "{}",
+        json!({"event":"host_ready","pid":std::process::id(),"store":root,"time_ms":cq_capture_protocol::now_ms()})
+    );
     let server = Arc::new(Server {
         root,
         hosts: Mutex::new(BTreeMap::new()),
         views: Mutex::new(BTreeMap::new()),
+        publications: Mutex::new(BTreeMap::new()),
     });
     use std::sync::atomic::{AtomicUsize, Ordering};
     listener.set_nonblocking(true)?;
@@ -651,10 +819,19 @@ pub fn serve(root: &Path) -> Result<()> {
                         }
                     }
                     let _active = Active(active);
+                    let started = Instant::now();
+                    let mut operation = String::from("receive");
                     let response = (|| {
                         let request = receive(&mut stream)?;
+                        operation = request["op"].as_str().unwrap_or("unknown").into();
                         server.request(request)
                     })();
+                    if response.is_err() || started.elapsed() >= Duration::from_secs(1) {
+                        eprintln!(
+                            "{}",
+                            json!({"event":"request_finished","operation":operation,"elapsed_ms":started.elapsed().as_millis()as u64,"error":response.as_ref().err().map(|e|e.code()),"time_ms":cq_capture_protocol::now_ms()})
+                        );
+                    }
                     let value = match response {
                         Ok(v) => json!({"result":v}),
                         Err(e) => json!({"error":{"code":e.code(),"message":e.message()}}),
@@ -668,6 +845,12 @@ pub fn serve(root: &Path) -> Result<()> {
                     last_prune = Instant::now();
                 }
                 if active.load(Ordering::Acquire) == 0
+                    && !server
+                        .publications
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .any(|p| p.result.lock().unwrap().is_none())
                     && server.views.lock().unwrap().is_empty()
                     && last.elapsed() > Duration::from_secs(60)
                 {
@@ -688,6 +871,93 @@ pub fn serve(root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::facts::writer;
+
+    #[test]
+    fn publication_handle_survives_waits_retries_and_host_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let make_server = || Server {
+            root: dir.path().to_owned(),
+            hosts: Mutex::new(BTreeMap::new()),
+            publications: Mutex::new(BTreeMap::new()),
+            views: Mutex::new(BTreeMap::new()),
+        };
+        let server = make_server();
+        let project = "publication-protocol";
+        let revision = digest(b"publication-protocol-revision");
+        let mut manifest = writer::Revision {
+            format: 2,
+            project: project.into(),
+            revision: revision.clone(),
+            parent: None,
+            sequence: 1,
+            roots: Default::default(),
+            metadata: json!({"project":project,"revision":revision}),
+            changes: Default::default(),
+            seal: String::new(),
+        };
+        manifest.seal().unwrap();
+        let status = || json!({"op":"publication_status","project":project,"revision":revision});
+        let start = |m: &writer::Revision| json!({"op":"publish_start","project":project,"manifest":m,"expected":null});
+        let wait_result = |server: &Server| {
+            let started = Instant::now();
+            loop {
+                let result = server.request(status()).unwrap();
+                if result["state"] != "in_progress" {
+                    break result;
+                }
+                assert!(started.elapsed() < Duration::from_secs(10), "{result}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let mut bad = manifest.clone();
+        bad.seal = digest(b"wrong-seal");
+        server.request(start(&bad)).unwrap();
+        assert_eq!(wait_result(&server)["result"]["outcome"], "NotCommitted");
+        // An earlier uncertain decision must be replaced after durable resolve;
+        // otherwise retries keep returning the stale Unknown forever.
+        let key = format!("{project}:{revision}");
+        *server.publications.lock().unwrap()[&key]
+            .result
+            .lock()
+            .unwrap() = Some(CommitResult {
+            revision: revision.clone(),
+            outcome: CommitOutcome::Unknown,
+            detail: None,
+        });
+        assert_eq!(
+            server.request(status()).unwrap()["result"]["outcome"],
+            "NotCommitted"
+        );
+
+        let host = server.host(project).unwrap();
+        let hooks = host.root.join("test-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("after-index"), b"pause").unwrap();
+        let response = server.request(start(&manifest)).unwrap();
+        assert_eq!(response["handle"]["revision"], revision);
+        let started = Instant::now();
+        while !hooks.join("ready-after-index").exists() {
+            assert!(started.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(server.request(status()).unwrap()["state"], "in_progress");
+        // Repeated starts join the same seal and do not publish a second task.
+        server.request(start(&manifest)).unwrap();
+        assert_eq!(server.publications.lock().unwrap().len(), 1);
+        assert_eq!(
+            server.request(start(&bad)).unwrap_err().code(),
+            "RevisionConflict"
+        );
+        assert_eq!(host.head().unwrap(), None);
+        std::fs::write(hooks.join("release-after-index"), b"continue").unwrap();
+        assert_eq!(wait_result(&server)["result"]["outcome"], "Committed");
+        drop(host);
+        drop(server);
+        let restarted = make_server();
+        let recovered = restarted.request(status()).unwrap();
+        assert_eq!(recovered["state"], "recovered");
+        assert_eq!(recovered["result"]["outcome"], "Committed");
+    }
 
     #[test]
     fn idle_live_session_keeps_its_lease_and_dead_owner_is_reclaimed() {
@@ -715,6 +985,7 @@ mod tests {
         let server = Server {
             root: dir.path().to_owned(),
             hosts: Mutex::new(BTreeMap::new()),
+            publications: Mutex::new(BTreeMap::new()),
             views: Mutex::new(BTreeMap::from([(
                 "session".into(),
                 HeldView {

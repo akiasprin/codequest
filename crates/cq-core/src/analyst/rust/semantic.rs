@@ -219,10 +219,14 @@ pub fn analyze(
         .join("hir-export.json");
     super::session::export(&worker, &view.root, &output, control)?;
     let metadata = std::fs::metadata(&output)?;
-    if metadata.len() > 1024 * 1024 * 1024 {
+    let export_limit = crate::semantic::native_archive::export_limit()?;
+    if metadata.len() > export_limit {
         return Err(Error::new(
             "ProviderOutputLimit",
-            "HIR export exceeds 1 GiB",
+            format!(
+                "HIR export exceeds {export_limit} byte budget at {}",
+                output.display()
+            ),
         ));
     }
     let archive = workspace
@@ -257,7 +261,7 @@ pub fn analyze(
     );
     let blob = workspace
         .content()
-        .freeze(&output, "native_export_evidence", 1024 * 1024 * 1024)?
+        .freeze(&output, "native_export_evidence", export_limit)?
         .blob;
     snapshot.providers.push(ProviderRecord {
         analysis: raw

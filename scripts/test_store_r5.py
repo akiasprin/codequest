@@ -8,6 +8,11 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parent.parent
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--cq',type=Path,default=ROOT/'target/debug/cq');p.add_argument('--output',type=Path,required=True);p.add_argument('--only',choices=['matrix','maintenance','scale','migration'],action='append');a=p.parse_args();a.cq=a.cq.resolve();a.output=a.output.resolve();a.output.mkdir(parents=True,exist_ok=True)
 env=os.environ|{'CQ_STORE_HOST':str(a.cq.with_name('cq-store-host'))};cases=[];hosts=set();peaks={};stop=threading.Event()
+# The legacy writer runs as a Cargo test executable under debug/deps, while the
+# other writer is cq under debug. Bind both to the same embedding model rather
+# than letting installation-relative discovery select different models.
+if 'CQ_TOKEN_VECTORS' not in env and (ROOT/'.codequest-tools/embeddings/code_vectors.bin').is_file():
+ env['CQ_TOKEN_VECTORS']=str(ROOT/'.codequest-tools/embeddings')
 def check(ok,why):
  if not ok:raise AssertionError(why)
 def encoded(v):return json.dumps(v,ensure_ascii=False,separators=(',',':')).encode()

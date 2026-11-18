@@ -1,6 +1,43 @@
 use crate::model::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+/// Exact unconditional counts can use immutable revision statistics. Arbitrary
+/// Cypher still uses the explicit bounded export job, never a mutable latest graph.
+pub fn cypher_count(metadata: &Value, query: &str) -> Option<(String, u64)> {
+    let node=regex::Regex::new(r"(?i)^\s*MATCH\s*\(\s*(\w+)\s*(?::\s*`?(\w+)`?)?\s*\)\s*RETURN\s*count\(\s*(\w+|\*)\s*\)\s*(?:AS\s+(\w+))?\s*;?\s*$").ok()?;
+    if let Some(c) = node.captures(query) {
+        if &c[3] != "*" && c[3] != c[1] {
+            return None;
+        }
+        let n = if let Some(k) = c.get(2) {
+            metadata["entity_kinds"][k.as_str()].as_u64()?
+        } else {
+            metadata["counts"]["entities"].as_u64()?
+        };
+        return Some((
+            c.get(4)
+                .map(|m| m.as_str().to_owned())
+                .unwrap_or_else(|| format!("COUNT({})", &c[3])),
+            n,
+        ));
+    }
+    let edge=regex::Regex::new(r"(?i)^\s*MATCH\s*\(\s*\)\s*-\[\s*(\w+)\s*(?::\s*`?(\w+)`?)?\s*\]->\s*\(\s*\)\s*RETURN\s*count\(\s*(\w+|\*)\s*\)\s*(?:AS\s+(\w+))?\s*;?\s*$").ok()?;
+    let c = edge.captures(query)?;
+    if &c[3] != "*" && c[3] != c[1] {
+        return None;
+    }
+    let n = if let Some(k) = c.get(2) {
+        metadata["relation_kinds"][k.as_str()].as_u64()?
+    } else {
+        metadata["counts"]["relations"].as_u64()?
+    };
+    Some((
+        c.get(4)
+            .map(|m| m.as_str().to_owned())
+            .unwrap_or_else(|| format!("COUNT({})", &c[3])),
+        n,
+    ))
+}
 pub fn overview(s: &SemanticSnapshot) -> Vec<Value> {
     let mut kinds = BTreeMap::new();
     for e in &s.entities {

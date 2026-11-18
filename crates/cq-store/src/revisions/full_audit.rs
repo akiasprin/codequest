@@ -23,7 +23,7 @@ enum Owner {
 }
 struct Fact {
     reference: Key,
-    groups: [u32; 12],
+    groups: Vec<u32>,
     group_count: usize,
     family: Option<FactFamily>,
     owner: Owner,
@@ -46,6 +46,7 @@ fn family(s: &str) -> Option<FactFamily> {
 }
 #[derive(Default)]
 struct Proof {
+    indexed: bool,
     facts: HashMap<Key, Fact>,
     group_ids: HashMap<Key, u32>,
     groups: Vec<Group>,
@@ -79,12 +80,9 @@ impl Proof {
             .ok_or_else(|| Error::new("InvalidFactKey", &key))?;
         let f = family(name);
         let kh = hash(key.as_bytes());
-        let mut group_ids = [0; 12];
-        let names = cq_core::ports::facts::groups(name, &value);
-        if names.len() > group_ids.len() {
-            return Err(Error::new("AuditBudget", "too many fact directories"));
-        }
-        for (i, name) in names.iter().enumerate() {
+        let names = cq_core::ports::facts::groups_indexed(name, &value, self.indexed);
+        let mut group_ids = Vec::with_capacity(names.len());
+        for name in &names {
             let gh = hash(name.as_bytes());
             let id = if let Some(id) = self.group_ids.get(&gh) {
                 *id
@@ -95,7 +93,7 @@ impl Proof {
                 id
             };
             self.groups[id as usize].expected += 1;
-            group_ids[i] = id;
+            group_ids.push(id);
         }
         let owner = match f {
             Some(FactFamily::Entity | FactFamily::Body | FactFamily::Occurrence) => {
@@ -250,7 +248,10 @@ impl StoreHost {
             Ok(())
         })?;
         let page_count = pages.len();
-        let mut proof = Proof::default();
+        let mut proof = Proof {
+            indexed: r.metadata["search_index"]["version"] == 1,
+            ..Proof::default()
+        };
         for (_, rows) in pages {
             let bytes = self.objects.audit_bytes(&rows[0].1.object)?;
             // Rows sharing one physical page stay adjacent; hash/IO are not

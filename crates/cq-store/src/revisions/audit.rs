@@ -189,7 +189,15 @@ impl StoreHost {
                 (new.as_ref(), b.as_ref(), false),
             ] {
                 if let Some(value) = value {
-                    for group in cq_core::ports::facts::groups(family, value) {
+                    for group in cq_core::ports::facts::groups_indexed(
+                        family,
+                        value,
+                        if is_old {
+                            base.metadata["search_index"]["version"] == 1
+                        } else {
+                            r.metadata["search_index"]["version"] == 1
+                        },
+                    ) {
                         let entry = groups
                             .entry(group)
                             .or_default()

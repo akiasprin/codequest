@@ -25,7 +25,26 @@ struct Builder {
     metadata: serde_json::Map<String, Value>,
     rows: Vec<Row>,
     file: tempfile::NamedTempFile,
+    max_bytes: u64,
 }
+fn parse_export_limit(value: Option<&str>) -> Result<u64> {
+    value.map_or(Ok(8 * 1024 * 1024 * 1024), |v| {
+        v.parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0 && *n <= 16 * 1024 * 1024 * 1024)
+            .ok_or_else(|| {
+                Error::new(
+                    "InvalidProviderBudget",
+                    "CQ_NATIVE_EXPORT_MAX_BYTES must be 1..17179869184 bytes",
+                )
+            })
+    })
+}
+/// Bounds the complete disk-backed export, not an individual stored fact.
+pub fn export_limit() -> Result<u64> {
+    parse_export_limit(std::env::var("CQ_NATIVE_EXPORT_MAX_BYTES").ok().as_deref())
+}
+
 fn sketch(v: &mut Value) {
     match v {
         Value::Object(m) => {
@@ -73,10 +92,10 @@ impl Builder {
             out.flush()?;
         }
         let end = self.file.as_file_mut().stream_position()?;
-        if end > 2 * 1024 * 1024 * 1024 {
+        if end > self.max_bytes {
             return Err(Error::new(
                 "ProviderOutputLimit",
-                "native archive exceeds 2 GiB",
+                format!("native archive exceeds {} byte budget", self.max_bytes),
             ));
         }
         let index = self.rows.len();
@@ -166,16 +185,18 @@ impl<'de> Visitor<'de> for Top<'_> {
 }
 impl Archive {
     pub fn open(path: &Path) -> Result<Self> {
-        if std::fs::metadata(path)?.len() > 1024 * 1024 * 1024 {
+        let max_bytes = export_limit()?;
+        if std::fs::metadata(path)?.len() > max_bytes {
             return Err(Error::new(
                 "ProviderOutputLimit",
-                "native export exceeds 1 GiB",
+                format!("native export exceeds {max_bytes} byte budget"),
             ));
         }
         let mut b = Builder {
             metadata: serde_json::Map::new(),
             rows: vec![],
             file: tempfile::NamedTempFile::new()?,
+            max_bytes,
         };
         let mut deserializer =
             serde_json::Deserializer::from_reader(BufReader::new(std::fs::File::open(path)?));
@@ -362,5 +383,25 @@ impl Archive {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn export_budget_is_separate_from_fact_value_limits() {
+        assert_eq!(parse_export_limit(None).unwrap(), 8 * 1024 * 1024 * 1024);
+        assert_eq!(parse_export_limit(Some("1")).unwrap(), 1);
+        assert_eq!(
+            parse_export_limit(Some("17179869184")).unwrap(),
+            16 * 1024 * 1024 * 1024
+        );
+        for bad in ["0", "-1", "bytes", "17179869185"] {
+            assert_eq!(
+                parse_export_limit(Some(bad)).unwrap_err().code(),
+                "InvalidProviderBudget"
+            );
+        }
     }
 }
