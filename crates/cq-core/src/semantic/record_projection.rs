@@ -4,7 +4,7 @@ use super::{
     generation::{mapped, rebind, resolution},
     normalized::{self, Sink},
     production::{Production, ProvenanceObservation, UnitObservation},
-    records::{Record, Source},
+    records::{Record, Source, map_phase},
 };
 use crate::{Error, Result, model::*, ports::ContentReader};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -49,30 +49,40 @@ pub fn validate(
     let mut documents = HashSet::new();
     let mut parents = HashMap::new();
     for family in ["entity", "body", "occurrence", "document"] {
-        source.visit_family(family, &mut |r| {
-            if r.id().is_empty() {
-                return Err(invalid("empty identity"));
-            }
-            match r {
-                Record::Entity(e) => {
-                    ids.insert(e.id.clone());
-                    if let Some(p) = e.parent {
-                        parents.insert(e.id, p);
+        map_phase(
+            source,
+            Some(family),
+            &header.project,
+            &format!("prepare.validate.ids.{family}"),
+            "事实校验：收集身份",
+            Ok,
+            |rows| {
+                for r in rows {
+                    if r.id().is_empty() {
+                        return Err(invalid("empty identity"));
+                    }
+                    match r {
+                        Record::Entity(e) => {
+                            ids.insert(e.id.clone());
+                            if let Some(p) = e.parent {
+                                parents.insert(e.id, p);
+                            }
+                        }
+                        Record::Body(b) => {
+                            bodies.insert(b.id);
+                        }
+                        Record::Occurrence(o) => {
+                            occurrences.insert(o.id);
+                        }
+                        Record::Document(d) => {
+                            documents.insert(d.id);
+                        }
+                        _ => {}
                     }
                 }
-                Record::Body(b) => {
-                    bodies.insert(b.id);
-                }
-                Record::Occurrence(o) => {
-                    occurrences.insert(o.id);
-                }
-                Record::Document(d) => {
-                    documents.insert(d.id);
-                }
-                _ => {}
-            }
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
         // Catch missing containers before reading millions of occurrences and
         // relationships. Resolve details only for the first invalid entity.
         if family == "entity"
@@ -100,105 +110,114 @@ pub fn validate(
         }
         Ok(())
     };
-    source.visit(&mut |r| {
-        if r.id().is_empty() {
-            return Err(invalid("empty identity"));
-        }
-        let provenance = match &r {
-            Record::Entity(v) => Some(&v.provenance),
-            Record::Occurrence(v) => Some(&v.provenance),
-            Record::Relation(v) => Some(&v.provenance),
-            Record::Document(v) => Some(&v.provenance),
-            _ => None,
-        };
-        if provenance.is_some_and(|p| !header.provenance_records.contains_key(p)) {
-            return Err(invalid("dangling provenance"));
-        }
-        match r {
-            Record::Entity(e) => {
-                for a in e
-                    .source
-                    .iter()
-                    .chain(e.extent.iter())
-                    .chain(e.locations.anchors())
-                {
-                    anchor(a)?;
-                }
-                for nav in &e.type_navigation {
-                    anchor(&nav.source)?;
-                    if let Some(a) = &nav.extent {
+    map_phase(
+        source,
+        None,
+        &header.project,
+        "prepare.validate.references",
+        "事实校验：范围与跨文件引用",
+        |r| {
+            if r.id().is_empty() {
+                return Err(invalid("empty identity"));
+            }
+            let provenance = match &r {
+                Record::Entity(v) => Some(&v.provenance),
+                Record::Occurrence(v) => Some(&v.provenance),
+                Record::Relation(v) => Some(&v.provenance),
+                Record::Document(v) => Some(&v.provenance),
+                _ => None,
+            };
+            if provenance.is_some_and(|p| !header.provenance_records.contains_key(p)) {
+                return Err(invalid("dangling provenance"));
+            }
+            match r {
+                Record::Entity(e) => {
+                    for a in e
+                        .source
+                        .iter()
+                        .chain(e.extent.iter())
+                        .chain(e.locations.anchors())
+                    {
                         anchor(a)?;
                     }
-                    if nav.candidates.iter().any(|id| !ids.contains(id)) {
-                        return Err(invalid("dangling type candidate"));
+                    for nav in &e.type_navigation {
+                        anchor(&nav.source)?;
+                        if let Some(a) = &nav.extent {
+                            anchor(a)?;
+                        }
+                        if nav.candidates.iter().any(|id| !ids.contains(id)) {
+                            return Err(invalid("dangling type candidate"));
+                        }
+                    }
+                    if e.parent.as_ref().is_some_and(|p| !ids.contains(p))
+                        || e.type_definitions.iter().any(|p| !ids.contains(p))
+                    {
+                        return Err(dangling_entity(&e, &ids));
                     }
                 }
-                if e.parent.as_ref().is_some_and(|p| !ids.contains(p))
-                    || e.type_definitions.iter().any(|p| !ids.contains(p))
-                {
-                    return Err(dangling_entity(&e, &ids));
-                }
-            }
-            Record::Body(b) => {
-                anchor(&b.source)?;
-                if !ids.contains(&b.owner) || b.parent.as_ref().is_some_and(|p| !bodies.contains(p))
-                {
-                    return Err(invalid("dangling body owner/parent"));
-                }
-            }
-            Record::Occurrence(o) => {
-                anchor(&o.source)?;
-                for a in o.locations.anchors().chain(o.arguments.iter()) {
-                    anchor(a)?;
-                }
-                if o.owner
-                    .as_ref()
-                    .is_some_and(|p| !ids.contains(p) && !bodies.contains(p))
-                {
-                    return Err(invalid("dangling occurrence owner"));
-                }
-                for t in targets(&o.declaration)
-                    .into_iter()
-                    .chain(targets(&o.executable))
-                {
-                    if !ids.contains(t) && !bodies.contains(t) {
-                        return Err(invalid("dangling occurrence target"));
-                    }
-                }
-                for b in &o.argument_bindings {
+                Record::Body(b) => {
                     anchor(&b.source)?;
-                    if targets(&b.parameter).iter().any(|t| !ids.contains(*t)) {
-                        return Err(invalid("dangling argument binding"));
+                    if !ids.contains(&b.owner)
+                        || b.parent.as_ref().is_some_and(|p| !bodies.contains(p))
+                    {
+                        return Err(invalid("dangling body owner/parent"));
+                    }
+                }
+                Record::Occurrence(o) => {
+                    anchor(&o.source)?;
+                    for a in o.locations.anchors().chain(o.arguments.iter()) {
+                        anchor(a)?;
+                    }
+                    if o.owner
+                        .as_ref()
+                        .is_some_and(|p| !ids.contains(p) && !bodies.contains(p))
+                    {
+                        return Err(invalid("dangling occurrence owner"));
+                    }
+                    for t in targets(&o.declaration)
+                        .into_iter()
+                        .chain(targets(&o.executable))
+                    {
+                        if !ids.contains(t) && !bodies.contains(t) {
+                            return Err(invalid("dangling occurrence target"));
+                        }
+                    }
+                    for b in &o.argument_bindings {
+                        anchor(&b.source)?;
+                        if targets(&b.parameter).iter().any(|t| !ids.contains(*t)) {
+                            return Err(invalid("dangling argument binding"));
+                        }
+                    }
+                }
+                Record::Relation(r) => {
+                    if !ids.contains(&r.from)
+                        || !ids.contains(&r.to)
+                        || r.occurrence
+                            .as_ref()
+                            .is_some_and(|o| !occurrences.contains(o))
+                    {
+                        return Err(Error::new(
+                            "DanglingRelation",
+                            format!("{} -> {} ({:?})", r.from, r.to, r.kind),
+                        ));
+                    }
+                    if let Some(a) = &r.source {
+                        anchor(a)?;
+                    }
+                }
+                Record::Document(d) => {
+                    anchor(&d.source)?;
+                    if d.owner.as_ref().is_some_and(|o| !ids.contains(o))
+                        || d.parent.as_ref().is_some_and(|p| !documents.contains(p))
+                    {
+                        return Err(invalid("dangling document owner/parent"));
                     }
                 }
             }
-            Record::Relation(r) => {
-                if !ids.contains(&r.from)
-                    || !ids.contains(&r.to)
-                    || r.occurrence
-                        .as_ref()
-                        .is_some_and(|o| !occurrences.contains(o))
-                {
-                    return Err(Error::new(
-                        "DanglingRelation",
-                        format!("{} -> {} ({:?})", r.from, r.to, r.kind),
-                    ));
-                }
-                if let Some(a) = &r.source {
-                    anchor(a)?;
-                }
-            }
-            Record::Document(d) => {
-                anchor(&d.source)?;
-                if d.owner.as_ref().is_some_and(|o| !ids.contains(o))
-                    || d.parent.as_ref().is_some_and(|p| !documents.contains(p))
-                {
-                    return Err(invalid("dangling document owner/parent"));
-                }
-            }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+        |_| Ok(()),
+    )?;
     let mut done = HashSet::new();
     for child in parents.keys() {
         let mut chain = HashSet::new();
@@ -353,6 +372,47 @@ impl<'a> Live<'a> {
     }
 }
 impl Source for Live<'_> {
+    fn phase_progress(
+        &self,
+        p: &str,
+        phase: &str,
+        label: &str,
+        done: u64,
+        total: Option<u64>,
+        workers: usize,
+    ) {
+        self.source
+            .phase_progress(p, phase, label, done, total, workers);
+    }
+    fn family_len(&self, family: &str) -> Result<Option<u64>> {
+        if !self.partial {
+            return self.source.family_len(family);
+        }
+        let n = match family {
+            "entity" => self.ids.len(),
+            "body" => self.bodies.len(),
+            "occurrence" => self.occurrences.len(),
+            "document" => self.documents.len(),
+            _ => {
+                let mut n = 0;
+                self.visit_family(family, &mut |_| {
+                    n += 1;
+                    Ok(())
+                })?;
+                n
+            }
+        };
+        Ok(Some(n as u64))
+    }
+    fn visit_batches(
+        &self,
+        family: Option<&str>,
+        f: &mut dyn FnMut(Vec<Record>) -> Result<()>,
+    ) -> Result<()> {
+        self.source.visit_batches(family, &mut |rows| {
+            f(rows.into_iter().filter_map(|r| self.filter(r)).collect())
+        })
+    }
     fn get(&self, f: &str, id: &str) -> Result<Option<Record>> {
         Ok(self.source.get(f, id)?.and_then(|r| self.filter(r)))
     }
@@ -425,67 +485,102 @@ pub fn canonicalize(
             .unwrap_or_else(|| "$metadata".into())
     };
     let mut unmatched = 0;
-    source.visit_family("entity", &mut |r| {
-        if let Record::Entity(mut e) = r {
-            handles.apply(&mut e);
-            if e.attributes.contains_key("identity_scope_reason")
-                || e.source.is_none()
-                    && e.stable_handle
-                        .as_ref()
-                        .is_some_and(|h| h.starts_with("cqg1:"))
-            {
-                unmatched += 1;
+    map_phase(
+        source,
+        Some("entity"),
+        &header.project,
+        "prepare.identity.entities",
+        "身份映射：实体",
+        |r| {
+            if let Record::Entity(mut e) = r {
+                handles.apply(&mut e);
+                let unmatched = e.attributes.contains_key("identity_scope_reason")
+                    || e.source.is_none()
+                        && e.stable_handle
+                            .as_ref()
+                            .is_some_and(|h| h.starts_with("cqg1:"));
+                let id = if e.kind == EntityKind::CompilationUnit {
+                    format!("cqu1:{}", units.get(&e.unit).unwrap_or(&e.unit))
+                } else if let Some(h) = e.stable_handle.as_ref().filter(|h| h.starts_with("cq1:")) {
+                    h.clone()
+                } else {
+                    digest(&serde_json::to_vec(&(
+                        units.get(&e.unit),
+                        e.kind,
+                        super::identity::rust_symbol(&e.provider_id),
+                        &e.source,
+                        &e.signature,
+                        e.attributes.get("definition_kind"),
+                        (e.source.is_none() || e.attributes.contains_key("identity_scope_reason"))
+                            .then_some(&e.id),
+                    ))?)
+                };
+                return Ok(Some((e.id, id, unmatched)));
             }
-            let id = if e.kind == EntityKind::CompilationUnit {
-                format!("cqu1:{}", units.get(&e.unit).unwrap_or(&e.unit))
-            } else if let Some(h) = e.stable_handle.as_ref().filter(|h| h.starts_with("cq1:")) {
-                h.clone()
-            } else {
-                digest(&serde_json::to_vec(&(
-                    units.get(&e.unit),
-                    e.kind,
-                    super::identity::rust_symbol(&e.provider_id),
-                    &e.source,
-                    &e.signature,
-                    e.attributes.get("definition_kind"),
-                    (e.source.is_none() || e.attributes.contains_key("identity_scope_reason"))
-                        .then_some(&e.id),
-                ))?)
-            };
-            ids.insert(e.id.clone(), id);
-        }
-        Ok(())
-    })?;
-    source.visit_family("body", &mut |r| {
-        if let Record::Body(b) = r {
-            ids.insert(
-                b.id.clone(),
-                digest(&serde_json::to_vec(&(
+            Ok(None)
+        },
+        |rows| {
+            for (old, id, missing) in rows.into_iter().flatten() {
+                ids.insert(old, id);
+                unmatched += u64::from(missing);
+            }
+            Ok(())
+        },
+    )?;
+    let mut body_ids = HashMap::new();
+    map_phase(
+        source,
+        Some("body"),
+        &header.project,
+        "prepare.identity.bodies",
+        "身份映射：函数体",
+        |r| {
+            if let Record::Body(b) = r {
+                let id = digest(&serde_json::to_vec(&(
                     ids.get(&b.owner),
                     b.kind,
                     &b.source,
-                ))?),
-            );
-            body_meta.insert(b.id, (b.owner, b.source));
-        }
-        Ok(())
-    })?;
+                ))?);
+                return Ok(Some((b.id, id, b.owner, b.source)));
+            }
+            Ok(None)
+        },
+        |rows| {
+            for (old, id, owner, span) in rows.into_iter().flatten() {
+                body_ids.insert(old.clone(), id);
+                body_meta.insert(old, (owner, span));
+            }
+            Ok(())
+        },
+    )?;
+    ids.extend(body_ids);
     let mut docs = HashMap::new();
-    source.visit_family("document", &mut |r| {
-        if let Record::Document(d) = r {
-            docs.insert(
-                d.id.clone(),
-                digest(&serde_json::to_vec(&(
-                    &d.source,
-                    d.kind,
-                    &d.title,
-                    &d.text,
-                    d.owner.as_ref().and_then(|o| ids.get(o)),
-                ))?),
-            );
-        }
-        Ok(())
-    })?;
+    map_phase(
+        source,
+        Some("document"),
+        &header.project,
+        "prepare.identity.documents",
+        "身份映射：文档",
+        |r| {
+            if let Record::Document(d) = r {
+                return Ok(Some((
+                    d.id.clone(),
+                    digest(&serde_json::to_vec(&(
+                        &d.source,
+                        d.kind,
+                        &d.title,
+                        &d.text,
+                        d.owner.as_ref().and_then(|o| ids.get(o)),
+                    ))?),
+                )));
+            }
+            Ok(None)
+        },
+        |rows| {
+            docs.extend(rows.into_iter().flatten());
+            Ok(())
+        },
+    )?;
     for (old, id) in &docs {
         if ids.contains_key(old) {
             ids.insert(old.clone(), id.clone());
@@ -501,196 +596,270 @@ pub fn canonicalize(
         provenance.insert(next, v);
     }
     let mut referenced = BTreeSet::new();
-    source.visit(&mut |r| {
-        match &r {
-            Record::Entity(e) => {
-                for a in e
-                    .source
-                    .iter()
-                    .chain(e.extent.iter())
-                    .chain(e.locations.anchors())
-                {
-                    referenced.insert(a.file_revision.clone());
+    map_phase(
+        source,
+        None,
+        &header.project,
+        "prepare.sources",
+        "整理事实来源文件",
+        |r| {
+            let mut referenced = BTreeSet::new();
+            match &r {
+                Record::Entity(e) => {
+                    for a in e
+                        .source
+                        .iter()
+                        .chain(e.extent.iter())
+                        .chain(e.locations.anchors())
+                    {
+                        referenced.insert(a.file_revision.clone());
+                    }
+                    for nav in &e.type_navigation {
+                        referenced.insert(nav.source.file_revision.clone());
+                        if let Some(a) = &nav.extent {
+                            referenced.insert(a.file_revision.clone());
+                        }
+                    }
                 }
-                for nav in &e.type_navigation {
-                    referenced.insert(nav.source.file_revision.clone());
-                    if let Some(a) = &nav.extent {
+                Record::Body(b) => {
+                    referenced.insert(b.source.file_revision.clone());
+                }
+                Record::Occurrence(o) => {
+                    for a in std::iter::once(&o.source)
+                        .chain(o.locations.anchors())
+                        .chain(o.arguments.iter())
+                        .chain(o.argument_bindings.iter().map(|b| &b.source))
+                    {
                         referenced.insert(a.file_revision.clone());
                     }
                 }
-            }
-            Record::Body(b) => {
-                referenced.insert(b.source.file_revision.clone());
-            }
-            Record::Occurrence(o) => {
-                for a in std::iter::once(&o.source)
-                    .chain(o.locations.anchors())
-                    .chain(o.arguments.iter())
-                    .chain(o.argument_bindings.iter().map(|b| &b.source))
-                {
-                    referenced.insert(a.file_revision.clone());
+                Record::Relation(r) => {
+                    if let Some(a) = &r.source {
+                        referenced.insert(a.file_revision.clone());
+                    }
+                }
+                Record::Document(d) => {
+                    referenced.insert(d.source.file_revision.clone());
                 }
             }
-            Record::Relation(r) => {
-                if let Some(a) = &r.source {
-                    referenced.insert(a.file_revision.clone());
-                }
+            Ok(referenced)
+        },
+        |rows| {
+            for r in rows {
+                referenced.extend(r);
             }
-            Record::Document(d) => {
-                referenced.insert(d.source.file_revision.clone());
-            }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
     for id in referenced {
         if let Some(f) = files.get(&id) {
             sources.insert(f.logical_path.display(), Some(f.clone()));
         }
     }
-    source.visit_family("entity", &mut |r| {
-        if let Record::Entity(mut e) = r {
-            let old_id = e.id.clone();
-            let old_unit = e.unit.clone();
-            handles.apply(&mut e);
-            e.id = ids[&old_id].clone();
-            if e.stable_handle
-                .as_ref()
-                .is_some_and(|h| !h.starts_with("cq1:"))
-            {
-                e.stable_handle = None;
-            }
-            mapped(&mut e.unit, &units);
-            e.provider_id = super::identity::rust_symbol(&e.provider_id);
-            e.attributes.remove("native_token");
-            if e.kind == EntityKind::CompilationUnit {
-                e.provider_id = e.unit.clone();
-                e.attributes.remove("configuration");
-                e.stable_handle = None;
-                e.qualified_name = e.qualified_name.replace(&old_unit, &e.unit);
-            }
-            if matches!(e.kind, EntityKind::Document | EntityKind::DocSection) {
-                e.provider_id = e.id.clone();
-                e.qualified_name = format!("doc::{}", e.id);
-            }
-            if e.kind == EntityKind::Body {
-                e.provider_id = e.id.clone();
-                if let Some((owner, span)) = body_meta.get(&old_id) {
-                    e.qualified_name = format!("{}::body@{}", ids[owner], span.start);
+    map_phase(
+        source,
+        Some("entity"),
+        &header.project,
+        "prepare.normalize.entities",
+        "规范化：实体",
+        |r| {
+            if let Record::Entity(mut e) = r {
+                let old_id = e.id.clone();
+                let old_unit = e.unit.clone();
+                handles.apply(&mut e);
+                e.id = ids[&old_id].clone();
+                if e.stable_handle
+                    .as_ref()
+                    .is_some_and(|h| !h.starts_with("cq1:"))
+                {
+                    e.stable_handle = None;
                 }
-            }
-            if let Some(parent) = &mut e.parent {
-                mapped(parent, &ids);
-            }
-            for t in &mut e.type_definitions {
-                mapped(t, &ids);
-            }
-            for nav in &mut e.type_navigation {
-                for t in &mut nav.candidates {
+                mapped(&mut e.unit, &units);
+                e.provider_id = super::identity::rust_symbol(&e.provider_id);
+                e.attributes.remove("native_token");
+                if e.kind == EntityKind::CompilationUnit {
+                    e.provider_id = e.unit.clone();
+                    e.attributes.remove("configuration");
+                    e.stable_handle = None;
+                    e.qualified_name = e.qualified_name.replace(&old_unit, &e.unit);
+                }
+                if matches!(e.kind, EntityKind::Document | EntityKind::DocSection) {
+                    e.provider_id = e.id.clone();
+                    e.qualified_name = format!("doc::{}", e.id);
+                }
+                if e.kind == EntityKind::Body {
+                    e.provider_id = e.id.clone();
+                    if let Some((owner, span)) = body_meta.get(&old_id) {
+                        e.qualified_name = format!("{}::body@{}", ids[owner], span.start);
+                    }
+                }
+                if let Some(parent) = &mut e.parent {
+                    mapped(parent, &ids);
+                }
+                for t in &mut e.type_definitions {
                     mapped(t, &ids);
                 }
+                for nav in &mut e.type_navigation {
+                    for t in &mut nav.candidates {
+                        mapped(t, &ids);
+                    }
+                }
+                if let Some(c) = e.attributes.get_mut("definition_candidates") {
+                    let mut v = serde_json::from_str(c)?;
+                    rebind(&mut v, &ids);
+                    *c = serde_json::to_string(&v)?;
+                }
+                e.provenance = prov_ids[&e.provenance].clone();
+                let k = if e.source.is_none() && !e.unit.is_empty() {
+                    format!("$metadata:{}", e.unit)
+                } else {
+                    key(e.source.as_ref())
+                };
+                return Ok(Some((old_id, e.unit.clone(), k, Record::Entity(e))));
             }
-            if let Some(c) = e.attributes.get_mut("definition_candidates") {
-                let mut v = serde_json::from_str(c)?;
-                rebind(&mut v, &ids);
-                *c = serde_json::to_string(&v)?;
+            Ok(None)
+        },
+        |rows| {
+            let mut out = Vec::with_capacity(rows.len());
+            for (old, unit, k, r) in rows.into_iter().flatten() {
+                sources.entry(k.clone()).or_insert(None);
+                entity_units.insert(old.clone(), unit.clone());
+                entity_keys.insert(old, k.clone());
+                out.push((unit, k, r));
             }
-            e.provenance = prov_ids[&e.provenance].clone();
-            let k = if e.source.is_none() && !e.unit.is_empty() {
-                format!("$metadata:{}", e.unit)
-            } else {
-                key(e.source.as_ref())
-            };
-            sources.entry(k.clone()).or_insert(None);
-            entity_units.insert(old_id.clone(), e.unit.clone());
-            entity_keys.insert(old_id, k.clone());
-            sink.push(&e.unit.clone(), &k, Record::Entity(e))?;
-        }
-        Ok(())
-    })?;
-    source.visit_family("body", &mut |r| {
-        if let Record::Body(mut b) = r {
-            b.id = ids[&b.id].clone();
-            mapped(&mut b.unit, &units);
-            mapped(&mut b.owner, &ids);
-            if let Some(parent) = &mut b.parent {
-                mapped(parent, &ids);
+            sink.batch(out)
+        },
+    )?;
+    map_phase(
+        source,
+        Some("body"),
+        &header.project,
+        "prepare.normalize.bodies",
+        "规范化：函数体",
+        |r| {
+            if let Record::Body(mut b) = r {
+                b.id = ids[&b.id].clone();
+                mapped(&mut b.unit, &units);
+                mapped(&mut b.owner, &ids);
+                if let Some(parent) = &mut b.parent {
+                    mapped(parent, &ids);
+                }
+                return Ok(Some((
+                    b.unit.clone(),
+                    key(Some(&b.source)),
+                    Record::Body(b),
+                )));
             }
-            sink.push(&b.unit.clone(), &key(Some(&b.source)), Record::Body(b))?;
-        }
-        Ok(())
-    })?;
+            Ok(None)
+        },
+        |rows| sink.batch(rows.into_iter().flatten().collect()),
+    )?;
     let mut occurrences = HashMap::new();
-    source.visit_family("occurrence", &mut |r| {
-        if let Record::Occurrence(mut o) = r {
-            let old = o.id.clone();
-            mapped(&mut o.unit, &units);
-            if let Some(owner) = &mut o.owner {
-                mapped(owner, &ids);
+    map_phase(
+        source,
+        Some("occurrence"),
+        &header.project,
+        "prepare.normalize.occurrences",
+        "规范化：引用",
+        |r| {
+            if let Record::Occurrence(mut o) = r {
+                let old = o.id.clone();
+                mapped(&mut o.unit, &units);
+                if let Some(owner) = &mut o.owner {
+                    mapped(owner, &ids);
+                }
+                resolution(&mut o.declaration, &ids);
+                resolution(&mut o.executable, &ids);
+                for b in &mut o.argument_bindings {
+                    resolution(&mut b.parameter, &ids);
+                }
+                o.provenance = prov_ids[&o.provenance].clone();
+                o.id.clear();
+                o.id = digest(&serde_json::to_vec(&o)?);
+                return Ok(Some((
+                    old,
+                    o.id.clone(),
+                    (o.unit.clone(), key(Some(&o.source)), Record::Occurrence(o)),
+                )));
             }
-            resolution(&mut o.declaration, &ids);
-            resolution(&mut o.executable, &ids);
-            for b in &mut o.argument_bindings {
-                resolution(&mut b.parameter, &ids);
+            Ok(None)
+        },
+        |rows| {
+            let mut out = Vec::with_capacity(rows.len());
+            for (old, id, row) in rows.into_iter().flatten() {
+                occurrences.insert(old, id);
+                out.push(row);
             }
-            o.provenance = prov_ids[&o.provenance].clone();
-            o.id.clear();
-            o.id = digest(&serde_json::to_vec(&o)?);
-            occurrences.insert(old, o.id.clone());
-            sink.push(
-                &o.unit.clone(),
-                &key(Some(&o.source)),
-                Record::Occurrence(o),
-            )?;
-        }
-        Ok(())
-    })?;
-    source.visit_family("relation", &mut |r| {
-        if let Record::Relation(mut r) = r {
-            let unit = entity_units
-                .get(&r.from)
-                .map(String::as_str)
-                .unwrap_or("$project");
-            let k = r.source.as_ref().map(|a| key(Some(a))).unwrap_or_else(|| {
-                entity_keys
+            sink.batch(out)
+        },
+    )?;
+    map_phase(
+        source,
+        Some("relation"),
+        &header.project,
+        "prepare.normalize.relations",
+        "规范化：跨文件关系",
+        |r| {
+            if let Record::Relation(mut r) = r {
+                let unit = entity_units
                     .get(&r.from)
-                    .cloned()
-                    .unwrap_or_else(|| "$metadata".into())
-            });
-            mapped(&mut r.from, &ids);
-            mapped(&mut r.to, &ids);
-            if let Some(o) = &mut r.occurrence {
-                mapped(o, &occurrences);
+                    .map(String::as_str)
+                    .unwrap_or("$project");
+                let k = r.source.as_ref().map(|a| key(Some(a))).unwrap_or_else(|| {
+                    entity_keys
+                        .get(&r.from)
+                        .cloned()
+                        .unwrap_or_else(|| "$metadata".into())
+                });
+                mapped(&mut r.from, &ids);
+                mapped(&mut r.to, &ids);
+                if let Some(o) = &mut r.occurrence {
+                    mapped(o, &occurrences);
+                }
+                r.provenance = prov_ids[&r.provenance].clone();
+                r.id.clear();
+                r.id = digest(&serde_json::to_vec(&r)?);
+                return Ok(Some((unit.to_owned(), k, Record::Relation(r))));
             }
-            r.provenance = prov_ids[&r.provenance].clone();
-            r.id.clear();
-            r.id = digest(&serde_json::to_vec(&r)?);
-            sink.push(unit, &k, Record::Relation(r))?;
-        }
-        Ok(())
-    })?;
-    source.visit_family("document", &mut |r| {
-        if let Record::Document(mut d) = r {
-            let unit = d
-                .owner
-                .as_ref()
-                .and_then(|id| entity_units.get(id))
-                .map(String::as_str)
-                .unwrap_or("$project");
-            d.id = docs[&d.id].clone();
-            if let Some(o) = &mut d.owner {
-                mapped(o, &ids);
+            Ok(None)
+        },
+        |rows| sink.batch(rows.into_iter().flatten().collect()),
+    )?;
+    map_phase(
+        source,
+        Some("document"),
+        &header.project,
+        "prepare.normalize.documents",
+        "规范化：文档",
+        |r| {
+            if let Record::Document(mut d) = r {
+                let unit = d
+                    .owner
+                    .as_ref()
+                    .and_then(|id| entity_units.get(id))
+                    .map(String::as_str)
+                    .unwrap_or("$project");
+                d.id = docs[&d.id].clone();
+                if let Some(o) = &mut d.owner {
+                    mapped(o, &ids);
+                }
+                if let Some(parent) = &mut d.parent {
+                    mapped(parent, &docs);
+                }
+                for l in &mut d.links {
+                    resolution(&mut l.target, &ids);
+                }
+                d.provenance = prov_ids[&d.provenance].clone();
+                return Ok(Some((
+                    unit.to_owned(),
+                    key(Some(&d.source)),
+                    Record::Document(d),
+                )));
             }
-            if let Some(parent) = &mut d.parent {
-                mapped(parent, &docs);
-            }
-            for l in &mut d.links {
-                resolution(&mut l.target, &ids);
-            }
-            d.provenance = prov_ids[&d.provenance].clone();
-            sink.push(unit, &key(Some(&d.source)), Record::Document(d))?;
-        }
-        Ok(())
-    })?;
+            Ok(None)
+        },
+        |rows| sink.batch(rows.into_iter().flatten().collect()),
+    )?;
     let mut cfgs = header
         .units
         .iter()

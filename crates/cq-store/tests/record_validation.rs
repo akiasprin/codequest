@@ -84,3 +84,118 @@ fn prepared_spool_survives_releasing_the_raw_analysis_journal() {
     assert_eq!(entities, 3);
     assert!(store.analysis_records().is_none());
 }
+
+struct CountedProgress<'a> {
+    journal: &'a Journal,
+    phases: Mutex<std::collections::BTreeMap<String, (u64, u64)>>,
+}
+impl Source for CountedProgress<'_> {
+    fn visit(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.journal.visit(f)
+    }
+    fn get(&self, family: &str, id: &str) -> Result<Option<Record>> {
+        self.journal.get(family, id)
+    }
+    fn visit_family(&self, family: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.journal.visit_family(family, f)
+    }
+    fn family_len(&self, family: &str) -> Result<Option<u64>> {
+        self.journal.family_len(family)
+    }
+    fn visit_batches(
+        &self,
+        family: Option<&str>,
+        f: &mut dyn FnMut(Vec<Record>) -> Result<()>,
+    ) -> Result<()> {
+        self.journal.visit_batches(family, f)
+    }
+    fn phase_progress(
+        &self,
+        _: &str,
+        phase: &str,
+        _: &str,
+        done: u64,
+        total: Option<u64>,
+        workers: usize,
+    ) {
+        let total = total.expect("production journal must supply every phase total");
+        assert!(done <= total);
+        assert!((1..=128).contains(&workers));
+        let mut phases = self.phases.lock().unwrap();
+        if let Some((previous, old_total)) = phases.get(phase) {
+            assert!(done >= *previous);
+            assert_eq!(*old_total, total);
+        }
+        phases.insert(phase.into(), (done, total));
+    }
+}
+#[test]
+fn all_record_preparation_phases_reach_their_exact_totals() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(temp.path()).unwrap();
+    let mut header = paged_fixture::fixture(&store, 1500, 1);
+    header.revision.clear();
+    let journal = Journal::new(temp.path().into()).unwrap();
+    cq_core::semantic::records::drain(&mut header, &journal).unwrap();
+    let progress = CountedProgress {
+        journal: &journal,
+        phases: Mutex::new(Default::default()),
+    };
+    let _prepared = store.prepare_records(header, &progress).unwrap();
+    let phases = progress.phases.lock().unwrap();
+    for name in [
+        "prepare.validate.ids.entity",
+        "prepare.validate.references",
+        "prepare.handles.entities",
+        "prepare.identity.entities",
+        "prepare.sources",
+        "prepare.normalize.entities",
+        "prepare.normalize.relations",
+    ] {
+        let (done, total) = phases[name];
+        assert_eq!(done, total, "{name}");
+        assert!(total > 0, "{name}");
+    }
+    for (phase, (done, total)) in phases.iter() {
+        assert_eq!(done, total, "unfinished phase {phase}");
+    }
+}
+
+#[test]
+fn physical_batches_freeze_live_locators_while_callbacks_append_and_replace() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(temp.path()).unwrap();
+    let mut header = paged_fixture::fixture(&store, 5000, 1);
+    let journal = Journal::new(temp.path().into()).unwrap();
+    cq_core::semantic::records::drain(&mut header, &journal).unwrap();
+    let mut visited = std::collections::BTreeMap::new();
+    let mut first = true;
+    journal
+        .visit_batches(Some("entity"), &mut |rows| {
+            if first {
+                first = false;
+                let Some(Record::Entity(mut e)) = journal.get("entity", "f4900")? else {
+                    panic!()
+                };
+                e.name = "updated-after-visit-start".into();
+                journal.put(&header, Record::Entity(e.clone()), true)?;
+                e.id = "new-after-visit-start".into();
+                journal.put(&header, Record::Entity(e), false)?;
+            }
+            for row in rows {
+                if let Record::Entity(e) = row {
+                    visited.insert(e.id, e.name);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(visited.len(), 5000);
+    assert_eq!(visited["f4900"], "f4900");
+    assert!(!visited.contains_key("new-after-visit-start"));
+    let Some(Record::Entity(updated)) = journal.get("entity", "f4900").unwrap() else {
+        panic!()
+    };
+    assert_eq!(updated.name, "updated-after-visit-start");
+    assert_eq!(journal.family_len("entity").unwrap(), Some(5001));
+}

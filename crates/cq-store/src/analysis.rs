@@ -23,27 +23,29 @@ use serde::ser::{Serialize, SerializeSeq, SerializeStruct, Serializer};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Seek, SeekFrom, Write},
-    sync::Mutex,
+    io::{Seek, SeekFrom, Write},
+    sync::{Arc, Mutex},
 };
 #[derive(Clone)]
 struct Entry {
     offset: u64,
     length: u64,
     reference: ContentRef,
-    scope: ScopeKey,
-    shard: String,
+    scope: Arc<ScopeKey>,
+    shard: Arc<str>,
 }
 pub struct Spool {
     diagnostic_header: SemanticSnapshot,
     diagnostic_root: Option<std::path::PathBuf>,
     file: Mutex<tempfile::NamedTempFile>,
-    entries: BTreeMap<String, Entry>,
+    entries: BTreeMap<Arc<str>, Entry>,
     units: BTreeSet<String>,
     pub universe: String,
     pub sources: BTreeMap<String, Option<FileRevision>>,
-    by_shard: BTreeMap<(String, String), Vec<String>>,
-    by_scope: BTreeMap<ScopeKey, Vec<String>>,
+    by_shard: BTreeMap<(Arc<str>, String), Vec<Arc<str>>>,
+    by_scope: BTreeMap<ScopeKey, Vec<Arc<str>>>,
+    scope_intern: BTreeMap<ScopeKey, Arc<ScopeKey>>,
+    shard_intern: BTreeMap<String, Arc<str>>,
 }
 pub struct ScopeBase {
     objects: Objects,
@@ -268,28 +270,29 @@ impl Spool {
         let mut terms = 0;
         let mut external = 0;
         let mut units = std::collections::HashMap::<String, String>::new();
-        self.each("entity", |_, v| {
-            let kind = v["kind"].as_str().unwrap().to_owned();
-            *kinds.entry(kind.clone()).or_insert(0) += 1;
-            if v["external"] == true {
-                external += 1;
-            }
-            if let Some(unit) = v["unit"].as_str() {
-                units.insert(v["id"].as_str().unwrap().into(), unit.into());
-                for i in contexts_by_unit.get(unit).into_iter().flatten() {
+        self.map_each(
+            "entity",
+            |_, v| {
+                let e: Entity = serde_json::from_value(v)?;
+                let words = cq_core::query::search::terms(&e);
+                Ok((e.id, e.unit, format!("{:?}", e.kind), e.external, words))
+            },
+            |_, (id, unit, kind, is_external, words)| {
+                *kinds.entry(kind.clone()).or_insert(0) += 1;
+                external += u64::from(is_external);
+                for i in contexts_by_unit.get(&unit).into_iter().flatten() {
                     let c = &mut context_counts[*i];
                     c.entities += 1;
                     *c.ek.entry(kind.clone()).or_default() += 1;
                 }
-            }
-            let e: Entity = serde_json::from_value(v)?;
-            let words = cq_core::query::search::terms(&e);
-            terms += words.len() as u64;
-            for word in words.into_iter().collect::<BTreeSet<_>>() {
-                *df.entry(word).or_insert(0) += 1;
-            }
-            Ok(())
-        })?;
+                units.insert(id, unit);
+                terms += words.len() as u64;
+                for word in words.into_iter().collect::<BTreeSet<_>>() {
+                    *df.entry(word).or_insert(0) += 1;
+                }
+                Ok(())
+            },
+        )?;
         self.each("relation", |_, v| {
             let kind: RelationKind = serde_json::from_value(v["kind"].clone())?;
             *relations.entry(kind.label().to_owned()).or_insert(0) += 1;
@@ -356,83 +359,135 @@ impl Spool {
             sources: BTreeMap::new(),
             by_shard: BTreeMap::new(),
             by_scope: BTreeMap::new(),
+            scope_intern: BTreeMap::new(),
+            shard_intern: BTreeMap::new(),
         })
     }
-    fn insert(&mut self, unit: &str, shard: &str, record: normalized::Record) -> Result<()> {
+    fn encode(
+        &self,
+        unit: String,
+        shard: String,
+        record: normalized::Record,
+    ) -> Result<(String, String, String, Vec<u8>, ContentRef)> {
         let family = record.family();
         let key = cq_core::ports::facts::fact_key(family, record.id());
-        let value = record.value()?;
-        let bytes = serde_json::to_vec(&value)?;
+        let bytes = serde_json::to_vec(&record.value()?)?;
         if bytes.len() > production::RECORD_BYTES {
             return Err(crate::facts::limits::report(
                 self.diagnostic_root.as_deref(),
                 family,
                 record.id(),
-                &value,
+                &record.value()?,
                 bytes.len(),
                 Some(&self.diagnostic_header),
             )?);
         }
-        let unit = if self.units.contains(unit) || unit == "external" {
-            unit
-        } else {
-            "$project"
-        }
-        .to_owned();
-        let scope = ScopeKey {
-            context: digest(unit.as_bytes()),
-            unit,
-            family: fact_family(family)?,
-        };
         let reference = ContentRef {
             hash: digest(&bytes),
             bytes: bytes.len() as u64,
         };
-        if let Some(old) = self.entries.get(&key) {
-            if old.reference != reference || old.scope != scope || old.shard != shard {
-                return Err(Error::new("ConflictingSemanticIdentity", key));
-            }
-            return Ok(());
-        }
+        Ok((unit, shard, key, bytes, reference))
+    }
+    fn insert_batch(&mut self, records: Vec<(String, String, normalized::Record)>) -> Result<()> {
+        let encoded =
+            cq_core::compute::map(records, |(unit, shard, r)| self.encode(unit, shard, r))?;
         let file = self
             .file
             .get_mut()
             .map_err(|_| Error::new("SpoolPoisoned", "record spool poisoned"))?;
-        let offset = file.as_file_mut().seek(SeekFrom::End(0))?;
-        file.as_file_mut().write_all(&bytes)?;
-        if let Some(keys) = self.by_scope.get_mut(&scope) {
-            keys.push(key.clone());
-        } else {
-            self.by_scope.insert(scope.clone(), vec![key.clone()]);
+        let start = file.as_file_mut().seek(SeekFrom::End(0))?;
+        let mut bytes = Vec::new();
+        let mut pending = BTreeMap::<Arc<str>, Entry>::new();
+        for (unit, shard, key, row, reference) in encoded {
+            let unit = if self.units.contains(&unit) || unit == "external" {
+                unit
+            } else {
+                "$project".into()
+            };
+            let scope = ScopeKey {
+                context: digest(unit.as_bytes()),
+                unit,
+                family: fact_family(key.split(':').next().unwrap())?,
+            };
+            if let Some(old) = pending
+                .get(key.as_str())
+                .or_else(|| self.entries.get(key.as_str()))
+            {
+                if old.reference != reference
+                    || old.scope.as_ref() != &scope
+                    || old.shard.as_ref() != shard
+                {
+                    return Err(Error::new("ConflictingSemanticIdentity", key));
+                }
+                continue;
+            }
+            let scope = self
+                .scope_intern
+                .entry(scope.clone())
+                .or_insert_with(|| Arc::new(scope))
+                .clone();
+            let shard = self
+                .shard_intern
+                .entry(shard.clone())
+                .or_insert_with(|| Arc::from(shard))
+                .clone();
+            let key: Arc<str> = Arc::from(key);
+            pending.insert(
+                key,
+                Entry {
+                    offset: start + bytes.len() as u64,
+                    length: row.len() as u64,
+                    reference,
+                    scope,
+                    shard,
+                },
+            );
+            bytes.extend_from_slice(&row);
         }
-        self.entries.insert(
-            key,
-            Entry {
-                offset,
-                length: bytes.len() as u64,
-                reference,
-                scope,
-                shard: shard.into(),
-            },
-        );
+        file.as_file_mut().write_all(&bytes)?;
+        for (key, e) in pending {
+            self.by_scope
+                .entry(e.scope.as_ref().clone())
+                .or_default()
+                .push(key.clone());
+            self.entries.insert(key, e);
+        }
         Ok(())
     }
+    fn insert(&mut self, unit: &str, shard: &str, record: normalized::Record) -> Result<()> {
+        self.insert_batch(vec![(unit.into(), shard.into(), record)])
+    }
     pub fn read(&self, key: &str) -> Result<Value> {
-        let e = self
-            .entries
-            .get(key)
-            .ok_or_else(|| Error::new("MissingSpoolRecord", key))?;
-        let mut f = self
+        Ok(self.read_many(&[key])?.pop().unwrap())
+    }
+    fn read_many(&self, keys: &[&str]) -> Result<Vec<Value>> {
+        let entries = keys
+            .iter()
+            .map(|k| {
+                self.entries
+                    .get(*k)
+                    .ok_or_else(|| Error::new("MissingSpoolRecord", *k))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let spans = entries
+            .iter()
+            .map(|e| crate::disk_batch::Span {
+                offset: e.offset,
+                bytes: e.length,
+            })
+            .collect::<Vec<_>>();
+        let file = self
             .file
             .lock()
-            .map_err(|_| Error::new("SpoolPoisoned", "record spool poisoned"))?;
-        f.as_file_mut().seek(SeekFrom::Start(e.offset))?;
-        let mut bytes = vec![0; e.length as usize];
-        f.as_file_mut().read_exact(&mut bytes)?;
-        if digest(&bytes) != e.reference.hash {
-            return Err(Error::new("DigestMismatch", "normalized spool record"));
-        }
-        Ok(serde_json::from_slice(&bytes)?)
+            .map_err(|_| Error::new("SpoolPoisoned", "record spool poisoned"))?
+            .as_file()
+            .try_clone()?;
+        crate::disk_batch::decode(&file, &spans, |i, b| {
+            if digest(b) != entries[i].reference.hash {
+                return Err(Error::new("DigestMismatch", "normalized spool record"));
+            }
+            Ok(serde_json::from_slice(b)?)
+        })
     }
     pub fn finish(
         &mut self,
@@ -442,13 +497,28 @@ impl Spool {
     ) -> Result<()> {
         self.universe = projection.universe;
         self.sources = projection.sources;
+        let mut progress = self.diagnostic_root.as_ref().map(|root| {
+            cq_core::progress::Progress::stage(
+                root,
+                &header.project,
+                "prepare.directories",
+                "整理分片成员目录",
+                Some(self.entries.len() as u64),
+                "事实",
+            )
+        });
+        let mut completed = 0;
         for (key, e) in &self.entries {
             self.by_shard
                 .entry((e.shard.clone(), key.split(':').next().unwrap().into()))
                 .or_default()
                 .push(key.clone());
+            completed += 1;
+            if let Some(p) = &mut progress {
+                p.count(completed);
+            }
         }
-        let mut scopes = BTreeMap::<ScopeKey, BTreeMap<String, ContentRef>>::new();
+        let mut scopes = self.by_scope.keys().cloned().collect::<BTreeSet<_>>();
         for unit in self
             .units
             .iter()
@@ -462,21 +532,22 @@ impl Spool {
                 FactFamily::Relation,
                 FactFamily::Document,
             ] {
-                scopes
-                    .entry(ScopeKey {
-                        unit: unit.into(),
-                        context: digest(unit.as_bytes()),
-                        family,
-                    })
-                    .or_default();
+                scopes.insert(ScopeKey {
+                    unit: unit.into(),
+                    context: digest(unit.as_bytes()),
+                    family,
+                });
             }
         }
-        for (key, e) in &self.entries {
-            scopes
-                .entry(e.scope.clone())
-                .or_default()
-                .insert(key.clone(), e.reference.clone());
-        }
+        let groups = std::mem::take(&mut self.by_scope)
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.by_scope = cq_core::compute::map(groups, |(k, mut v)| {
+            cq_core::compute::sort_by(&mut v, |a, b| a.cmp(b))?;
+            Ok((k, v))
+        })?
+        .into_iter()
+        .collect();
         let p = header.production.as_mut().ok_or_else(|| {
             Error::new(
                 "MissingProduction",
@@ -485,7 +556,7 @@ impl Spool {
         })?;
         p.retired.clear();
         for old in base.keys()? {
-            if let std::collections::btree_map::Entry::Vacant(entry) = scopes.entry(old.clone()) {
+            if scopes.insert(old.clone()) {
                 p.retired.push(old.clone());
                 if !p.selection_complete {
                     p.failed_units.insert(
@@ -493,7 +564,6 @@ impl Spool {
                         "previous scope not reverified by incomplete selection".into(),
                     );
                 }
-                entry.insert(BTreeMap::new());
             }
         }
         let inputs = digest(&serde_json::to_vec(&(
@@ -507,29 +577,51 @@ impl Spool {
                 .collect::<Vec<_>>(),
             &header.analysis_request,
         ))?);
-        p.scopes = scopes
-            .into_iter()
-            .map(|(key, r)| {
-                let completion = if p.failed_units.contains_key(&key.unit) {
-                    Completion::Failed
-                } else {
-                    Completion::Complete
-                };
-                if completion != Completion::Complete && !r.is_empty() {
-                    return Err(Error::new(
-                        "InvalidScopeReceipt",
-                        "failed scope emitted facts",
-                    ));
-                }
-                Ok(ScopeDescriptor {
-                    input_witness: digest(&serde_json::to_vec(&(&key, &inputs))?),
-                    digest: transfer::state_digest(&r)?,
-                    rows: r.len() as u64,
-                    key,
-                    completion,
-                })
-            })
-            .collect::<Result<_>>()?;
+        let scope_progress = self.diagnostic_root.as_ref().map(|root| {
+            Mutex::new((
+                0u64,
+                cq_core::progress::Progress::stage(
+                    root,
+                    &header.project,
+                    "prepare.scopes",
+                    "校验范围与封存",
+                    Some(scopes.len() as u64),
+                    "范围",
+                ),
+            ))
+        });
+        let failed = &p.failed_units;
+        p.scopes = cq_core::compute::map(scopes.into_iter().collect(), |key| {
+            let rows = self.by_scope.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            let completion = if failed.contains_key(&key.unit) {
+                Completion::Failed
+            } else {
+                Completion::Complete
+            };
+            if completion != Completion::Complete && !rows.is_empty() {
+                return Err(Error::new(
+                    "InvalidScopeReceipt",
+                    "failed scope emitted facts",
+                ));
+            }
+            let descriptor = ScopeDescriptor {
+                input_witness: digest(&serde_json::to_vec(&(&key, &inputs))?),
+                digest: transfer::state_digest_sorted(
+                    rows.iter()
+                        .map(|k| (k.as_ref(), &self.entries[k].reference)),
+                )?,
+                rows: rows.len() as u64,
+                key,
+                completion,
+            };
+            if let Some(p) = &scope_progress {
+                let mut p = p.lock().unwrap();
+                p.0 += 1;
+                let n = p.0;
+                p.1.count(n);
+            }
+            Ok(descriptor)
+        })?;
         if p.transport.contains_key("record_source") {
             p.native_boundary="compiler frontends retain language state; native export arrays are decoded record by record; source ownership frames and a disk journal replace the project semantic snapshot; identity/range catalogues remain global; publication consumes actual full/delta/reuse transfers".into();
         }
@@ -551,7 +643,7 @@ impl Spool {
                     .get(&descriptor.key)
                     .into_iter()
                     .flatten()
-                    .map(|k| (k.clone(), self.entries[k].reference.clone()))
+                    .map(|k| (k.to_string(), self.entries[k].reference.clone()))
                     .collect::<BTreeMap<_, _>>();
                 transfer::plan(descriptor, current, base)?
             };
@@ -565,27 +657,30 @@ impl Spool {
                 }
             };
             sink.begin(&begin)?;
-            let mut batch = vec![];
-            let mut bytes = 0;
+            let mut at = 0;
             let mut sequence = 0;
-            for key in keys {
-                let e = &self.entries[&key];
-                if !batch.is_empty()
-                    && (batch.len() >= production::BATCH_ROWS
-                        || bytes + e.length as usize > production::BATCH_BYTES)
-                {
-                    sink.batch(&descriptor.key, sequence, &batch)?;
-                    sequence += 1;
-                    batch.clear();
-                    bytes = 0;
+            while at < keys.len() {
+                let first = at;
+                let mut bytes = 0;
+                while at < keys.len() && at - first < production::BATCH_ROWS {
+                    let length = self.entries[keys[at].as_str()].length;
+                    if at > first && bytes + length > production::BATCH_BYTES as u64 {
+                        break;
+                    }
+                    bytes += length;
+                    at += 1;
                 }
-                bytes += e.length as usize;
-                batch.push(production::Record {
-                    value: self.read(&key)?,
-                    key,
-                });
-            }
-            if !batch.is_empty() {
+                let requested = keys[first..at]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                let values = self.read_many(&requested)?;
+                let batch = keys[first..at]
+                    .iter()
+                    .cloned()
+                    .zip(values)
+                    .map(|(key, value)| production::Record { key, value })
+                    .collect::<Vec<_>>();
                 sink.batch(&descriptor.key, sequence, &batch)?;
                 sequence += 1;
             }
@@ -594,13 +689,79 @@ impl Spool {
         sink.finish()
     }
     pub fn each(&self, family: &str, mut f: impl FnMut(&str, Value) -> Result<()>) -> Result<()> {
+        self.map_each(family, |_, v| Ok(v), |k, v| f(k, v))
+    }
+    fn map_each<T: Send>(
+        &self,
+        family: &str,
+        transform: impl Fn(&str, Value) -> Result<T> + Send + Sync,
+        mut consume: impl FnMut(&str, T) -> Result<()>,
+    ) -> Result<()> {
+        use std::ops::Bound::{Included, Unbounded};
         let prefix = format!("{family}:");
-        for (key, _) in self
+        let mut entries = self
             .entries
-            .range(prefix.clone()..)
+            .range::<str, _>((Included(prefix.as_str()), Unbounded))
             .take_while(|(k, _)| k.starts_with(&prefix))
-        {
-            f(key, self.read(key)?)?;
+            .collect::<Vec<_>>();
+        cq_core::compute::sort_by(&mut entries, |a, b| a.1.offset.cmp(&b.1.offset))?;
+        let mut progress = self.diagnostic_root.as_ref().map(|root| {
+            let phase = format!("statistics.{family}");
+            let mut p = cq_core::progress::Progress::stage(
+                root,
+                &self.diagnostic_header.project,
+                &phase,
+                "统计事实与检索词",
+                Some(entries.len() as u64),
+                "事实",
+            );
+            p.detail(
+                &phase,
+                "统计事实与检索词",
+                0,
+                Some(entries.len() as u64),
+                "事实",
+                cq_core::compute::workers().unwrap_or(1) as u64,
+            );
+            p
+        });
+        let mut at = 0;
+        while at < entries.len() {
+            let first = at;
+            let mut bytes = 0;
+            while at < entries.len() && at - first < 4096 {
+                if at > first && bytes + entries[at].1.length > crate::disk_batch::BATCH_BYTES {
+                    break;
+                }
+                bytes += entries[at].1.length;
+                at += 1;
+            }
+            let part = &entries[first..at];
+            let spans = part
+                .iter()
+                .map(|(_, e)| crate::disk_batch::Span {
+                    offset: e.offset,
+                    bytes: e.length,
+                })
+                .collect::<Vec<_>>();
+            let file = self
+                .file
+                .lock()
+                .map_err(|_| Error::new("SpoolPoisoned", "record spool poisoned"))?
+                .as_file()
+                .try_clone()?;
+            let values = crate::disk_batch::decode(&file, &spans, |i, b| {
+                if digest(b) != part[i].1.reference.hash {
+                    return Err(Error::new("DigestMismatch", "normalized spool record"));
+                }
+                transform(part[i].0, serde_json::from_slice(b)?)
+            })?;
+            for ((k, _), v) in part.iter().zip(values) {
+                consume(k, v)?;
+            }
+            if let Some(p) = &mut progress {
+                p.count(at as u64);
+            }
         }
         Ok(())
     }
@@ -645,17 +806,34 @@ impl Spool {
         impl Serialize for Sequence<'_> {
             fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
                 let mut seq = s.serialize_seq(None)?;
-                for k in self
+                let keys = self
                     .spool
                     .by_shard
-                    .get(&(self.shard.into(), self.family.into()))
-                    .into_iter()
-                    .flatten()
-                {
+                    .get(&(Arc::from(self.shard), self.family.into()))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let mut at = 0;
+                while at < keys.len() {
+                    let first = at;
+                    let mut bytes = 0;
+                    while at < keys.len() && at - first < 512 {
+                        let length = self.spool.entries[&keys[at]].length;
+                        if at > first && bytes + length > crate::disk_batch::BATCH_BYTES {
+                            break;
+                        }
+                        bytes += length;
+                        at += 1;
+                    }
+                    let requested = keys[first..at]
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .collect::<Vec<_>>();
+                    for value in self
+                        .spool
+                        .read_many(&requested)
+                        .map_err(serde::ser::Error::custom)?
                     {
-                        seq.serialize_element(
-                            &self.spool.read(k).map_err(serde::ser::Error::custom)?,
-                        )?;
+                        seq.serialize_element(&value)?;
                     }
                 }
                 seq.end()
@@ -701,18 +879,34 @@ impl Spool {
                 Ok(())
             }
         }
-        let mut manifest = vec![];
-        for (key, source) in &self.sources {
-            let mut h = Hash(Sha256::new());
-            serde_json::to_writer(
-                &mut h,
-                &Shard {
-                    spool: self,
-                    key,
-                    source,
-                },
-            )?;
-            manifest.push(json!({"key":key,"digest":format!("{:x}",h.0.finalize())}));
+        let mut manifest = Vec::with_capacity(self.sources.len());
+        let shards = self.sources.iter().collect::<Vec<_>>();
+        let mut progress = self.diagnostic_root.as_ref().map(|root| {
+            cq_core::progress::Progress::stage(
+                root,
+                &self.diagnostic_header.project,
+                "prepare.shard_hashes",
+                "封存事实分片",
+                Some(shards.len() as u64),
+                "分片",
+            )
+        });
+        for wave in shards.chunks(cq_core::compute::workers()?.min(8)) {
+            manifest.extend(cq_core::compute::map(wave.to_vec(), |(key, source)| {
+                let mut h = Hash(Sha256::new());
+                serde_json::to_writer(
+                    &mut h,
+                    &Shard {
+                        spool: self,
+                        key,
+                        source,
+                    },
+                )?;
+                Ok(json!({"key":key,"digest":format!("{:x}",h.0.finalize())}))
+            })?);
+            if let Some(p) = &mut progress {
+                p.count(manifest.len() as u64);
+            }
         }
         let generation = digest(&serde_json::to_vec(&(&self.universe, &manifest))?);
         let old = previous
@@ -746,6 +940,9 @@ impl Spool {
     }
 }
 impl normalized::Sink for Spool {
+    fn batch(&mut self, records: Vec<(String, String, normalized::Record)>) -> Result<()> {
+        self.insert_batch(records)
+    }
     fn push(&mut self, unit: &str, shard: &str, r: normalized::Record) -> Result<()> {
         self.insert(unit, shard, r)
     }

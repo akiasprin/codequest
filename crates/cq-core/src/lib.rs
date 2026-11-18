@@ -1,5 +1,6 @@
 //! Shared build-observation models and Rust build observer. No storage implementation.
 pub mod analyst;
+pub mod compute;
 pub mod control;
 pub mod error;
 pub mod input;

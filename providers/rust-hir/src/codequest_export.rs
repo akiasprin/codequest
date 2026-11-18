@@ -106,16 +106,17 @@ fn emit(
             jobs.push((unit.clone(), chunk.to_vec()));
         }
     }
-    let configured = std::env::var("CQ_HIR_WORKERS")
+    let configured = std::env::var("CQ_WORKERS").or_else(|_|std::env::var("CQ_HIR_WORKERS"))
         .ok()
         .map(|s| s.parse::<usize>())
         .transpose()?;
     let workers = configured.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map_or(1, usize::from)
-            .min(48)
+            .saturating_mul(2)
+            .min(128)
     });
-    anyhow::ensure!((1..=48).contains(&workers), "CQ_HIR_WORKERS must be 1..48");
+    anyhow::ensure!((1..=128).contains(&workers), "CQ_WORKERS / CQ_HIR_WORKERS must be 1..128");
     let workers = workers.min(jobs.len().max(1));
     let report = |phase: &str, done: usize, total: usize, shard: Value| -> anyhow::Result<()> {
         if let Some(id) = progress {

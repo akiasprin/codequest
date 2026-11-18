@@ -13,5 +13,6 @@ sha2.workspace = true
 libc.workspace = true
 cargo_metadata.workspace = true
 regex.workspace = true
+rayon.workspace = true
 pulldown-cmark.workspace = true
 tempfile.workspace = true

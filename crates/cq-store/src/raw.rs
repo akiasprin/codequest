@@ -3,18 +3,18 @@ use cq_core::{
     model::*,
     semantic::records::{Record, Source, Store},
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom, Write},
     path::PathBuf,
     sync::Mutex,
 };
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Entry {
     offset: u64,
     bytes: u64,
-    digest: String,
-    sequence: u64,
+    digest: [u8; 32],
 }
 struct Data {
     file: tempfile::NamedTempFile,
@@ -25,7 +25,7 @@ struct Data {
 struct Encoded {
     key: String,
     bytes: Vec<u8>,
-    digest: String,
+    digest: [u8; 32],
 }
 pub struct Journal {
     root: PathBuf,
@@ -46,10 +46,9 @@ impl Journal {
         })
     }
     fn read(data: &mut Data, e: &Entry) -> Result<Record> {
-        data.file.as_file_mut().seek(SeekFrom::Start(e.offset))?;
         let mut b = vec![0; e.bytes as usize];
-        data.file.as_file_mut().read_exact(&mut b)?;
-        if digest(&b) != e.digest {
+        crate::disk_batch::read_at(data.file.as_file(), &mut b, e.offset)?;
+        if <[u8; 32]>::from(Sha256::digest(&b)) != e.digest {
             return Err(Error::new("DigestMismatch", "analysis record journal"));
         }
         Ok(serde_json::from_slice(&b)?)
@@ -88,7 +87,6 @@ impl Journal {
                     offset: d.bytes + bytes.len() as u64,
                     bytes: record.bytes.len() as u64,
                     digest: record.digest,
-                    sequence,
                 },
             );
             bytes.extend_from_slice(&record.bytes);
@@ -194,7 +192,7 @@ impl Store for Journal {
                 )?);
             }
             let b = serde_json::to_vec(&r)?;
-            let hash = digest(&b);
+            let hash = Sha256::digest(&b).into();
             if !chunk.is_empty() && chunk_bytes + b.len() > 1024 * 1024 {
                 self.append(std::mem::take(&mut chunk), replace)?;
                 chunk_bytes = 0;
@@ -211,6 +209,77 @@ impl Store for Journal {
     }
 }
 impl Source for Journal {
+    fn phase_progress(
+        &self,
+        project: &str,
+        phase: &str,
+        label: &str,
+        done: u64,
+        total: Option<u64>,
+        workers: usize,
+    ) {
+        let mut progress = self.progress.lock().unwrap();
+        let p = progress.get_or_insert_with(|| {
+            cq_core::progress::Progress::stage(&self.root, project, phase, label, total, "事实")
+        });
+        if done == 0 {
+            p.detail(phase, label, done, total, "事实", workers as u64);
+        } else {
+            p.count(done);
+        }
+    }
+    fn visit_batches(
+        &self,
+        family: Option<&str>,
+        visitor: &mut dyn FnMut(Vec<Record>) -> Result<()>,
+    ) -> Result<()> {
+        let (file, mut entries) = {
+            let d = self.data.lock().unwrap();
+            let prefix = family.map(|f| format!("{f}:"));
+            let entries = if let Some(prefix) = prefix {
+                d.entries
+                    .range(prefix.clone()..)
+                    .take_while(|(k, _)| k.starts_with(&prefix))
+                    .map(|(_, e)| *e)
+                    .collect::<Vec<_>>()
+            } else {
+                d.entries.values().copied().collect()
+            };
+            (d.file.as_file().try_clone()?, entries)
+        };
+        // Freeze live locators, not payloads. A callback may append/replace
+        // records without changing this visit's generation or file offsets.
+        cq_core::compute::sort_by(&mut entries, |a, b| a.offset.cmp(&b.offset))?;
+        let mut at = 0;
+        while at < entries.len() {
+            let first = at;
+            let mut bytes = 0;
+            while at < entries.len() && at - first < 4096 {
+                let length = entries[at].bytes;
+                if at > first && bytes + length > crate::disk_batch::BATCH_BYTES {
+                    break;
+                }
+                bytes += length;
+                at += 1;
+            }
+            let batch = &entries[first..at];
+            let spans = batch
+                .iter()
+                .map(|e| crate::disk_batch::Span {
+                    offset: e.offset,
+                    bytes: e.bytes,
+                })
+                .collect::<Vec<_>>();
+            let rows = crate::disk_batch::decode(&file, &spans, |i, b| {
+                if <[u8; 32]>::from(Sha256::digest(b)) != batch[i].digest {
+                    return Err(Error::new("DigestMismatch", "analysis record journal"));
+                }
+                Ok(serde_json::from_slice(b)?)
+            })?;
+            visitor(rows)?;
+        }
+        Ok(())
+    }
     fn family_len(&self, family: &str) -> Result<Option<u64>> {
         let prefix = format!("{family}:");
         let d = self.data.lock().unwrap();
@@ -239,42 +308,11 @@ impl Journal {
         family: Option<&str>,
         f: &mut dyn FnMut(Record) -> Result<()>,
     ) -> Result<()> {
-        use std::ops::Bound::{Excluded, Included, Unbounded};
-        let generation = self.data.lock().unwrap().sequence;
-        let prefix = family.map(|f| format!("{f}:"));
-        let mut after = prefix.clone();
-        let mut first = true;
-        loop {
-            let batch = {
-                let d = self.data.lock().unwrap();
-                d.entries
-                    .range::<String, _>((
-                        after
-                            .as_ref()
-                            .map_or(Unbounded, |v| if first { Included(v) } else { Excluded(v) }),
-                        Unbounded,
-                    ))
-                    .take_while(|(key, _)| prefix.as_ref().is_none_or(|p| key.starts_with(p)))
-                    .take(128)
-                    .map(|(k, e)| (k.clone(), e.clone()))
-                    .collect::<Vec<_>>()
-            };
-            first = false;
-            if batch.is_empty() {
-                break;
+        self.visit_batches(family, &mut |rows| {
+            for row in rows {
+                f(row)?;
             }
-            for (k, e) in batch {
-                after = Some(k);
-                if e.sequence > generation {
-                    continue;
-                }
-                let r = {
-                    let mut d = self.data.lock().unwrap();
-                    Self::read(&mut d, &e)?
-                };
-                f(r)?;
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }

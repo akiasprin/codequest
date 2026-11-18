@@ -145,47 +145,62 @@ pub fn topology(s: &mut SemanticSnapshot, store: &dyn Store) -> Result<()> {
         })
         .collect::<Result<HashMap<_, _>>>()?;
     let mut files = HashMap::new();
-    store.visit_family("entity", &mut |r| {
-        if let Record::Entity(e) = r
-            && e.kind == EntityKind::File
-        {
-            if let Some(a) = e.source {
-                files.insert((e.unit.clone(), a.file_revision), e.id.clone());
+    let project = s.project.clone();
+    visit_documents(
+        store,
+        &project,
+        "entity",
+        "relations.files",
+        "关系整理：文件归属",
+        &mut |r| {
+            if let Record::Entity(e) = r
+                && e.kind == EntityKind::File
+            {
+                if let Some(a) = e.source {
+                    files.insert((e.unit.clone(), a.file_revision), e.id.clone());
+                }
+                if let Some(unit) = units.get(&e.unit) {
+                    relation(
+                        s,
+                        store,
+                        unit,
+                        &e.id,
+                        RelationKind::Contains,
+                        None,
+                        None,
+                        p.clone(),
+                    )?;
+                }
             }
-            if let Some(unit) = units.get(&e.unit) {
+            Ok(())
+        },
+    )?;
+    visit_documents(
+        store,
+        &project,
+        "entity",
+        "relations.members",
+        "关系整理：模块与符号",
+        &mut |r| {
+            if let Record::Entity(e) = r
+                && e.kind != EntityKind::File
+                && let Some(a) = e.source
+                && let Some(file) = files.get(&(e.unit, a.file_revision.clone()))
+            {
                 relation(
                     s,
                     store,
-                    unit,
+                    file,
                     &e.id,
                     RelationKind::Contains,
-                    None,
+                    Some(a),
                     None,
                     p.clone(),
                 )?;
             }
-        }
-        Ok(())
-    })?;
-    store.visit_family("entity", &mut |r| {
-        if let Record::Entity(e) = r
-            && e.kind != EntityKind::File
-            && let Some(a) = e.source
-            && let Some(file) = files.get(&(e.unit, a.file_revision.clone()))
-        {
-            relation(
-                s,
-                store,
-                file,
-                &e.id,
-                RelationKind::Contains,
-                Some(a),
-                None,
-                p.clone(),
-            )?;
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }
 #[derive(Clone)]
 struct Declaration {

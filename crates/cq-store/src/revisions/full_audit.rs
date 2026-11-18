@@ -73,22 +73,26 @@ impl Proof {
             .entry(hash(key.as_bytes()))
             .or_insert((key, code));
     }
-    fn record(&mut self, key: String, fingerprint: Key, value: Value) -> Result<()> {
+    fn record(
+        &mut self,
+        key: String,
+        fingerprint: Key,
+        value: Value,
+        kh: Key,
+        names: Vec<Key>,
+    ) -> Result<()> {
         let name = key
             .split(':')
             .next()
             .ok_or_else(|| Error::new("InvalidFactKey", &key))?;
         let f = family(name);
-        let kh = hash(key.as_bytes());
-        let names = cq_core::ports::facts::groups_indexed(name, &value, self.indexed);
         let mut group_ids = Vec::with_capacity(names.len());
-        for name in &names {
-            let gh = hash(name.as_bytes());
-            let id = if let Some(id) = self.group_ids.get(&gh) {
+        for gh in &names {
+            let id = if let Some(id) = self.group_ids.get(gh) {
                 *id
             } else {
                 let id = self.groups.len() as u32;
-                self.group_ids.insert(gh, id);
+                self.group_ids.insert(*gh, id);
                 self.groups.push(Group::default());
                 id
             };
@@ -150,79 +154,109 @@ impl Proof {
         }
         Ok(())
     }
-    fn scopes(&mut self, o: &Objects, partial: bool) -> Result<()> {
-        for (id, value) in std::mem::take(&mut self.scopes) {
-            let descriptor: ScopeDescriptor = serde_json::from_value(value["descriptor"].clone())?;
-            if descriptor.id()? != id
-                || descriptor.key.context != cq_core::model::digest(descriptor.key.unit.as_bytes())
-            {
-                return Err(Error::new(
-                    "InvalidScopeMembership",
-                    "scope identity mismatch",
-                ));
-            }
-            let root: tree::Root = serde_json::from_value(value["members"].clone())?;
-            let mut refs = BTreeMap::new();
-            tree::visit(o, &root, |key, v| {
-                let f: FactRef = serde_json::from_value(v.clone())?;
-                let entry = self
-                    .facts
-                    .get_mut(&hash(key.as_bytes()))
-                    .ok_or_else(|| Error::new("InvalidScopeMembership", "foreign scope member"))?;
-                if entry.scoped
-                    || entry
-                        .family
-                        .as_ref()
-                        .is_none_or(|f| family_name(f) != family_name(&descriptor.key.family))
-                    || entry.reference != reference_hash(v)?
+    fn scopes(&mut self, o: &Objects, partial: bool, root: &Path, project: &str) -> Result<()> {
+        let scopes = std::mem::take(&mut self.scopes);
+        let mut progress = cq_core::progress::Progress::stage(
+            root,
+            project,
+            "audit.scopes",
+            "审计范围成员",
+            Some(scopes.len() as u64),
+            "范围",
+        );
+        let mut completed = 0;
+        for wave in scopes.chunks(cq_core::compute::workers()?.min(8)) {
+            let results = cq_core::compute::map(wave.iter().collect(), |(id, value)| {
+                let mut members = Vec::new();
+                let descriptor: ScopeDescriptor =
+                    serde_json::from_value(value["descriptor"].clone())?;
+                if descriptor.id()? != *id
+                    || descriptor.key.context
+                        != cq_core::model::digest(descriptor.key.unit.as_bytes())
                 {
                     return Err(Error::new(
                         "InvalidScopeMembership",
-                        "foreign/duplicate scope member",
+                        "scope identity mismatch",
                     ));
                 }
-                let owner = match entry.owner {
-                    Owner::Unit(id) => Some(id),
-                    Owner::Entity(k) => self.entities.get(&k).copied(),
-                    Owner::Project => None,
-                };
-                let name = owner
-                    .map(|id| self.unit_names[id as usize].as_str())
-                    .unwrap_or("$project");
-                let name = if name == "external" || self.selected_units.contains(name) {
-                    name
-                } else {
-                    "$project"
-                };
-                if name != descriptor.key.unit {
+                let root: tree::Root = serde_json::from_value(value["members"].clone())?;
+                let mut refs = BTreeMap::new();
+                tree::visit(o, &root, |key, v| {
+                    let f: FactRef = serde_json::from_value(v.clone())?;
+                    let entry = self.facts.get(&hash(key.as_bytes())).ok_or_else(|| {
+                        Error::new("InvalidScopeMembership", "foreign scope member")
+                    })?;
+                    if entry.scoped
+                        || entry
+                            .family
+                            .as_ref()
+                            .is_none_or(|f| family_name(f) != family_name(&descriptor.key.family))
+                        || entry.reference != reference_hash(v)?
+                    {
+                        return Err(Error::new(
+                            "InvalidScopeMembership",
+                            "foreign/duplicate scope member",
+                        ));
+                    }
+                    let owner = match entry.owner {
+                        Owner::Unit(id) => Some(id),
+                        Owner::Entity(k) => self.entities.get(&k).copied(),
+                        Owner::Project => None,
+                    };
+                    let name = owner
+                        .map(|id| self.unit_names[id as usize].as_str())
+                        .unwrap_or("$project");
+                    let name = if name == "external" || self.selected_units.contains(name) {
+                        name
+                    } else {
+                        "$project"
+                    };
+                    if name != descriptor.key.unit {
+                        return Err(Error::new(
+                            "InvalidScopeMembership",
+                            "owner/context mismatch",
+                        ));
+                    }
+                    members.push(hash(key.as_bytes()));
+                    refs.insert(
+                        key.into(),
+                        ContentRef {
+                            hash: f.digest,
+                            bytes: f.length,
+                        },
+                    );
+                    Ok(())
+                })?;
+                if value.get("state_base").is_some()
+                    && value["state_base"] != transfer::base_root(&descriptor.key, &refs)?
+                {
+                    return Err(Error::new("InvalidScopeMembership", "base token mismatch"));
+                }
+                if descriptor.digest != transfer::state_digest(&refs)?
+                    || descriptor.rows != refs.len() as u64
+                    || descriptor.completion != Completion::Complete
+                        && (!refs.is_empty() || !partial)
+                {
                     return Err(Error::new(
                         "InvalidScopeMembership",
-                        "owner/context mismatch",
+                        "completion/count/digest mismatch",
                     ));
                 }
-                entry.scoped = true;
-                refs.insert(
-                    key.into(),
-                    ContentRef {
-                        hash: f.digest,
-                        bytes: f.length,
-                    },
-                );
-                Ok(())
+                Ok(members)
             })?;
-            if value.get("state_base").is_some()
-                && value["state_base"] != transfer::base_root(&descriptor.key, &refs)?
-            {
-                return Err(Error::new("InvalidScopeMembership", "base token mismatch"));
-            }
-            if descriptor.digest != transfer::state_digest(&refs)?
-                || descriptor.rows != refs.len() as u64
-                || descriptor.completion != Completion::Complete && (!refs.is_empty() || !partial)
-            {
-                return Err(Error::new(
-                    "InvalidScopeMembership",
-                    "completion/count/digest mismatch",
-                ));
+            for members in results {
+                for key in members {
+                    let fact = self.facts.get_mut(&key).unwrap();
+                    if fact.scoped {
+                        return Err(Error::new(
+                            "InvalidScopeMembership",
+                            "foreign/duplicate scope member",
+                        ));
+                    }
+                    fact.scoped = true;
+                }
+                completed += 1;
+                progress.count(completed);
             }
         }
         if self.facts.values().any(|f| f.family.is_some() && !f.scoped) {
@@ -237,9 +271,22 @@ impl Proof {
 impl StoreHost {
     fn audit_full_pages(&self, r: &Revision) -> Result<Value> {
         r.verify()?;
+        let root = crate::facts::limits::root(&self.objects.root).unwrap_or(&self.root);
+        let total = r.parent.is_none().then_some(r.changes.facts_changed);
+        let mut inventory = cq_core::progress::Progress::stage(
+            root,
+            &r.project,
+            "audit.inventory",
+            "审计清点事实",
+            total,
+            "事实",
+        );
+        let mut count = 0;
         let mut pages = BTreeMap::<String, Vec<(String, FactRef, Key)>>::new();
         tree::visit(&self.objects, &r.roots.facts, |key, v| {
             let f: FactRef = serde_json::from_value(v.clone())?;
+            count += 1;
+            inventory.count(count);
             pages.entry(f.object.hash.clone()).or_default().push((
                 key.into(),
                 f,
@@ -252,13 +299,44 @@ impl StoreHost {
             indexed: r.metadata["search_index"]["version"] == 1,
             ..Proof::default()
         };
-        for (_, rows) in pages {
-            let bytes = self.objects.audit_bytes(&rows[0].1.object)?;
-            // Rows sharing one physical page stay adjacent; hash/IO are not
-            // repeated after an unrelated page has evicted it from the cache.
-            for (key, f, fingerprint) in rows {
-                let value = writer::decode_bytes(&bytes, &f)?;
-                proof.record(key, fingerprint, value)?;
+        let mut progress = cq_core::progress::Progress::stage(
+            root,
+            &r.project,
+            "audit.pages",
+            "审计事实载荷",
+            Some(page_count as u64),
+            "页",
+        );
+        let mut completed = 0;
+        let mut pages = pages.into_values();
+        loop {
+            let wave = pages
+                .by_ref()
+                .take(cq_core::compute::workers()?.min(8))
+                .collect::<Vec<_>>();
+            if wave.is_empty() {
+                break;
+            }
+            let values = cq_core::compute::map(wave, |rows| {
+                let bytes = self.objects.audit_bytes(&rows[0].1.object)?;
+                cq_core::compute::map(rows, |(key, f, fingerprint)| {
+                    let value = writer::decode_bytes(&bytes, &f)?;
+                    let family = key.split(':').next().unwrap();
+                    let names =
+                        cq_core::ports::facts::groups_indexed(family, &value, proof.indexed)
+                            .into_iter()
+                            .map(|name| hash(name.as_bytes()))
+                            .collect();
+                    let kh = hash(key.as_bytes());
+                    Ok((key, fingerprint, value, kh, names))
+                })
+            })?;
+            for rows in values {
+                for (key, fingerprint, value, kh, names) in rows {
+                    proof.record(key, fingerprint, value, kh, names)?;
+                }
+                completed += 1;
+                progress.count(completed);
             }
         }
         for (key, (id, code)) in std::mem::take(&mut proof.required) {
@@ -266,47 +344,95 @@ impl StoreHost {
                 return Err(Error::new(code, id));
             }
         }
-        tree::visit(&self.objects, &r.roots.groups, |name, v| {
-            let group: writer::Group = serde_json::from_value(v.clone())?;
-            let id = *proof
-                .group_ids
-                .get(&hash(name.as_bytes()))
-                .ok_or_else(|| Error::new("IndexIncomplete", "foreign directory"))?;
-            if proof.groups[id as usize].seen {
-                return Err(Error::new("IndexIncomplete", "duplicate directory"));
-            }
-            proof.groups[id as usize].seen = true;
-            let mut count = 0;
-            tree::visit(&self.objects, &group.root, |key, v| {
-                let entry = proof
-                    .facts
-                    .get(&hash(key.as_bytes()))
-                    .ok_or_else(|| Error::new("IndexIncomplete", "foreign directory member"))?;
-                if entry.reference != reference_hash(v)?
-                    || !entry.groups[..entry.group_count].contains(&id)
-                {
-                    return Err(Error::new(
-                        "IndexIncomplete",
-                        "directory owner/reference mismatch",
-                    ));
-                }
-                count += 1;
-                Ok(())
-            })?;
-            if count != group.count || count != proof.groups[id as usize].expected {
-                return Err(Error::new("IndexIncomplete", "directory count mismatch"));
-            }
+        let mut directories = Vec::new();
+        tree::visit(&self.objects, &r.roots.groups, |name, value| {
+            directories.push((
+                name.to_owned(),
+                serde_json::from_value::<writer::Group>(value.clone())?,
+            ));
             Ok(())
         })?;
+        let mut progress = cq_core::progress::Progress::stage(
+            root,
+            &r.project,
+            "audit.directories",
+            "审计检索目录",
+            Some(directories.len() as u64),
+            "目录",
+        );
+        let mut completed = 0;
+        for wave in directories.chunks(cq_core::compute::workers()?.min(32)) {
+            let ids = cq_core::compute::map(wave.iter().collect(), |(name, group)| {
+                let id = *proof
+                    .group_ids
+                    .get(&hash(name.as_bytes()))
+                    .ok_or_else(|| Error::new("IndexIncomplete", "foreign directory"))?;
+                if proof.groups[id as usize].seen {
+                    return Err(Error::new("IndexIncomplete", "duplicate directory"));
+                }
+
+                let mut count = 0;
+                tree::visit(&self.objects, &group.root, |key, v| {
+                    let entry = proof
+                        .facts
+                        .get(&hash(key.as_bytes()))
+                        .ok_or_else(|| Error::new("IndexIncomplete", "foreign directory member"))?;
+                    if entry.reference != reference_hash(v)?
+                        || !entry.groups[..entry.group_count].contains(&id)
+                    {
+                        return Err(Error::new(
+                            "IndexIncomplete",
+                            "directory owner/reference mismatch",
+                        ));
+                    }
+                    count += 1;
+                    Ok(())
+                })?;
+                if count != group.count || count != proof.groups[id as usize].expected {
+                    return Err(Error::new("IndexIncomplete", "directory count mismatch"));
+                }
+                Ok(id)
+            })?;
+            for id in ids {
+                if proof.groups[id as usize].seen {
+                    return Err(Error::new("IndexIncomplete", "duplicate directory"));
+                }
+                proof.groups[id as usize].seen = true;
+                completed += 1;
+                progress.count(completed);
+            }
+        }
         if proof.groups.iter().any(|g| !g.seen) {
             return Err(Error::new("IndexIncomplete", "missing canonical directory"));
         }
+        let mut sources = Vec::new();
         tree::visit(&self.objects, &r.roots.sources, |_, v| {
-            let src: crate::facts::source::Source = serde_json::from_value(v.clone())?;
-            src.audit(&self.objects)
+            sources.push(serde_json::from_value::<crate::facts::source::Source>(
+                v.clone(),
+            )?);
+            Ok(())
         })?;
+        let mut progress = cq_core::progress::Progress::stage(
+            root,
+            &r.project,
+            "audit.sources",
+            "审计冻结源码",
+            Some(sources.len() as u64),
+            "文件",
+        );
+        let mut completed = 0;
+        for wave in sources.chunks(cq_core::compute::workers()?.min(8)) {
+            cq_core::compute::map(wave.iter().collect(), |source| source.audit(&self.objects))?;
+            completed += wave.len() as u64;
+            progress.count(completed);
+        }
         if r.metadata["scope_protocol"] == 2 {
-            proof.scopes(&self.objects, r.metadata["production"]["partial"] == true)?;
+            proof.scopes(
+                &self.objects,
+                r.metadata["production"]["partial"] == true,
+                root,
+                &r.project,
+            )?;
         }
         Ok(
             json!({"payload_pages":page_count,"facts":proof.facts.len(),"directories":proof.groups.len(),"payload_order":"physical_page","directory_checks":"exact membership through SHA-256 fact/reference identities"}),

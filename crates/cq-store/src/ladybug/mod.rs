@@ -46,11 +46,7 @@ impl Projection {
             path,
             SystemConfig::default()
                 .buffer_pool_size(residency::BUFFER_BYTES)
-                .max_num_threads(
-                    std::thread::available_parallelism()
-                        .map_or(1, usize::from)
-                        .min(8) as u64,
-                )
+                .max_num_threads(cq_core::compute::workers()? as u64)
                 .max_db_size(disk_limit.min(16 * 1024 * 1024 * 1024))
                 .throw_on_wal_replay_failure(true),
         )

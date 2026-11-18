@@ -363,45 +363,66 @@ impl Handles {
             .map(|f| (f.id.clone(), logical(&f.logical_path.display(), &root)))
             .collect::<HashMap<_, _>>();
         let mut bodies = vec![];
-        source.visit_family("body", &mut |r| {
-            if let Record::Body(b) = r {
-                bodies.push(b);
-            }
-            Ok(())
-        })?;
+        super::records::map_phase(
+            source,
+            Some("body"),
+            &header.project,
+            "prepare.handles.bodies",
+            "声明句柄：收集函数体",
+            |r| {
+                Ok(match r {
+                    Record::Body(b) => Some(b),
+                    _ => None,
+                })
+            },
+            |rows| {
+                bodies.extend(rows.into_iter().flatten());
+                Ok(())
+            },
+        )?;
         let ranges = LocalRanges::new(bodies.iter());
         drop(bodies);
         let mut values = HashMap::new();
         let mut groups = HashMap::<String, Vec<(String, String)>>::new();
-        source.visit_family("entity", &mut |r| {
-            if let Record::Entity(mut e) = r {
-                contexts.mark(&mut e);
-                let local = ranges.local(&e);
-                assign_one(&mut e, &root, units, &files, local)?;
-                let handle = e.stable_handle.clone().unwrap();
-                values.insert(
-                    e.id.clone(),
-                    (
-                        handle.clone(),
-                        contexts
-                            .observation_scoped
-                            .contains(&e.unit)
-                            .then_some(OBSERVATION_SCOPED),
-                    ),
-                );
-                if handle.starts_with("cq1:") {
+        super::records::map_phase(
+            source,
+            Some("entity"),
+            &header.project,
+            "prepare.handles.entities",
+            "声明句柄：解析与冲突检查",
+            |r| {
+                if let Record::Entity(mut e) = r {
+                    contexts.mark(&mut e);
+                    let local = ranges.local(&e);
+                    assign_one(&mut e, &root, units, &files, local)?;
+                    let handle = e.stable_handle.clone().unwrap();
+                    let reason = contexts
+                        .observation_scoped
+                        .contains(&e.unit)
+                        .then_some(OBSERVATION_SCOPED);
                     let id = e.id.clone();
-                    e.id.clear();
-                    e.stable_handle = None;
-                    e.attributes.remove("native_token");
-                    groups
-                        .entry(handle)
-                        .or_default()
-                        .push((id, digest(&serde_json::to_vec(&e)?)));
+                    let fingerprint = if handle.starts_with("cq1:") {
+                        e.id.clear();
+                        e.stable_handle = None;
+                        e.attributes.remove("native_token");
+                        Some(digest(&serde_json::to_vec(&e)?))
+                    } else {
+                        None
+                    };
+                    return Ok(Some((id, handle, reason, fingerprint)));
                 }
-            }
-            Ok(())
-        })?;
+                Ok(None)
+            },
+            |rows| {
+                for (id, handle, reason, fingerprint) in rows.into_iter().flatten() {
+                    values.insert(id.clone(), (handle.clone(), reason));
+                    if let Some(hash) = fingerprint {
+                        groups.entry(handle).or_default().push((id, hash));
+                    }
+                }
+                Ok(())
+            },
+        )?;
         for (handle, items) in groups {
             if items.iter().map(|(_, h)| h).collect::<HashSet<_>>().len() > 1 {
                 for (id, _) in items {

@@ -25,6 +25,13 @@ pub(crate) fn build_sorted(
     o: &Objects,
     rows: impl Iterator<Item = Result<(String, Value)>>,
 ) -> Result<(Root, u64)> {
+    build_sorted_prefix(o, rows, "")
+}
+pub(crate) fn build_sorted_prefix(
+    o: &Objects,
+    rows: impl Iterator<Item = Result<(String, Value)>>,
+    prefix: &str,
+) -> Result<(Root, u64)> {
     struct Input<I: Iterator<Item = Result<(String, Value)>>> {
         rows: std::iter::Peekable<I>,
         replay: std::collections::VecDeque<(String, Value)>,
@@ -101,15 +108,19 @@ pub(crate) fn build_sorted(
         }
         Ok((Some(o.json(&Node::Branch(children))?), count))
     }
-    build(
-        o,
-        &mut Input {
-            rows: rows.peekable(),
-            replay: Default::default(),
-            last: None,
-        },
-        "",
-    )
+    let mut input = Input {
+        rows: rows.peekable(),
+        replay: Default::default(),
+        last: None,
+    };
+    let result = build(o, &mut input, prefix)?;
+    if input.peek()?.is_some() {
+        return Err(Error::new(
+            "InvalidSortedIndex",
+            "key outside declared hash partition",
+        ));
+    }
+    Ok(result)
 }
 fn nibble(key: &str, depth: usize) -> Result<u8> {
     key.as_bytes()

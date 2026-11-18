@@ -27,13 +27,15 @@ impl Config {
             }
         }
         Ok(Self {
-            workers: value(
-                "CQ_NORMALIZE_WORKERS",
-                std::thread::available_parallelism()
-                    .map_or(1, usize::from)
-                    .min(48) as u64,
-                48,
-            )? as usize,
+            workers: if std::env::var_os("CQ_WORKERS").is_some() {
+                crate::compute::workers()?
+            } else {
+                value(
+                    "CQ_NORMALIZE_WORKERS",
+                    crate::compute::workers()? as u64,
+                    crate::compute::MAX_WORKERS as u64,
+                )? as usize
+            },
             inflight_bytes: value(
                 "CQ_NORMALIZE_INFLIGHT_BYTES",
                 512 * 1024 * 1024,

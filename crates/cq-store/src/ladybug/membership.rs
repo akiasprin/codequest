@@ -8,7 +8,6 @@ use std::{
     collections::BinaryHeap,
     fs::File,
     io::{Read, Write},
-    os::unix::fs::FileExt,
 };
 const ROWS: usize = 1024 * 1024;
 pub(super) fn key(s: &str) -> Result<[u8; 32]> {
@@ -25,7 +24,8 @@ pub(super) enum Membership {
     Memory(Vec<[u8; 32]>),
     Disk {
         _dir: tempfile::TempDir,
-        file: File,
+        _file: File,
+        map: memmap2::Mmap,
         count: u64,
     },
 }
@@ -48,30 +48,32 @@ impl Membership {
         for value in values {
             rows.push(value?);
             if rows.len() == limit {
-                rows.sort_unstable();
+                cq_core::compute::sort_by(&mut rows, Ord::cmp)?;
                 rows.dedup();
                 let path = dir.path().join(paths.len().to_string());
-                let mut f = File::create(&path)?;
+                let mut f = std::io::BufWriter::new(File::create(&path)?);
                 for k in &rows {
                     f.write_all(k)?;
                 }
+                f.flush()?;
                 paths.push(path);
                 rows.clear();
             }
         }
         if paths.is_empty() {
-            rows.sort_unstable();
+            cq_core::compute::sort_by(&mut rows, Ord::cmp)?;
             rows.dedup();
             return Ok(Self::Memory(rows));
         }
         if !rows.is_empty() {
-            rows.sort_unstable();
+            cq_core::compute::sort_by(&mut rows, Ord::cmp)?;
             rows.dedup();
             let p = dir.path().join(paths.len().to_string());
-            let mut f = File::create(&p)?;
+            let mut f = std::io::BufWriter::new(File::create(&p)?);
             for k in rows {
                 f.write_all(&k)?;
             }
+            f.flush()?;
             paths.push(p);
         }
         let mut inputs = paths
@@ -102,21 +104,30 @@ impl Membership {
             }
         }
         output.flush()?;
+        drop(output);
+        let file = File::open(path)?;
+        // SAFETY: this private temporary inventory is immutable after the only
+        // writer is closed above. No writable handle/path escapes Membership;
+        // the mapping and owning file live until this inventory is dropped.
+        let map = unsafe { memmap2::MmapOptions::new().map(&file)? };
         Ok(Self::Disk {
             _dir: dir,
-            file: File::open(path)?,
+            _file: file,
+            map,
             count,
         })
     }
     pub fn contains(&self, k: &[u8; 32]) -> Result<bool> {
         match self {
             Self::Memory(v) => Ok(v.binary_search(k).is_ok()),
-            Self::Disk { file, count, .. } => {
+            Self::Disk { map, count, .. } => {
                 let (mut lo, mut hi) = (0, *count);
-                let mut b = [0; 32];
                 while lo < hi {
                     let mid = lo + (hi - lo) / 2;
-                    file.read_exact_at(&mut b, mid * 32)?;
+                    let b: &[u8; 32] = map
+                        .get((mid * 32) as usize..(mid * 32 + 32) as usize)
+                        .and_then(|b| b.try_into().ok())
+                        .ok_or_else(|| err("invalid membership range"))?;
                     match b.cmp(k) {
                         std::cmp::Ordering::Less => lo = mid + 1,
                         std::cmp::Ordering::Greater => hi = mid,

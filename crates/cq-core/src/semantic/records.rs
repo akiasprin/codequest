@@ -21,6 +21,73 @@ pub trait Source: Send + Sync {
     fn family_len(&self, _family: &str) -> Result<Option<u64>> {
         Ok(None)
     }
+    fn phase_progress(
+        &self,
+        _project: &str,
+        _phase: &str,
+        _label: &str,
+        _done: u64,
+        _total: Option<u64>,
+        _workers: usize,
+    ) {
+    }
+    /// A visitor must not rely on hash-key ordering. Storage can visit immutable
+    /// payloads in physical order and decode a bounded batch in parallel.
+    fn visit_batches(
+        &self,
+        family: Option<&str>,
+        visitor: &mut dyn FnMut(Vec<Record>) -> Result<()>,
+    ) -> Result<()> {
+        let mut batch = Vec::with_capacity(512);
+        let mut accept = |r| {
+            batch.push(r);
+            if batch.len() == 512 {
+                visitor(std::mem::take(&mut batch))?;
+            }
+            Ok(())
+        };
+        if let Some(family) = family {
+            self.visit_family(family, &mut accept)?;
+        } else {
+            self.visit(&mut accept)?;
+        }
+        if !batch.is_empty() {
+            visitor(batch)?;
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn map_phase<T: Send>(
+    source: &dyn Source,
+    family: Option<&str>,
+    project: &str,
+    phase: &str,
+    label: &str,
+    transform: impl Fn(Record) -> Result<T> + Sync + Send,
+    mut consume: impl FnMut(Vec<T>) -> Result<()>,
+) -> Result<()> {
+    let total = if let Some(f) = family {
+        source.family_len(f)?
+    } else {
+        ["entity", "body", "occurrence", "relation", "document"]
+            .iter()
+            .map(|f| source.family_len(f))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .try_fold(0u64, |n, v| v.map(|v| n + v))
+    };
+    let workers = crate::compute::pool()?.current_num_threads();
+    let mut done = 0;
+    source.phase_progress(project, phase, label, 0, total, workers);
+    source.visit_batches(family, &mut |rows| {
+        let count = rows.len() as u64;
+        consume(crate::compute::map(rows, &transform)?)?;
+        done += count;
+        source.phase_progress(project, phase, label, done, total, workers);
+        Ok(())
+    })
 }
 pub trait Store: Source {
     fn task_progress(

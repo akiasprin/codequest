@@ -4,7 +4,7 @@ use super::{Projection, err, quote};
 use crate::facts::{
     objects::Objects,
     tree,
-    writer::{Revision, decode_bytes},
+    writer::{Revision, record_bytes},
 };
 use cq_core::{
     Result,
@@ -12,7 +12,7 @@ use cq_core::{
     ports::facts::{FactRef, ReadStats},
 };
 use lbug::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 const PAGE_BYTES: u64 = 16 * 1024 * 1024;
 const FACT_BYTES: u64 = 32 * 1024 * 1024;
@@ -49,6 +49,27 @@ fn transaction<T>(c: &Connection<'_>, f: impl FnOnce() -> Result<T>) -> Result<T
             let _ = c.query("ROLLBACK");
             Err(e)
         }
+    }
+}
+#[derive(Default, Deserialize)]
+struct DisplayFields {
+    #[serde(default)]
+    kind: serde_json::Value,
+    #[serde(default)]
+    name: serde_json::Value,
+    #[serde(default)]
+    unit: serde_json::Value,
+    #[serde(default)]
+    from: serde_json::Value,
+    #[serde(default)]
+    to: serde_json::Value,
+}
+fn display_fields(bytes: &[u8]) -> Result<DisplayFields> {
+    if bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{') {
+        Ok(serde_json::from_slice(bytes)?)
+    } else {
+        let _: serde::de::IgnoredAny = serde_json::from_slice(bytes)?;
+        Ok(DisplayFields::default())
     }
 }
 struct Batch {
@@ -186,9 +207,24 @@ impl Projection {
             };
             // A root is a compact inventory, not payloads. Group it once so
             // native row extraction cannot rehash/read a MiB page per fact.
+            let mut inventory_progress = crate::facts::limits::root(&o.root).map(|store| {
+                cq_core::progress::Progress::stage(
+                    store,
+                    &r.project,
+                    "native_inventory",
+                    "整理图发布清单",
+                    Some(r.changes.facts_changed),
+                    "事实",
+                )
+            });
+            let mut inventoried = 0;
             let mut by_page = BTreeMap::<String, Vec<(String, FactRef)>>::new();
             tree::visit(o, root, |key, value| {
                 let f: FactRef = serde_json::from_value(value.clone())?;
+                inventoried += 1;
+                if let Some(p) = &mut inventory_progress {
+                    p.count(inventoried);
+                }
                 by_page
                     .entry(f.object.hash.clone())
                     .or_default()
@@ -255,7 +291,7 @@ impl Projection {
                     0,
                     Some(stats.inventory_facts as u64),
                     "事实",
-                    1,
+                    cq_core::compute::workers()? as u64,
                 );
             }
             let existing = super::membership::Membership::load(&c)?;
@@ -265,32 +301,35 @@ impl Projection {
                 if chunk.is_empty() {
                     return Ok(());
                 }
-                let ids = chunk
-                    .iter()
-                    .map(|(key, f)| digest(format!("{key}:{}", f.digest).as_bytes()))
-                    .collect::<Vec<_>>();
-                for ((key, f), id) in std::mem::take(chunk).into_iter().zip(ids) {
+                let prepared = cq_core::compute::map(std::mem::take(chunk), |(key, f)| {
+                    let id = digest(format!("{key}:{}", f.digest).as_bytes());
+                    let present = existing.contains(&super::membership::key(&id)?)?;
+                    let fields = if present {
+                        None
+                    } else {
+                        Some(display_fields(record_bytes(bytes, &f)?)?)
+                    };
+                    Ok((key, f, id, fields))
+                })?;
+                for (key, f, id, fields) in prepared {
                     completed += 1;
                     if let Some(p) = &mut progress {
                         p.count(completed);
                     }
-                    if existing.contains(&super::membership::key(&id)?)? {
+                    let Some(v) = fields else {
                         continue;
-                    }
-                    let v = decode_bytes(bytes, &f)?;
+                    };
                     let family = key.split(':').next().unwrap_or("");
-                    let kind = v["kind"].as_str().unwrap_or("");
-                    let name = v["name"].as_str().unwrap_or("");
-                    let unit = v["unit"].as_str().unwrap_or("");
+                    let kind = v.kind.as_str().unwrap_or("");
+                    let name = v.name.as_str().unwrap_or("");
+                    let unit = v.unit.as_str().unwrap_or("");
                     let row = [id.as_str(), &f.object.hash, family, &key, kind, name, unit];
                     let edge = if family == "relation" {
                         Some([
-                            v["from"]
+                            v.from
                                 .as_str()
                                 .ok_or_else(|| err("relation source absent"))?,
-                            v["to"]
-                                .as_str()
-                                .ok_or_else(|| err("relation target absent"))?,
+                            v.to.as_str().ok_or_else(|| err("relation target absent"))?,
                             id.as_str(),
                             &f.object.hash,
                             kind,
@@ -332,7 +371,7 @@ impl Projection {
                 decoded_pages += 1;
                 for (key, reference) in rows {
                     chunk.push((key, reference));
-                    if chunk.len() >= 256 {
+                    if chunk.len() >= 4096 {
                         consume(&mut chunk, &bytes)?;
                     }
                 }

@@ -1,9 +1,11 @@
 """Linux process metrics for task-owned compiler/store acceptance workloads."""
-import hashlib,json,os,socket,struct,subprocess,time
+import hashlib,json,os,signal,socket,struct,subprocess,time
 from pathlib import Path
 
 def measured_run(command,*,store=None,timeout=2400,env=None,metrics_output=None):
-    proc=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
+    # The benchmark owns a fresh process group. Killing only a namespace wrapper
+    # can leave its actual indexer alive, holding stdout open beyond the deadline.
+    proc=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env,start_new_session=True)
     known={proc.pid};roles={};samples=0;tree_peak=0;host_baseline={};started=time.monotonic();phases=[]
     project=command[command.index('--name')+1] if '--name' in command else None
     progress_path=Path(store)/'progress'/(hashlib.sha256(str(project).encode()).hexdigest()+'.json') if store and project else None
@@ -67,7 +69,12 @@ def measured_run(command,*,store=None,timeout=2400,env=None,metrics_output=None)
         if samples%20==0:persist()
         if samples%4==0:discover_host()
         left=timeout-(time.monotonic()-started)
-        if left<=0:proc.kill();out,err=proc.communicate();raise subprocess.TimeoutExpired(command,timeout,output=out,stderr=err)
+        if left<=0:
+            try:os.killpg(proc.pid,signal.SIGKILL)
+            except ProcessLookupError:pass
+            out,err=proc.communicate(timeout=5)
+            persist()
+            raise subprocess.TimeoutExpired(command,timeout,output=out,stderr=err)
         try:out,err=proc.communicate(timeout=min(.05,left));break
         except subprocess.TimeoutExpired:pass
     sample()

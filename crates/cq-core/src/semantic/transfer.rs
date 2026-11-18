@@ -52,8 +52,23 @@ pub trait Sink {
     fn finish(&mut self) -> Result<()>;
 }
 pub fn state_digest(records: &BTreeMap<String, ContentRef>) -> Result<String> {
+    state_digest_sorted(records.iter().map(|(k, r)| (k.as_str(), r)))
+}
+/// Same scope seal without allocating a second complete map. The caller must
+/// supply strictly ordered unique keys, which is checked before hashing.
+pub fn state_digest_sorted<'a>(
+    records: impl IntoIterator<Item = (&'a str, &'a ContentRef)>,
+) -> Result<String> {
     let mut h = Sha256::new();
+    let mut previous = None;
     for (key, r) in records {
+        if previous.is_some_and(|p| p >= key) {
+            return Err(Error::new(
+                "InvalidScopeOrder",
+                "scope members must be ordered and unique",
+            ));
+        }
+        previous = Some(key);
         if r.hash.len() != 64
             || !r
                 .hash
@@ -353,10 +368,8 @@ impl<'a> Validator<'a> {
         {
             return Err(Error::new("InvalidBatch", "scope/sequence/row bound"));
         }
-        let mut bytes = 0;
-        for row in records {
+        let prepared = crate::compute::map(records.iter().collect(), |row| {
             let value = serde_json::to_vec(&row.value)?;
-            bytes += value.len();
             let reference = ContentRef {
                 hash: digest(&value),
                 bytes: value.len() as u64,
@@ -367,7 +380,12 @@ impl<'a> Validator<'a> {
                     .as_str()
                     .ok_or_else(|| Error::new("InvalidIdentity", "missing record id"))?,
             );
-            if value.len() > production::RECORD_BYTES
+            Ok((value.len(), reference, expected_key))
+        })?;
+        let mut bytes = 0;
+        for (row, (length, reference, expected_key)) in records.iter().zip(prepared) {
+            bytes += length;
+            if length > production::RECORD_BYTES
                 || row.key != expected_key
                 || a.expected.get(&row.key) != Some(&reference)
                 || !a.received.insert(row.key.clone())

@@ -84,6 +84,9 @@ pub fn decode(o: &Objects, r: &FactRef, s: &mut ReadStats) -> Result<Value> {
     decode_bytes(&b, r)
 }
 pub(crate) fn decode_bytes(b: &[u8], r: &FactRef) -> Result<Value> {
+    Ok(serde_json::from_slice(record_bytes(b, r)?)?)
+}
+pub(crate) fn record_bytes<'a>(b: &'a [u8], r: &FactRef) -> Result<&'a [u8]> {
     if b.len() as u64 != r.object.bytes {
         return Err(Error::new("DigestMismatch", "object length"));
     }
@@ -100,8 +103,9 @@ pub(crate) fn decode_bytes(b: &[u8], r: &FactRef) -> Result<Value> {
     if digest(row) != r.digest {
         return Err(Error::new("DigestMismatch", "fact record"));
     }
-    Ok(serde_json::from_slice(row)?)
+    Ok(row)
 }
+type PreparedRow = (String, String, Value, Vec<u8>);
 type GroupChanges = BTreeMap<String, BTreeMap<String, Option<Value>>>;
 fn memberships(
     o: &Objects,
@@ -317,7 +321,12 @@ impl TransferSink for ScopedSink<'_, '_> {
                     stats.change(family, &r.value, &key.unit, target.as_deref(), 1)?;
                 }
             }
-            self.writer.append(family, id, &r.value)?;
+            if self.aggregate.is_some() {
+                self.writer.append(family, id, &r.value)?;
+            }
+        }
+        if self.aggregate.is_none() {
+            self.writer.append_batch(records)?;
         }
         self.stats["payload_rows_submitted"] = json!(
             self.stats["payload_rows_submitted"].as_u64().unwrap_or(0) + records.len() as u64
@@ -531,59 +540,86 @@ impl<'a> Writer<'a> {
             completed: 0,
         }
     }
+    fn prepare_row(&self, family: &str, id: &str, value: Value) -> Result<Vec<PreparedRow>> {
+        let mut rows = Vec::with_capacity(2);
+        if family == "entity"
+            && self.indexed
+            && let Ok(e) = serde_json::from_value::<Entity>(value.clone())
+        {
+            let index =
+                cq_core::query::search::SearchIndex::with_model(&[], self.vector_model.clone());
+            let terms = cq_core::query::search::terms(&e);
+            let vector = index.prepare_vector(&terms[..terms.len().min(4096)]);
+            let buckets = cq_core::query::search::vector_buckets(&vector);
+            let v =
+                json!({"entity":e,"vector":vector,"buckets":buckets,"model":index.model_name()});
+            let bytes = serde_json::to_vec(&v)?;
+            rows.push(("entity_vector".into(), id.into(), v, bytes));
+        }
+        let bytes = serde_json::to_vec(&value)?;
+        rows.push((family.into(), id.into(), value, bytes));
+        Ok(rows)
+    }
+    fn append_batch(&mut self, records: &[production::Record]) -> Result<()> {
+        let prepared = cq_core::compute::map(records.iter().collect(), |r| {
+            let (family, id) = r
+                .key
+                .split_once(':')
+                .ok_or_else(|| Error::new("InvalidFactKey", &r.key))?;
+            self.prepare_row(family, id, r.value.clone())
+        })?;
+        for rows in prepared {
+            self.append_prepared(rows)?;
+        }
+        Ok(())
+    }
     pub fn append<T: Serialize>(&mut self, family: &str, id: &str, value: &T) -> Result<()> {
-        if ["entity", "body", "occurrence", "relation", "document"].contains(&family) {
-            self.completed += 1;
-            if let Some(p) = &mut self.progress {
-                p.count(self.completed);
-            }
-        }
-        if family == "entity" && self.indexed {
-            let value = serde_json::to_value(value)?;
-            if let Ok(e) = serde_json::from_value::<Entity>(value) {
-                let index =
-                    cq_core::query::search::SearchIndex::with_model(&[], self.vector_model.clone());
-                let terms = cq_core::query::search::terms(&e);
-                let vector = index.prepare_vector(&terms[..terms.len().min(4096)]);
-                let buckets = cq_core::query::search::vector_buckets(&vector);
-                self.append("entity_vector", id, &json!({"entity":e,"vector":vector,"buckets":buckets,"model":index.model_name()}))?;
-            }
-        }
-        let key = fact_key(family, id);
-        if !self.seen.insert(key.clone()) {
-            return Err(Error::new("DuplicateFact", key));
-        }
         let bytes = serde_json::to_vec(value)?;
-        self.stats.inventory_bytes += bytes.len() as u64;
-        if bytes.len() > super::objects::MAX_OBJECT {
-            let value = serde_json::from_slice(&bytes)?;
-            return Err(super::limits::report(
-                super::limits::root(&self.o.root),
-                family,
-                id,
-                &value,
-                bytes.len(),
-                self.diagnostic_header.as_ref(),
-            )?);
-        }
-        if self.initial_facts.is_none()
-            && let Some(r) = reference(self.o, &self.roots, family, id, &mut self.read)?
-            && r.digest == digest(&bytes)
-        {
-            if self.audited.insert(r.object.hash.clone()) {
-                self.o.audit(&r.object)?;
+        let mut prepared = self.prepare_row(family, id, serde_json::to_value(value)?)?;
+        prepared.last_mut().unwrap().3 = bytes;
+        self.append_prepared(prepared)
+    }
+    fn append_prepared(&mut self, rows: Vec<PreparedRow>) -> Result<()> {
+        for (family, id, value, bytes) in rows {
+            if ["entity", "body", "occurrence", "relation", "document"].contains(&family.as_str()) {
+                self.completed += 1;
+                if let Some(p) = &mut self.progress {
+                    p.count(self.completed);
+                }
             }
-            self.stats.facts_reused += 1;
-            return Ok(());
+            let key = fact_key(&family, &id);
+            if !self.seen.insert(key.clone()) {
+                return Err(Error::new("DuplicateFact", key));
+            }
+            self.stats.inventory_bytes += bytes.len() as u64;
+            if bytes.len() > super::objects::MAX_OBJECT {
+                return Err(super::limits::report(
+                    super::limits::root(&self.o.root),
+                    &family,
+                    &id,
+                    &value,
+                    bytes.len(),
+                    self.diagnostic_header.as_ref(),
+                )?);
+            }
+            if self.initial_facts.is_none()
+                && let Some(r) = reference(self.o, &self.roots, &family, &id, &mut self.read)?
+                && r.digest == digest(&bytes)
+            {
+                if self.audited.insert(r.object.hash.clone()) {
+                    self.o.audit(&r.object)?;
+                }
+                self.stats.facts_reused += 1;
+                continue;
+            }
+            if self.pending_bytes + bytes.len() > self.page_bytes
+                || self.pending.len() >= self.page_rows
+            {
+                self.flush()?;
+            }
+            self.pending_bytes += bytes.len() + 1;
+            self.pending.push((family, id, value, bytes));
         }
-        let value = serde_json::from_slice(&bytes)?;
-        if self.pending_bytes + bytes.len() > self.page_bytes
-            || self.pending.len() >= self.page_rows
-        {
-            self.flush()?;
-        }
-        self.pending_bytes += bytes.len() + 1;
-        self.pending.push((family.into(), id.into(), value, bytes));
         Ok(())
     }
     pub fn flush(&mut self) -> Result<()> {
@@ -591,11 +627,14 @@ impl<'a> Writer<'a> {
             return Ok(());
         }
         let mut bytes = Vec::with_capacity(self.pending_bytes);
+        let hashes = cq_core::compute::map(self.pending.iter().collect(), |(_, _, _, row)| {
+            Ok(digest(row))
+        })?;
         let mut offsets = vec![];
-        for (_, _, _, row) in &self.pending {
+        for ((_, _, _, row), hash) in self.pending.iter().zip(hashes) {
             let offset = bytes.len();
             bytes.extend_from_slice(row);
-            offsets.push((offset, row.len(), digest(row)));
+            offsets.push((offset, row.len(), hash));
             bytes.push(b'\n');
         }
         let object = self.o.put(&bytes)?;
@@ -627,17 +666,28 @@ impl<'a> Writer<'a> {
                 .initial_groups
                 .as_mut()
                 .ok_or_else(|| Error::new("InvalidInitialWriter", "missing group builder"))?;
-            for (family, id, value, r) in rows {
+            let indexed = self.indexed;
+            let rows = cq_core::compute::map(rows, |(family, id, value, r)| {
                 let key = fact_key(&family, &id);
-                let value_ref = serde_json::to_value(&r)?;
-                initial_facts.push("facts", &key, value_ref.clone())?;
-                if let Some(scope) = &mut self.scope_facts {
-                    scope.insert(key.clone(), r);
+                let reference = serde_json::to_value(&r)?;
+                let names = cq_core::ports::facts::groups_indexed(&family, &value, indexed);
+                Ok((key, reference, names, r))
+            })?;
+            for batch in rows.chunks(128) {
+                let mut facts = Vec::with_capacity(batch.len());
+                let mut postings = Vec::new();
+                for (key, reference, names, r) in batch {
+                    facts.push(("facts".into(), key.clone(), reference.clone()));
+                    if let Some(scope) = &mut self.scope_facts {
+                        scope.insert(key.clone(), r.clone());
+                    }
+                    for name in names {
+                        postings.push((name.clone(), key.clone(), reference.clone()));
+                    }
+                    self.stats.facts_changed += 1;
                 }
-                for group in cq_core::ports::facts::groups_indexed(&family, &value, self.indexed) {
-                    groups.push(&group, &key, value_ref.clone())?;
-                }
-                self.stats.facts_changed += 1;
+                initial_facts.push_many(facts)?;
+                groups.push_many(postings)?;
             }
             self.pending_bytes = 0;
             return Ok(());

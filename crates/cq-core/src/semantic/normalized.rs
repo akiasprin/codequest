@@ -41,6 +41,12 @@ impl Record {
 }
 pub trait Sink {
     fn push(&mut self, unit: &str, shard: &str, record: Record) -> Result<()>;
+    fn batch(&mut self, records: Vec<(String, String, Record)>) -> Result<()> {
+        for (unit, shard, record) in records {
+            self.push(&unit, &shard, record)?;
+        }
+        Ok(())
+    }
 }
 pub struct Projection {
     pub universe: String,
