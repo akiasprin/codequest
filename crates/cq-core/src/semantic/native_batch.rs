@@ -637,13 +637,15 @@ pub(super) fn prepare_frame(
     };
     // A relationship may carry a source-backed target without a symbol row
     // (e.g. a rustc sysroot trait method). No declaration frame can emit that
-    // synthesized target: the relationship's frame owns its publication.
+    // synthesized target: the relationship's frame owns its publication. The
+    // same applies to a parent supplied without a standalone declaration row.
     let synthetic_targets = fragment
         .entities
         .iter()
         .map(|e| {
+            let parent = digest(&serde_json::to_vec(&(&e.unit, &e.provider_id, &e.source))?);
             super::normalize::native_relation_target_id(&e.unit, &e.provider_id, &e.source)
-                .map(|id| (e.id.clone(), id == e.id))
+                .map(|id| (e.id.clone(), id == e.id || parent == e.id))
         })
         .collect::<Result<Vec<_>>>()?
         .into_iter()

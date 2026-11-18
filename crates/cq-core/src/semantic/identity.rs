@@ -298,7 +298,7 @@ impl Handles {
             .map(|f| (f.id.clone(), logical(&f.logical_path.display(), &root)))
             .collect::<HashMap<_, _>>();
         let mut bodies = vec![];
-        source.visit(&mut |r| {
+        source.visit_family("body", &mut |r| {
             if let Record::Body(b) = r {
                 bodies.push(b);
             }
@@ -308,7 +308,7 @@ impl Handles {
         drop(bodies);
         let mut values = HashMap::new();
         let mut groups = HashMap::<String, Vec<(String, String)>>::new();
-        source.visit(&mut |r| {
+        source.visit_family("entity", &mut |r| {
             if let Record::Entity(mut e) = r {
                 let local = ranges.local(&e);
                 assign_one(&mut e, &root, &units, &files, local)?;

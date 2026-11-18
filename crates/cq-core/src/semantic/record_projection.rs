@@ -18,6 +18,24 @@ fn targets(r: &Resolution) -> Vec<&str> {
         _ => vec![],
     }
 }
+fn dangling_entity(e: &Entity, ids: &HashSet<String>) -> Error {
+    let missing = e
+        .parent
+        .iter()
+        .chain(e.type_definitions.iter())
+        .filter(|id| !ids.contains(*id))
+        .take(16)
+        .collect::<Vec<_>>();
+    let context = serde_json::json!({
+        "entity": e.id,
+        "unit": e.unit,
+        "native_token": e.attributes.get("native_token"),
+        "name": e.qualified_name.chars().take(512).collect::<String>(),
+        "source": e.source,
+        "missing": missing,
+    });
+    invalid(&format!("dangling entity parent/type: {context}"))
+}
 pub fn validate(
     header: &SemanticSnapshot,
     source: &dyn Source,
@@ -29,30 +47,43 @@ pub fn validate(
     let mut occurrences = HashSet::new();
     let mut documents = HashSet::new();
     let mut parents = HashMap::new();
-    source.visit(&mut |r| {
-        if r.id().is_empty() {
-            return Err(invalid("empty identity"));
-        }
-        match r {
-            Record::Entity(e) => {
-                ids.insert(e.id.clone());
-                if let Some(p) = e.parent {
-                    parents.insert(e.id, p);
+    for family in ["entity", "body", "occurrence", "document"] {
+        source.visit_family(family, &mut |r| {
+            if r.id().is_empty() {
+                return Err(invalid("empty identity"));
+            }
+            match r {
+                Record::Entity(e) => {
+                    ids.insert(e.id.clone());
+                    if let Some(p) = e.parent {
+                        parents.insert(e.id, p);
+                    }
                 }
+                Record::Body(b) => {
+                    bodies.insert(b.id);
+                }
+                Record::Occurrence(o) => {
+                    occurrences.insert(o.id);
+                }
+                Record::Document(d) => {
+                    documents.insert(d.id);
+                }
+                _ => {}
             }
-            Record::Body(b) => {
-                bodies.insert(b.id);
-            }
-            Record::Occurrence(o) => {
-                occurrences.insert(o.id);
-            }
-            Record::Document(d) => {
-                documents.insert(d.id);
-            }
-            _ => {}
+            Ok(())
+        })?;
+        // Catch missing containers before reading millions of occurrences and
+        // relationships. Resolve details only for the first invalid entity.
+        if family == "entity"
+            && let Some((child, _)) = parents
+                .iter()
+                .filter(|(_, parent)| !ids.contains(*parent))
+                .min_by_key(|(child, _)| *child)
+            && let Some(Record::Entity(e)) = source.get("entity", child)?
+        {
+            return Err(dangling_entity(&e, &ids));
         }
-        Ok(())
-    })?;
+    }
     let files = header
         .sources
         .files
@@ -69,6 +100,9 @@ pub fn validate(
         Ok(())
     };
     source.visit(&mut |r| {
+        if r.id().is_empty() {
+            return Err(invalid("empty identity"));
+        }
         let provenance = match &r {
             Record::Entity(v) => Some(&v.provenance),
             Record::Occurrence(v) => Some(&v.provenance),
@@ -101,7 +135,7 @@ pub fn validate(
                 if e.parent.as_ref().is_some_and(|p| !ids.contains(p))
                     || e.type_definitions.iter().any(|p| !ids.contains(p))
                 {
-                    return Err(invalid("dangling entity parent/type"));
+                    return Err(dangling_entity(&e, &ids));
                 }
             }
             Record::Body(b) => {
@@ -215,7 +249,10 @@ impl<'a> Live<'a> {
             documents: HashSet::new(),
             partial: p.partial,
         };
-        source.visit(&mut |r| {
+        if !s.partial {
+            return Ok(s);
+        }
+        source.visit_family("entity", &mut |r| {
             if let Record::Entity(e) = r
                 && (!s.partial || !s.failed.contains(&e.unit))
             {
@@ -223,29 +260,32 @@ impl<'a> Live<'a> {
             }
             Ok(())
         })?;
-        source.visit(&mut |r| {
-            match r {
-                Record::Body(b)
-                    if !s.partial || !s.failed.contains(&b.unit) && s.ids.contains(&b.owner) =>
-                {
-                    s.bodies.insert(b.id);
+        for family in ["body", "occurrence", "document"] {
+            source.visit_family(family, &mut |r| {
+                match r {
+                    Record::Body(b)
+                        if !s.partial
+                            || !s.failed.contains(&b.unit) && s.ids.contains(&b.owner) =>
+                    {
+                        s.bodies.insert(b.id);
+                    }
+                    Record::Occurrence(o)
+                        if !s.partial
+                            || !s.failed.contains(&o.unit)
+                                && o.owner.as_ref().is_none_or(|id| s.ids.contains(id)) =>
+                    {
+                        s.occurrences.insert(o.id);
+                    }
+                    Record::Document(d)
+                        if !s.partial || d.owner.as_ref().is_none_or(|id| s.ids.contains(id)) =>
+                    {
+                        s.documents.insert(d.id);
+                    }
+                    _ => {}
                 }
-                Record::Occurrence(o)
-                    if !s.partial
-                        || !s.failed.contains(&o.unit)
-                            && o.owner.as_ref().is_none_or(|id| s.ids.contains(id)) =>
-                {
-                    s.occurrences.insert(o.id);
-                }
-                Record::Document(d)
-                    if !s.partial || d.owner.as_ref().is_none_or(|id| s.ids.contains(id)) =>
-                {
-                    s.documents.insert(d.id);
-                }
-                _ => {}
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+        }
         Ok(s)
     }
     fn filter(&self, mut r: Record) -> Option<Record> {
@@ -323,6 +363,14 @@ impl Source for Live<'_> {
             Ok(())
         })
     }
+    fn visit_family(&self, family: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.source.visit_family(family, &mut |r| {
+            if let Some(r) = self.filter(r) {
+                f(r)?;
+            }
+            Ok(())
+        })
+    }
 }
 pub fn canonicalize(
     header: &mut SemanticSnapshot,
@@ -384,7 +432,7 @@ pub fn canonicalize(
             .unwrap_or_else(|| "$metadata".into())
     };
     let mut unmatched = 0;
-    source.visit(&mut |r| {
+    source.visit_family("entity", &mut |r| {
         if let Record::Entity(mut e) = r {
             handles.apply(&mut e);
             if e.attributes.contains_key("identity_scope_reason")
@@ -415,7 +463,7 @@ pub fn canonicalize(
         }
         Ok(())
     })?;
-    source.visit(&mut |r| {
+    source.visit_family("body", &mut |r| {
         if let Record::Body(b) = r {
             ids.insert(
                 b.id.clone(),
@@ -430,7 +478,7 @@ pub fn canonicalize(
         Ok(())
     })?;
     let mut docs = HashMap::new();
-    source.visit(&mut |r| {
+    source.visit_family("document", &mut |r| {
         if let Record::Document(d) = r {
             docs.insert(
                 d.id.clone(),
@@ -506,7 +554,7 @@ pub fn canonicalize(
             sources.insert(f.logical_path.display(), Some(f.clone()));
         }
     }
-    source.visit(&mut |r| {
+    source.visit_family("entity", &mut |r| {
         if let Record::Entity(mut e) = r {
             let old_id = e.id.clone();
             let old_unit = e.unit.clone();
@@ -566,7 +614,7 @@ pub fn canonicalize(
         }
         Ok(())
     })?;
-    source.visit(&mut |r| {
+    source.visit_family("body", &mut |r| {
         if let Record::Body(mut b) = r {
             b.id = ids[&b.id].clone();
             mapped(&mut b.unit, &units);
@@ -579,7 +627,7 @@ pub fn canonicalize(
         Ok(())
     })?;
     let mut occurrences = HashMap::new();
-    source.visit(&mut |r| {
+    source.visit_family("occurrence", &mut |r| {
         if let Record::Occurrence(mut o) = r {
             let old = o.id.clone();
             mapped(&mut o.unit, &units);
@@ -603,7 +651,7 @@ pub fn canonicalize(
         }
         Ok(())
     })?;
-    source.visit(&mut |r| {
+    source.visit_family("relation", &mut |r| {
         if let Record::Relation(mut r) = r {
             let unit = entity_units
                 .get(&r.from)
@@ -627,7 +675,7 @@ pub fn canonicalize(
         }
         Ok(())
     })?;
-    source.visit(&mut |r| {
+    source.visit_family("document", &mut |r| {
         if let Record::Document(mut d) = r {
             let unit = d
                 .owner

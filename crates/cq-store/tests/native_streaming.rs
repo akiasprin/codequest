@@ -10,7 +10,36 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
 };
+// Full passes are reserved for integrity validation and source collection.
+// Identity/projection passes must use the journal's family index instead.
+struct Counted<'a> {
+    journal: &'a Journal,
+    full_passes: AtomicUsize,
+}
+impl Source for Counted<'_> {
+    fn visit(
+        &self,
+        f: &mut dyn FnMut(semantic::records::Record) -> cq_core::Result<()>,
+    ) -> cq_core::Result<()> {
+        assert!(
+            self.full_passes.fetch_add(1, Ordering::Relaxed) < 2,
+            "unnecessary whole-journal pass"
+        );
+        self.journal.visit(f)
+    }
+    fn visit_family(
+        &self,
+        family: &str,
+        f: &mut dyn FnMut(semantic::records::Record) -> cq_core::Result<()>,
+    ) -> cq_core::Result<()> {
+        self.journal.visit_family(family, f)
+    }
+    fn get(&self, family: &str, id: &str) -> cq_core::Result<Option<semantic::records::Record>> {
+        self.journal.get(family, id)
+    }
+}
 fn frame() -> Value {
     json!({"protocol":"codequest-hir-export","schema_version":1,
  "files":[{"id":0,"path":"/repo/a.rs","text":"fn run(){target();}"},{"id":1,"path":"/repo/b.rs","text":"fn target(){}"}],
@@ -38,6 +67,9 @@ fn compare(raw: Value, language: Language) {
     compare_mapping(raw, language, false)
 }
 fn compare_mapping(raw: Value, language: Language, mirrored: bool) {
+    compare_scope(raw, language, mirrored, None);
+}
+fn compare_scope(raw: Value, language: Language, mirrored: bool, failed: Option<&str>) {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalStore::open(dir.path()).unwrap();
     let path = dir.path().join("native.json");
@@ -87,6 +119,13 @@ fn compare_mapping(raw: Value, language: Language, mirrored: bool) {
                 seed.units.push(u);
             }
         }
+    }
+    if let Some(failed) = failed {
+        let production = seed.production.get_or_insert_with(Default::default);
+        production.partial = true;
+        production
+            .failed_units
+            .insert(failed.into(), "test failed compilation scope".into());
     }
     let mut full = seed.clone();
     semantic::normalize::native_graph(
@@ -142,7 +181,12 @@ fn compare_mapping(raw: Value, language: Language, mirrored: bool) {
     }
     semantic::identity::assign(&mut full).unwrap();
     let expected = store.prepare_analysis(full).unwrap();
-    let actual = store.prepare_records(thin, &journal).unwrap();
+    let counted = Counted {
+        journal: &journal,
+        full_passes: AtomicUsize::new(0),
+    };
+    let actual = store.prepare_records(thin, &counted).unwrap();
+    assert_eq!(counted.full_passes.load(Ordering::Relaxed), 2);
     for family in ["entity", "body", "occurrence", "relation", "document"] {
         let mut a = BTreeMap::new();
         let mut b = BTreeMap::new();
@@ -184,6 +228,28 @@ fn source_backed_relation_target_without_symbol_row_is_not_lost() {
         "kind":"Overrides"}]);
     compare_mapping(raw.clone(), Language::Rust, true);
     compare(raw, Language::Rust);
+}
+#[test]
+fn source_backed_parent_without_symbol_row_is_not_lost() {
+    let mut raw = frame();
+    raw["references"] = json!([]);
+    raw["calls"] = json!([]);
+    raw["symbols"].as_array_mut().unwrap().truncate(1);
+    raw["parents"] = json!([{"child":0,"key":"foreign-container","name":"container","kind":"Module","source":{"file":1,"start":3,"end":9}}]);
+    compare_mapping(raw.clone(), Language::Rust, true);
+    compare(raw, Language::Rust);
+}
+#[test]
+fn real_sysroot_parent_export_preserves_the_missing_container() {
+    let raw = serde_json::from_str(include_str!(
+        "../../../fixtures/native/rust-sysroot-parent.json"
+    ))
+    .unwrap();
+    compare(raw, Language::Rust);
+}
+#[test]
+fn family_projection_preserves_partial_scope_filtering() {
+    compare_scope(frame(), Language::Rust, true, Some("captured-0"));
 }
 #[test]
 fn archive_rejects_utf8_splits_before_emitting_records() {

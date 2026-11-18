@@ -171,10 +171,7 @@ fn documents_drive_symbol_lookup_and_native_targets_remain_authoritative() {
         );
         assert_eq!(link.authority, Authority::SemanticResolution);
     }
-    assert_eq!(
-        d.links[3].target.resolved(),
-        Some("run-a")
-    );
+    assert_eq!(d.links[3].target.resolved(), Some("run-a"));
     let mut author_links = vec![];
     store
         .journal

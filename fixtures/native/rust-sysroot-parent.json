@@ -1,0 +1,73 @@
+{
+  "protocol": "codequest-hir-export",
+  "schema_version": 1,
+  "base_commit": "2850ecba80311bebd4cdaa9fedc5321533b5b1e7",
+  "patch_digest": "068cdf48062fc98df33febee68f1a0a89d204c9628a72446516e802e876f65db",
+  "files": [
+    {
+      "id": 13498,
+      "path": "/rust-src/library/portable-simd/crates/core_simd/src/simd/prelude.rs",
+      "text": "//! The portable SIMD prelude.\n//!\n//! Includes important traits and types to be imported with a glob:\n//! ```ignore\n//! use std::simd::prelude::*;\n//! ```\n\n#[doc(no_inline)]\npub use super::{\n    Mask, Simd,\n    cmp::{SimdOrd, SimdPartialEq, SimdPartialOrd},\n    num::{SimdFloat, SimdInt, SimdUint},\n    ptr::{SimdConstPtr, SimdMutPtr},\n    simd_swizzle,\n};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{f32x1, f32x2, f32x4, f32x8, f32x16, f32x32, f32x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{f64x1, f64x2, f64x4, f64x8, f64x16, f64x32, f64x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{i8x1, i8x2, i8x4, i8x8, i8x16, i8x32, i8x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{i16x1, i16x2, i16x4, i16x8, i16x16, i16x32, i16x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{i32x1, i32x2, i32x4, i32x8, i32x16, i32x32, i32x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{i64x1, i64x2, i64x4, i64x8, i64x16, i64x32, i64x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{isizex1, isizex2, isizex4, isizex8, isizex16, isizex32, isizex64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{u8x1, u8x2, u8x4, u8x8, u8x16, u8x32, u8x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{u16x1, u16x2, u16x4, u16x8, u16x16, u16x32, u16x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{u32x1, u32x2, u32x4, u32x8, u32x16, u32x32, u32x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{u64x1, u64x2, u64x4, u64x8, u64x16, u64x32, u64x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{usizex1, usizex2, usizex4, usizex8, usizex16, usizex32, usizex64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{mask8x1, mask8x2, mask8x4, mask8x8, mask8x16, mask8x32, mask8x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{mask16x1, mask16x2, mask16x4, mask16x8, mask16x16, mask16x32, mask16x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{mask32x1, mask32x2, mask32x4, mask32x8, mask32x16, mask32x32, mask32x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{mask64x1, mask64x2, mask64x4, mask64x8, mask64x16, mask64x32, mask64x64};\n\n#[rustfmt::skip]\n#[doc(no_inline)]\npub use super::{masksizex1, masksizex2, masksizex4, masksizex8, masksizex16, masksizex32, masksizex64};\n"
+    },
+    {
+      "id": 13517,
+      "path": "/rust-src/library/portable-simd/crates/core_simd/src/mod.rs",
+      "text": "#[macro_use]\nmod swizzle;\n\nmod alias;\nmod cast;\nmod fmt;\nmod iter;\nmod masks;\nmod ops;\nmod select;\nmod swizzle_dyn;\nmod to_bytes;\nmod vector;\nmod vendor;\n\npub mod simd {\n    #![doc = include_str!(\"core_simd_docs.md\")]\n\n    pub mod prelude;\n\n    pub mod num;\n\n    pub mod ptr;\n\n    pub mod cmp;\n\n    pub use crate::core_simd::alias::*;\n    pub use crate::core_simd::cast::*;\n    pub use crate::core_simd::masks::*;\n    pub use crate::core_simd::select::*;\n    pub use crate::core_simd::swizzle::*;\n    pub use crate::core_simd::to_bytes::ToBytes;\n    pub use crate::core_simd::vector::*;\n}\n"
+    }
+  ],
+  "symbols": [
+    {
+      "token": 416,
+      "definition_kind": "Discriminant(3)",
+      "key": "rust-hir-v1|13:crate-context=64:ac6b582fa82f4b89e099a6b5ce5f341a8b3ffa115e89f1468784f1608642f3e4|7:package=4:core|7:version=46:https://github.com/rust-lang/rust/library/core|10:repository=34:https://github.com/rust-lang/rust/|5:crate=4:core|4:kind=9:Namespace|4:name=9:core_simd|4:kind=9:Namespace|4:name=4:simd|4:kind=9:Namespace|4:name=7:prelude",
+      "name": "prelude",
+      "qualified_name": "core_simd::simd::prelude",
+      "kind": "Module",
+      "signature": "pub mod prelude",
+      "documentation": null,
+      "definition": {
+        "file": 13498,
+        "start": 0,
+        "end": 2269
+      },
+      "body": {
+        "file": 13498,
+        "start": 0,
+        "end": 2269
+      },
+      "external": true,
+      "exported": false,
+      "local": false,
+      "trait_member": false,
+      "const_function": false,
+      "documentation_source": null,
+      "type_definitions": [],
+      "unattributed_documentation": "The portable SIMD prelude.\n\nIncludes important traits and types to be imported with a glob:\n```ignore\nuse std::simd::prelude::*;\n```"
+    }
+  ],
+  "parents": [
+    {
+      "child": 416,
+      "parent_token": null,
+      "key": "rust-hir-v1|13:crate-context=64:ac6b582fa82f4b89e099a6b5ce5f341a8b3ffa115e89f1468784f1608642f3e4|7:package=4:core|7:version=46:https://github.com/rust-lang/rust/library/core|10:repository=34:https://github.com/rust-lang/rust/|5:crate=4:core|4:kind=9:Namespace|4:name=9:core_simd|4:kind=9:Namespace|4:name=4:simd",
+      "name": "simd",
+      "kind": "Module",
+      "source": {
+        "file": 13517,
+        "start": 163,
+        "end": 167
+      }
+    }
+  ],
+  "references": [],
+  "relations": [],
+  "bodies": [],
+  "calls": [],
+  "doc_links": [],
+  "_fixture": {
+    "origin": "Reduced from the real Brocade workspace/all-targets Rust HIR export, 2026-11-18. Rust 1.96.0 sysroot portable-simd parent without a standalone symbol row.",
+    "reduction": "One original child symbol, its original parent row, and the two complete frozen source files; unrelated record families removed; file paths made host-independent.",
+    "source_license": "MIT OR Apache-2.0; source files from rust-lang/rust library/portable-simd.",
+    "original_shard_sha256": "768546b3ef8afd05f7d06dccbdeda55f10b8ca0e7f61f1118274d3115352a0e8"
+  }
+}

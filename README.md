@@ -190,6 +190,14 @@ python3 scripts/explore_json.py --cq "$PWD/target/release/cq" --store /path/to/s
 
 第一条检查格式、编译、依赖边界、自动测试和 Clippy；第二条在临时副本中执行真实多语言编译及 CLI/MCP 验收，不静默跳过缺失提供者。第三条针对已索引的 ripgrep 保存图驱动探索和查询时间记录。
 
+修改原生记录处理时，先运行无需重新编译目标仓库的局部回归，再做真实仓库验收：
+
+```bash
+cargo test -p cq-store --test native_streaming --test record_validation --test document_linking --test journal_batch --test production --no-fail-fast
+```
+
+默认用例包含从真实 Brocade 导出缩减的 Rust sysroot 跨文件父模块记录，并验证完整编译与部分失败编译的规范化结果一致性。身份与投影按记录种类读取，回归限制非必要全量遍历；缺失父模块在实体集合读取完成后立即报告声明和缺失目标。外部大型导出回放仍需显式提供 `CQ_NATIVE_EXPORTS`，局部回归不能代替全库性能验收。
+
 静态事实覆盖的是实际采集的构建配置。动态派发、回调、宏展开、链接选择和外部输入可能不完整；参数贡献关系不是完整 SSA，静态路径不是实际运行轨迹。作者理由需要直接材料或带证据、可复核的理解标注。PDF 仅处理文本层，未包含 OCR。
 
 语言结构的完整本地验收入口：
