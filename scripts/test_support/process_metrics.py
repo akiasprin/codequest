@@ -2,7 +2,7 @@
 import hashlib,json,os,socket,struct,subprocess,time
 from pathlib import Path
 
-def measured_run(command,*,store=None,timeout=2400,env=None):
+def measured_run(command,*,store=None,timeout=2400,env=None,metrics_output=None):
     proc=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
     known={proc.pid};roles={};samples=0;tree_peak=0;host_baseline={};started=time.monotonic();phases=[]
     project=command[command.index('--name')+1] if '--name' in command else None
@@ -57,13 +57,20 @@ def measured_run(command,*,store=None,timeout=2400,env=None):
                     except OSError:pass
             except(OSError,ValueError,IndexError):pass
         tree_peak=max(tree_peak,total);samples+=1
+    def persist():
+        if metrics_output is None:return
+        path=Path(metrics_output);temporary=path.with_suffix(path.suffix+'.next')
+        temporary.write_text(json.dumps({'seconds':time.monotonic()-started,'sampled_tree_peak_rss_bytes':tree_peak,'processes':roles,'samples':samples,'phases':phases,'state':'running'if proc.poll()is None else'finished'},ensure_ascii=False))
+        os.replace(temporary,path)
     while True:
         sample()
+        if samples%20==0:persist()
         if samples%4==0:discover_host()
         left=timeout-(time.monotonic()-started)
         if left<=0:proc.kill();out,err=proc.communicate();raise subprocess.TimeoutExpired(command,timeout,output=out,stderr=err)
         try:out,err=proc.communicate(timeout=min(.05,left));break
         except subprocess.TimeoutExpired:pass
     sample()
+    persist()
     metrics={'seconds':time.monotonic()-started,'sample_interval_seconds':.05,'sampled_tree_peak_rss_bytes':tree_peak,'processes':roles,'samples':samples,'phases':phases,'scope':'sampled task process tree plus its store daemon; native allocator included in RSS, exited short processes may escape sampling; lifetime HWM is separate; progress phases shorter than sampling interval may be missed'}
     return subprocess.CompletedProcess(command,proc.returncode,out,err),metrics
