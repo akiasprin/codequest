@@ -25,6 +25,14 @@ pub fn analyze(
     control: &CaptureControl,
     snapshot: &mut SemanticSnapshot,
 ) -> Result<()> {
+    let mut progress = crate::progress::Progress::stage(
+        workspace.directory(),
+        &snapshot.project,
+        "build",
+        "采集真实编译",
+        None,
+        "编译任务",
+    );
     let args = if request.build_args.is_empty() {
         vec!["check".into(), "--workspace".into()]
     } else {
@@ -212,12 +220,21 @@ pub fn analyze(
             gaps: ctx.gaps,
         });
     }
+    progress.detail("materialize", "冻结编译输入", 0, None, "文件", 1);
     let view = workspace.prepare_rust(&replay_report, control)?;
     let worker = request.provider.clone();
     let output = workspace
         .run_directory(&report.run.id)?
         .join("hir-export.json");
-    super::session::export(&worker, &view.root, &output, control)?;
+    super::session::export_tracked(
+        &worker,
+        &view.root,
+        &output,
+        control,
+        workspace.directory(),
+        &snapshot.project,
+    )?;
+    progress.detail("archive", "解析 HIR 导出", 0, None, "字节", 1);
     let metadata = std::fs::metadata(&output)?;
     let export_limit = crate::semantic::native_archive::export_limit()?;
     if metadata.len() > export_limit {
@@ -231,8 +248,21 @@ pub fn analyze(
     }
     let archive = workspace
         .semantic_records()
-        .map(|_| crate::semantic::native_archive::Archive::open(&output))
+        .map(|_| {
+            crate::semantic::native_archive::Archive::open_with_progress(
+                &output,
+                Some(crate::progress::Progress::stage(
+                    workspace.directory(),
+                    &snapshot.project,
+                    "archive",
+                    "解析 HIR 导出",
+                    Some(metadata.len()),
+                    "字节",
+                )),
+            )
+        })
         .transpose()?;
+    progress.detail("normalize", "还原符号与引用", 0, None, "文件", 1);
     let raw: Value = if let Some(a) = &archive {
         a.header()?
     } else {

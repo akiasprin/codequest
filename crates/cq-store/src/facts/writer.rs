@@ -154,6 +154,8 @@ pub struct Writer<'a> {
     vector_model: Option<std::sync::Arc<cq_core::query::embeddings::TokenVectors>>,
     indexed: bool,
     initial_groups: Option<super::bulk::Builder>,
+    progress: Option<cq_core::progress::Progress>,
+    completed: u64,
 }
 struct NativeSink<'a, 'b> {
     writer: &'a mut Writer<'b>,
@@ -326,6 +328,10 @@ impl TransferSink for ScopedSink<'_, '_> {
         if self.compact {
             let state_base = self.base.summary(key)?.unwrap().base_root;
             self.writer.stats.facts_reused += b.descriptor.rows;
+            self.writer.completed += b.descriptor.rows;
+            if let Some(p) = &mut self.writer.progress {
+                p.count(self.writer.completed);
+            }
             return self.writer.append("scope",&b.descriptor.id()?,&json!({"descriptor":b.descriptor,"mode":if matches!(b.receipt.output,Output::Reuse{..}){"Reuse"}else{"Delta"},"base_revision":b.base_revision,"receipt_digest":b.receipt.digest,"members":root,"state_base":state_base,"batches":n}));
         }
         let old = self.base.scope(key)?.map(|s| s.records).unwrap_or_default();
@@ -508,9 +514,17 @@ impl<'a> Writer<'a> {
             vector_model: None,
             indexed,
             initial_groups: None,
+            progress: None,
+            completed: 0,
         }
     }
     pub fn append<T: Serialize>(&mut self, family: &str, id: &str, value: &T) -> Result<()> {
+        if ["entity", "body", "occurrence", "relation", "document"].contains(&family) {
+            self.completed += 1;
+            if let Some(p) = &mut self.progress {
+                p.count(self.completed);
+            }
+        }
         if family == "entity" && self.indexed {
             let value = serde_json::to_value(value)?;
             if let Ok(e) = serde_json::from_value::<Entity>(value) {
@@ -789,8 +803,32 @@ fn write(
     prepared: Option<&crate::analysis::Prepared>,
 ) -> Result<Revision> {
     let mut w = Writer::new(o, prior.map(|r| r.roots.clone()).unwrap_or_default());
+    let count=prepared.map(|p|p.spool.counts()).unwrap_or_else(||json!({"entities":s.entities.len(),"bodies":s.bodies.len(),"relations":s.relations.len(),"occurrences":s.occurrences.len(),"documents":s.documents.len()}));
+    let total = [
+        "entities",
+        "bodies",
+        "relations",
+        "occurrences",
+        "documents",
+    ]
+    .into_iter()
+    .map(|k| count[k].as_u64().unwrap_or(0))
+    .sum();
+    if let Some(store) = super::limits::root(&o.root) {
+        w.progress = Some(cq_core::progress::Progress::stage(
+            store,
+            &s.project,
+            "encode",
+            "编码事实分片",
+            Some(total),
+            "事实",
+        ));
+    }
     if prior.is_none() {
         w.initial_groups = Some(super::bulk::Builder::new(&o.root)?);
+        if let Some(b) = &mut w.initial_groups {
+            b.project = Some(s.project.clone());
+        }
     }
     w.vector_model = cq_core::query::embeddings::TokenVectors::configured()?;
     w.indexed = prior.is_none_or(|r| r.metadata["search_index"]["version"] == 1);

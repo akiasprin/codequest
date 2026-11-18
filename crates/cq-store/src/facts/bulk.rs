@@ -28,6 +28,8 @@ pub(super) struct Builder {
     total: u64,
     serial: u64,
     runs: Vec<(usize, PathBuf)>,
+    pub project: Option<String>,
+    count: u64,
 }
 impl Builder {
     pub fn new(root: &Path) -> Result<Self> {
@@ -41,6 +43,8 @@ impl Builder {
             total: 0,
             serial: 0,
             runs: vec![],
+            project: None,
+            count: 0,
         })
     }
     pub fn push(&mut self, directory: &str, key: &str, value: Value) -> Result<()> {
@@ -62,6 +66,7 @@ impl Builder {
         }
         self.bytes += size;
         self.rows.push(row);
+        self.count += 1;
         Ok(())
     }
     fn path(&mut self) -> PathBuf {
@@ -124,6 +129,18 @@ impl Builder {
         Ok(())
     }
     pub fn build(mut self, o: &Objects) -> Result<tree::Root> {
+        let mut progress = super::limits::root(&o.root)
+            .zip(self.project.as_deref())
+            .map(|(store, project)| {
+                cq_core::progress::Progress::stage(
+                    store,
+                    project,
+                    "sort",
+                    "归并关系索引",
+                    None,
+                    "排序段",
+                )
+            });
         self.flush()?;
         while self.runs.len() > FAN_IN {
             self.merge_runs((0..FAN_IN).collect(), 64)?;
@@ -131,6 +148,17 @@ impl Builder {
         let paths = self.runs.iter().map(|r| r.1.clone()).collect::<Vec<_>>();
         let mut merged = Merge::open(&paths)?.peekable();
         let mut failed = false;
+        let mut completed = 0;
+        if let Some(p) = &mut progress {
+            p.detail(
+                "bulk_tree",
+                "批量构建关系目录",
+                0,
+                Some(self.count),
+                "索引项",
+                1,
+            );
+        }
         let directories = std::iter::from_fn(|| {
             if failed {
                 return None;
@@ -144,6 +172,10 @@ impl Builder {
             };
             let rows = std::iter::from_fn(|| match merged.peek() {
                 Some(Ok(row)) if row.directory == directory => {
+                    completed += 1;
+                    if let Some(p) = &mut progress {
+                        p.count(completed);
+                    }
                     Some(merged.next().unwrap().map(|r| (r.key, r.value)))
                 }
                 Some(Err(_)) => Some(merged.next().unwrap().map(|r| (r.key, r.value))),

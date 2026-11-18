@@ -191,12 +191,25 @@ impl Projection {
             })?;
             stats.inventory_pages = by_page.len();
             stats.inventory_facts = by_page.values().map(Vec::len).sum();
+            let mut progress = crate::facts::limits::root(&o.root).map(|store| {
+                cq_core::progress::Progress::stage(
+                    store,
+                    &r.project,
+                    "native_pages",
+                    "发布图数据库页",
+                    Some(stats.inventory_pages as u64),
+                    "页",
+                )
+            });
             let mut page_bytes = 0u64;
             let mut page_count = 0;
             // Each page batch is a transaction. Replays skip committed page hashes.
             c.query("BEGIN TRANSACTION").map_err(err)?;
             let pages: Result<()> = (|| {
-                for rows in by_page.values() {
+                for (done, rows) in by_page.values().enumerate() {
+                    if let Some(p) = &mut progress {
+                        p.count(done as u64);
+                    }
                     let f = rows[0].1.clone();
                     if Self::exists(&c, "Page", &f.object.hash)? {
                         continue;
@@ -229,8 +242,19 @@ impl Projection {
                 return Err(e);
             }
             let mut batch = Batch::new()?;
+            if let Some(p) = &mut progress {
+                p.detail(
+                    "native_facts",
+                    "发布图数据库事实",
+                    0,
+                    Some(stats.inventory_facts as u64),
+                    "事实",
+                    1,
+                );
+            }
             let existing = super::membership::Membership::load(&c)?;
             let mut chunk = Vec::<(String, FactRef)>::new();
+            let mut completed = 0u64;
             let mut consume = |chunk: &mut Vec<(String, FactRef)>, bytes: &[u8]| -> Result<()> {
                 if chunk.is_empty() {
                     return Ok(());
@@ -240,6 +264,10 @@ impl Projection {
                     .map(|(key, f)| digest(format!("{key}:{}", f.digest).as_bytes()))
                     .collect::<Vec<_>>();
                 for ((key, f), id) in std::mem::take(chunk).into_iter().zip(ids) {
+                    completed += 1;
+                    if let Some(p) = &mut progress {
+                        p.count(completed);
+                    }
                     if existing.contains(&super::membership::key(&id)?)? {
                         continue;
                     }
@@ -303,6 +331,9 @@ impl Projection {
                 consume(&mut chunk, &bytes)?;
             }
             batch.flush(&c, &mut stats, point)?;
+            if let Some(p) = &mut progress {
+                p.detail("activate", "提交版本", 0, Some(1), "版本", 1);
+            }
             point("native-before-receipt")?;
             transaction(&c, || {
                 c.query(&format!(

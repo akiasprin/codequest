@@ -266,6 +266,14 @@ impl LocalStore {
                 writer::snapshot(&objects, &self.content, s, prior.as_ref())?
             };
             objects.sync_pending()?;
+            cq_core::progress::Progress::stage(
+                &self.root,
+                &s.project,
+                "audit",
+                "核验发布内容",
+                None,
+                "事实",
+            );
             let prepared_ms = prepare_started.elapsed().as_millis() as u64;
             let counts = objects.write_counts();
             let attempts = self

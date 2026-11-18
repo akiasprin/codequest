@@ -13,5 +13,6 @@ pub mod semantic;
 pub mod validation;
 
 pub mod process;
+pub mod progress;
 
 pub mod source_tree;

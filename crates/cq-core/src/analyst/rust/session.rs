@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 struct Worker {
+    progress: Option<crate::progress::Progress>,
     child: Child,
     input: ChildStdin,
     replies: mpsc::Receiver<std::result::Result<Value, String>>,
@@ -64,6 +65,7 @@ impl Worker {
         });
         match started.recv() {
             Ok(Ok((child, input))) => Ok(Self {
+                progress: None,
                 child,
                 input,
                 replies,
@@ -161,6 +163,23 @@ impl Worker {
                         ));
                     }
                     if reply["state"] == "progress" {
+                        if let Some(p) = &mut self.progress {
+                            let phase = reply["phase"].as_str().unwrap_or("hir_export");
+                            let label = match phase {
+                                "crate_export" => "HIR 分片导出",
+                                "merge" => "合并 HIR 分片",
+                                "merge_write" => "写出 HIR 导出",
+                                _ => "加载 HIR 编译上下文",
+                            };
+                            p.detail(
+                                phase,
+                                label,
+                                reply["completed"].as_u64().unwrap_or(0),
+                                reply["total"].as_u64(),
+                                "分片",
+                                reply["workers"].as_u64().unwrap_or(1),
+                            );
+                        }
                         if let Ok(mut log) = std::fs::OpenOptions::new()
                             .create(true)
                             .append(true)
@@ -211,7 +230,40 @@ impl Drop for Worker {
 }
 type Slot = Arc<Mutex<Option<Worker>>>;
 static WORKERS: OnceLock<Mutex<BTreeMap<String, Slot>>> = OnceLock::new();
+#[cfg(test)]
 pub fn export(provider: &Path, root: &Path, output: &Path, control: &CaptureControl) -> Result<()> {
+    export_inner(provider, root, output, control, None)
+}
+pub fn export_tracked(
+    provider: &Path,
+    root: &Path,
+    output: &Path,
+    control: &CaptureControl,
+    store: &Path,
+    project: &str,
+) -> Result<()> {
+    export_inner(
+        provider,
+        root,
+        output,
+        control,
+        Some(crate::progress::Progress::stage(
+            store,
+            project,
+            "hir_load",
+            "加载 HIR 编译上下文",
+            None,
+            "分片",
+        )),
+    )
+}
+fn export_inner(
+    provider: &Path,
+    root: &Path,
+    output: &Path,
+    control: &CaptureControl,
+    progress: Option<crate::progress::Progress>,
+) -> Result<()> {
     if control.is_cancelled() {
         return Err(Error::new("Cancelled", "native HIR request cancelled"));
     }
@@ -240,6 +292,7 @@ pub fn export(provider: &Path, root: &Path, output: &Path, control: &CaptureCont
             &output.with_extension("session.stderr"),
         )?);
     }
+    slot.as_mut().unwrap().progress = progress;
     let mut result = slot.as_mut().unwrap().request(root, output, control);
     if matches!(
         &result,

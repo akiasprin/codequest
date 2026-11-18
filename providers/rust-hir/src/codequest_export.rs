@@ -100,26 +100,79 @@ fn emit(
     }
     let dir = output.with_extension("hir-shards");
     std::fs::create_dir_all(&dir)?;
-    let mut parts = vec![];
-    let mut timings = vec![];
+    let mut jobs = vec![];
     for (unit, files) in groups {
         for chunk in files.chunks(32) {
-            let index = parts.len();
-            let path = dir.join(format!("{index:06}.json"));
-            let started = std::time::Instant::now();
-            emit_part(root, &path, host, vfs, incremental.clone(), chunk)?;
-            let item = json!({"unit":unit,"shard":index,"source_files":chunk.len(),"elapsed_ms":started.elapsed().as_millis()as u64,"bytes":std::fs::metadata(&path)?.len(),"path":path});
-            if let Some(id) = progress {
-                println!(
-                    "{}",
-                    json!({"protocol":"codequest-session","version":1,"id":id,"state":"progress","phase":"crate_export","shard":item})
-                );
-                std::io::stdout().flush()?;
-            }
-            timings.push(item);
-            parts.push(path);
+            jobs.push((unit.clone(), chunk.to_vec()));
         }
     }
+    let configured = std::env::var("CQ_HIR_WORKERS")
+        .ok()
+        .map(|s| s.parse::<usize>())
+        .transpose()?;
+    let workers = configured.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(48)
+    });
+    anyhow::ensure!((1..=48).contains(&workers), "CQ_HIR_WORKERS must be 1..48");
+    let workers = workers.min(jobs.len().max(1));
+    let report = |phase: &str, done: usize, total: usize, shard: Value| -> anyhow::Result<()> {
+        if let Some(id) = progress {
+            println!(
+                "{}",
+                json!({"protocol":"codequest-session","version":1,"id":id,"state":"progress","phase":phase,"completed":done,"total":total,"workers":if phase=="crate_export"{workers}else{1},"shard":shard})
+            );
+            std::io::stdout().flush()?;
+        }
+        Ok(())
+    };
+    report("crate_export", 0, jobs.len(), Value::Null)?;
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let completed = std::sync::Mutex::new(0usize);
+    let batches = std::thread::scope(|scope| -> anyhow::Result<Vec<Value>> {
+        let mut handles = vec![];
+        for _ in 0..workers {
+            // Analysis snapshots are Send and share one immutable Salsa
+            // revision. No worker mutates the AnalysisHost or its crate graph.
+            let snapshot = host.analysis();
+            let jobs = &jobs;
+            let dir = &dir;
+            let next = &next;
+            let completed = &completed;
+            let report = &report;
+            let incremental = &incremental;
+            handles.push(scope.spawn(move||->anyhow::Result<Vec<Value>>{
+                let mut rows=vec![];
+                loop {
+                    let index=next.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                    let Some((unit,files))=jobs.get(index)else{break;};
+                    let path=dir.join(format!("{index:06}.json"));let started=std::time::Instant::now();
+                    emit_part(root,&path,&snapshot,vfs,incremental.clone(),files)?;
+                    let item=json!({"unit":unit,"shard":index,"source_files":files.len(),"elapsed_ms":started.elapsed().as_millis()as u64,"bytes":std::fs::metadata(&path)?.len(),"path":path});
+                    {let mut done=completed.lock().unwrap();*done+=1;report("crate_export",*done,jobs.len(),item.clone())?;}
+                    rows.push(item);
+                }
+                Ok(rows)
+            }));
+        }
+        let mut rows = vec![];
+        for handle in handles {
+            rows.extend(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("HIR shard worker panicked"))??,
+            );
+        }
+        Ok(rows)
+    })?;
+    let mut timings = batches;
+    timings.sort_by_key(|v| v["shard"].as_u64().unwrap());
+    let parts = timings
+        .iter()
+        .map(|v| PathBuf::from(v["path"].as_str().unwrap()))
+        .collect::<Vec<_>>();
+    report("merge", 0, parts.len() * 2, Value::Null)?;
     // Token IDs are local to a shard. Reconcile exact native key + declaration
     // coordinates before concatenation, keeping ambiguous declarations distinct.
     let mut tokens = HashMap::<String, u64>::new();
@@ -127,7 +180,7 @@ fn emit(
     let mut remaps = vec![];
     let mut call_bases = vec![];
     let mut calls = 0u64;
-    for part in &parts {
+    for (part_index, part) in parts.iter().enumerate() {
         let data: Value =
             serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(part)?))?;
         let mut map = HashMap::new();
@@ -155,6 +208,7 @@ fn emit(
         remaps.push(map);
         call_bases.push(calls);
         calls += data["calls"].as_array().unwrap().len() as u64;
+        report("merge", part_index + 1, parts.len() * 2, Value::Null)?;
     }
     let mut writer = std::io::BufWriter::new(std::fs::File::create(output)?);
     let header = json!({"protocol":"codequest-hir-export","schema_version":1,"base_commit":"2850ecba80311bebd4cdaa9fedc5321533b5b1e7","patch_digest":option_env!("CQ_PRODUCER_PATCH_SHA"),"incremental":incremental,"shards":timings});
@@ -240,8 +294,10 @@ fn emit(
                 serde_json::to_writer(&mut *stream, &row)?;
             }
         }
+        report("merge", parts.len() + i + 1, parts.len() * 2, Value::Null)?;
     }
-    for (field, (mut stream, path, _)) in fields.iter().zip(streams) {
+    report("merge_write", 0, fields.len(), Value::Null)?;
+    for (index, (field, (mut stream, path, _))) in fields.iter().zip(streams).enumerate() {
         stream.flush()?;
         drop(stream);
         writer.write_all(b",")?;
@@ -250,6 +306,7 @@ fn emit(
         std::io::copy(&mut std::fs::File::open(&path)?, &mut writer)?;
         writer.write_all(b"]")?;
         std::fs::remove_file(path)?;
+        report("merge_write", index + 1, fields.len(), Value::Null)?;
     }
     writer.write_all(b"}")?;
     writer.flush()?;
@@ -263,14 +320,13 @@ fn emit(
 fn emit_part(
     root: &std::path::Path,
     output: &std::path::Path,
-    host: &AnalysisHost,
+    analysis: &ide::Analysis,
     vfs: &vfs::Vfs,
     incremental: Value,
     files: &[FileId],
 ) -> anyhow::Result<()> {
-    let analysis = host.analysis();
     let _ = root;
-    let index = StaticIndex::compute_graph_files(&analysis, files);
+    let index = StaticIndex::compute_graph_files(analysis, files);
     let kind_tags: std::collections::HashMap<_, _> =
         index.codequest_definition_kinds().into_iter().collect();
     let mut file_ids = BTreeSet::new();

@@ -24,12 +24,14 @@ struct Data {
 }
 pub struct Journal {
     root: PathBuf,
+    progress: Mutex<Option<cq_core::progress::Progress>>,
     data: Mutex<Data>,
 }
 impl Journal {
     pub fn new(root: PathBuf) -> Result<Self> {
         Ok(Self {
             root,
+            progress: Mutex::new(None),
             data: Mutex::new(Data {
                 file: tempfile::NamedTempFile::new()?,
                 entries: BTreeMap::new(),
@@ -53,6 +55,22 @@ impl Journal {
     }
 }
 impl Store for Journal {
+    fn progress(&self, project: &str, completed: u64, total: u64) {
+        let mut p = self.progress.lock().unwrap();
+        if completed == 0 || p.is_none() {
+            *p = Some(cq_core::progress::Progress::stage(
+                &self.root,
+                project,
+                "normalize",
+                "还原符号与引用",
+                Some(total),
+                "文件",
+            ));
+        }
+        if let Some(p) = p.as_mut() {
+            p.count(completed);
+        }
+    }
     fn put(&self, header: &SemanticSnapshot, r: Record, replace: bool) -> Result<()> {
         let key = format!("{}:{}", r.family(), r.id());
         let value = r.value()?;

@@ -7,6 +7,7 @@ pub trait Source: Send + Sync {
     fn get(&self, family: &str, id: &str) -> Result<Option<Record>>;
 }
 pub trait Store: Source {
+    fn progress(&self, _project: &str, _completed: u64, _total: u64) {}
     fn put(&self, header: &SemanticSnapshot, record: Record, replace: bool) -> Result<()>;
 }
 pub fn drain(s: &mut SemanticSnapshot, store: &dyn Store) -> Result<()> {

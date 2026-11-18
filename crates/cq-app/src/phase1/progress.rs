@@ -63,3 +63,51 @@ impl Drop for Progress {
         }
     }
 }
+
+pub(super) struct IndexBar {
+    stop: mpsc::Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+impl IndexBar {
+    pub fn start(store: &std::path::Path, project: &str) -> Option<Self> {
+        if !io::stderr().is_terminal() || std::env::var("CQ_PROGRESS").as_deref() == Ok("off") {
+            return None;
+        }
+        let path = cq_core::progress::path(store, project);
+        let (stop, receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut tick = 0;
+            loop {
+                let value = std::fs::read(&path)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                eprint!(
+                    "\r\x1b[2K{}",
+                    cq_core::progress::format(&value, started.elapsed().as_secs(), tick)
+                );
+                let _ = std::io::Write::flush(&mut io::stderr());
+                tick += 1;
+                if receive.recv_timeout(Duration::from_millis(200))
+                    != Err(mpsc::RecvTimeoutError::Timeout)
+                {
+                    break;
+                }
+            }
+            eprintln!();
+        });
+        Some(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+impl Drop for IndexBar {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
+    }
+}

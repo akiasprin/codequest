@@ -185,6 +185,12 @@ impl<'de> Visitor<'de> for Top<'_> {
 }
 impl Archive {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_progress(path, None)
+    }
+    pub fn open_with_progress(
+        path: &Path,
+        progress: Option<crate::progress::Progress>,
+    ) -> Result<Self> {
         let max_bytes = export_limit()?;
         if std::fs::metadata(path)?.len() > max_bytes {
             return Err(Error::new(
@@ -198,8 +204,12 @@ impl Archive {
             file: tempfile::NamedTempFile::new()?,
             max_bytes,
         };
-        let mut deserializer =
-            serde_json::Deserializer::from_reader(BufReader::new(std::fs::File::open(path)?));
+        let reader = crate::progress::Reader {
+            inner: std::fs::File::open(path)?,
+            progress,
+            completed: 0,
+        };
+        let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(reader));
         serde::Deserializer::deserialize_map(&mut deserializer, Top(&mut b))?;
         deserializer.end()?;
         let archive = Self {
@@ -352,8 +362,10 @@ impl Archive {
         let mut gaps = HashSet::new();
         let catalogue = super::native_batch::Catalogue::new(&self.metadata);
         let mut source_state = super::native_batch::FrameSources::new(s, mapping);
+        let total = self.metadata["files"].as_array().unwrap().len() as u64 + 1;
+        sink.progress(&s.project, 0, total);
         let result: Result<()> = (|| {
-            for file in files {
+            for (done, file) in files.enumerate() {
                 let selected = catalogue.frame(file)?;
                 let frame = self.hydrate(selected)?;
                 super::native_batch::emit_frame(
@@ -371,6 +383,7 @@ impl Archive {
                     &mut gaps,
                     &mut source_state,
                 )?;
+                sink.progress(&s.project, done as u64 + 1, total);
             }
             Ok(())
         })();

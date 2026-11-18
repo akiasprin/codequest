@@ -60,6 +60,8 @@ pub fn index_repository(
     store: &LocalStore,
     control: &CaptureControl,
 ) -> Result<serde_json::Value> {
+    let mut progress = cq_core::progress::Progress::begin(&store.root, &request.name);
+    let _bar = super::progress::IndexBar::start(&store.root, &request.name);
     let started = std::time::Instant::now();
     let scoped = store.streaming_scope()?;
     let store = &scoped;
@@ -97,6 +99,7 @@ pub fn index_repository(
         SemanticSnapshot::empty(request.name.clone(), NativeValue::new(&request.root));
     snapshot.production = Some(Default::default());
     snapshot.previous = store.head(&request.name)?;
+    progress.detail("native", "采集编译并分析", 0, None, "编译任务", 1);
     match language {
         "rust" => rust(request, store, control, &mut snapshot)?,
         "go" => super::service::index_go(request, store, control, &mut snapshot)?,
@@ -111,11 +114,13 @@ pub fn index_repository(
         ));
     }
     let records = store.analysis_records().unwrap();
+    progress.detail("relations", "整理跨文件关系", 0, None, "关系", 1);
     if matches!(language, "c" | "cpp" | "c++") {
         cq_core::semantic::stream_ops::cpp_links(&mut snapshot, records)?;
     }
     cq_core::semantic::stream_ops::topology(&mut snapshot, records)?;
     if request.include_docs {
+        progress.detail("documents", "关联文档", 0, None, "文档", 1);
         cq_core::semantic::stream_ops::documents(
             &mut snapshot,
             records,
@@ -161,6 +166,14 @@ pub fn index_repository(
         .stage_ms
         .insert("capture_and_native_normalization".into(), native_ms);
     let transport = records.stats();
+    progress.detail(
+        "prepare",
+        "准备事实分片",
+        0,
+        transport["records"].as_u64(),
+        "事实",
+        1,
+    );
     let prepared = store.prepare_records(snapshot, records)?;
     let snapshot = &prepared.header;
     if control.is_cancelled() {
@@ -183,7 +196,15 @@ pub fn index_repository(
             }
         }
     }
-    let revision = store.publish_analysis(&prepared)?;
+    let result = store.publish_analysis(&prepared);
+    if result.is_ok() {
+        progress.detail("complete", "索引完成", 1, Some(1), "提交", 1);
+        progress.finish("complete");
+    } else if matches!(&result, Err(Error::PublicationInProgress { .. })) { /* host owns live progress */
+    } else {
+        progress.finish("failed");
+    }
+    let revision = result?;
     let mut summary = super::service::index_summary(snapshot);
     for (key, value) in revision.metadata["counts"].as_object().unwrap() {
         summary[key] = value.clone();
