@@ -43,6 +43,7 @@ pub struct Spool {
     pub universe: String,
     pub sources: BTreeMap<String, Option<FileRevision>>,
     by_shard: BTreeMap<(String, String), Vec<String>>,
+    by_scope: BTreeMap<ScopeKey, Vec<String>>,
 }
 pub struct ScopeBase {
     objects: Objects,
@@ -354,6 +355,7 @@ impl Spool {
             universe: String::new(),
             sources: BTreeMap::new(),
             by_shard: BTreeMap::new(),
+            by_scope: BTreeMap::new(),
         })
     }
     fn insert(&mut self, unit: &str, shard: &str, record: normalized::Record) -> Result<()> {
@@ -398,6 +400,11 @@ impl Spool {
             .map_err(|_| Error::new("SpoolPoisoned", "record spool poisoned"))?;
         let offset = file.as_file_mut().seek(SeekFrom::End(0))?;
         file.as_file_mut().write_all(&bytes)?;
+        if let Some(keys) = self.by_scope.get_mut(&scope) {
+            keys.push(key.clone());
+        } else {
+            self.by_scope.insert(scope.clone(), vec![key.clone()]);
+        }
         self.entries.insert(
             key,
             Entry {
@@ -540,10 +547,11 @@ impl Spool {
                 begin
             } else {
                 let current = self
-                    .entries
-                    .iter()
-                    .filter(|(_, e)| e.scope == descriptor.key)
-                    .map(|(k, e)| (k.clone(), e.reference.clone()))
+                    .by_scope
+                    .get(&descriptor.key)
+                    .into_iter()
+                    .flatten()
+                    .map(|k| (k.clone(), self.entries[k].reference.clone()))
                     .collect::<BTreeMap<_, _>>();
                 transfer::plan(descriptor, current, base)?
             };
@@ -587,7 +595,11 @@ impl Spool {
     }
     pub fn each(&self, family: &str, mut f: impl FnMut(&str, Value) -> Result<()>) -> Result<()> {
         let prefix = format!("{family}:");
-        for key in self.entries.keys().filter(|k| k.starts_with(&prefix)) {
+        for (key, _) in self
+            .entries
+            .range(prefix.clone()..)
+            .take_while(|(k, _)| k.starts_with(&prefix))
+        {
             f(key, self.read(key)?)?;
         }
         Ok(())
