@@ -1,0 +1,17 @@
+[package]
+name = "cq-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+shlex = "1"
+cq-capture-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+libc.workspace = true
+cargo_metadata.workspace = true
+regex.workspace = true
+pulldown-cmark.workspace = true
+tempfile.workspace = true

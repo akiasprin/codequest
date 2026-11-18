@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/DeusData/codebase-memory-mcp.git",
+  "commit": "cdfdf26483fa56f4f7d9d85e7c4c3924133b458b",
+  "directory": "vendored/nomic",
+  "model": "nomic-embed-code static distilled token vectors, not transformer sentence inference",
+  "license": "Apache-2.0",
+  "files": {
+    "code_vectors.bin": "c76bba4c5032323ded6202053af5afdbbac12f6d920c691b3b3b4cd708f99e83",
+    "code_tokens.txt": "c928f5e2f9dd85f2294a50a05dd9f2f8bc95192727579aa16b062ff8ef301d25",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "NOTICE": "893a74d9e3f0a74358344edc999e165739df343b36297967f3fd9cd462022f39"
+  }
+}

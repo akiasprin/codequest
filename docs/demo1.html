@@ -1,0 +1,1438 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>CodeQuest × Cube</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: brocade console language — gridded ground, floating glass top bar, hairline cards with band headers; product-tour tabs pair a short narrative column with one live demo */
+:root{
+  color-scheme: light;
+  /* brocade base tokens (frontend/src/styles.css, light) */
+  --b-ground:#ededec; --b-sheet:#ffffff; --b-card:#ffffff; --b-block:#f8f8f7; --b-band:#f0f0ef; --b-sunk:#f5f5f4;
+  --b-line:#e8e8e6; --b-grid-line:#dbdcda; --b-line-soft:rgba(20,20,25,.04);
+  --b-ink:#1c1e21; --b-ink-2:#3b3e42; --b-ink-3:#5c6165; --b-ink-4:#7e8286;
+  --b-action:#2563b9; --b-action-hover:#1d56a3; --b-action-wash:rgba(37,99,185,.09); --b-action-on:#ffffff;
+  --b-ok:#168e6b; --b-gold:#b47a21; --b-err:#a64a51; --b-hue-1:#626967; --b-hue-4:#5e6865;
+  --b-btn:#ffffff; --b-btn-h:color-mix(in srgb,#2563b9 7%,#ffffff);
+  --b-glass:rgba(255,255,255,.88);
+  --b-shadow:0 2px 6px rgba(25,25,40,.06),0 14px 36px rgba(25,25,40,.12);
+  --b-sheet-shadow:0 1px 2px rgba(20,30,70,.04),0 5px 16px rgba(20,30,70,.07);
+  --b-code-k:#2563b9; --b-code-s:#8a5015;
+  --b-o1:#286983; --b-o2:#b66fa2; --b-o3:#5b8e66; --b-o4:#4d70b2; --b-o5:#d7827e; --b-o6:#56949f; --b-o7:#907aa9;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue","PingFang SC","Hiragino Sans GB","Noto Sans CJK SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono","JetBrains Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  /* page tokens, mapped onto brocade's */
+  --bg:var(--b-ground); --bar:var(--b-glass); --surface:var(--b-card); --surface-2:var(--b-band); --code-bg:var(--b-sunk);
+  --ink:var(--b-ink); --ink-2:var(--b-ink-2); --ink-3:var(--b-ink-3); --line:var(--b-line); --line-2:var(--b-grid-line);
+  --accent:var(--b-action); --accent-ink:var(--b-action-on); --accent-soft:var(--b-action-wash);
+  --a-sem:var(--b-o1); --a-run:var(--b-o4); --a-rule:var(--b-o3); --a-auth:var(--b-o5); --a-hyp:var(--b-o2);
+  --ok:var(--b-ok); --warn:var(--b-gold); --bad:var(--b-err);
+  --term-bg:var(--b-sunk); --term-ink:var(--b-ink-2); --term-dim:var(--b-ink-4); --term-k:var(--b-code-k); --term-s:var(--b-code-s); --term-ok:var(--b-ok); --term-line:var(--b-line);
+  --stage:#0f1012; --stage-ink:#e2e4e7; --stage-dim:#8d9196; --stage-line:rgba(226,228,231,.12); --stage-card:rgba(31,32,35,.92); --stage-hi:#91b8f2; --stage-amber:#d1a150;
+  --shadow:var(--b-sheet-shadow);
+  --f-display:var(--sans); --f-body:var(--sans); --f-mono:var(--mono);
+}
+/* Light by default, like brocade (frontend/src/forge/theme.ts): dark only when the viewer explicitly picks it. */
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --b-ground:#0f1012; --b-sheet:#18191b; --b-card:#1f2023; --b-block:#1f2023; --b-band:#17181a; --b-sunk:#101112;
+  --b-line:#26282b; --b-grid-line:#2c2e31; --b-line-soft:rgba(235,236,240,.035);
+  --b-ink:#e2e4e7; --b-ink-2:#c2c5c9; --b-ink-3:#8d9196; --b-ink-4:#676b71;
+  --b-action:#91b8f2; --b-action-hover:#b0cdf8; --b-action-wash:rgba(145,184,242,.15); --b-action-on:#101319;
+  --b-ok:#43b789; --b-gold:#d1a150; --b-err:#c96e72; --b-hue-1:#969e9b; --b-hue-4:#8c9693;
+  --b-btn:#161718; --b-btn-h:color-mix(in srgb,#161718,#e2e4e7 7%);
+  --b-glass:color-mix(in srgb,#161718 84%,transparent);
+  --b-shadow:0 1px 2px rgba(0,0,0,.45),0 6px 16px rgba(0,0,0,.36);
+  --b-sheet-shadow:0 1px 3px rgba(0,0,0,.26),0 3px 10px rgba(0,0,0,.22);
+  --b-code-k:#b0cdf8; --b-code-s:#d1a150;
+  --b-o1:#3e8fb0; --b-o2:#e99cd3; --b-o3:#8bbe95; --b-o4:#7da1e3; --b-o5:#ea9a97; --b-o6:#9ccfd8; --b-o7:#c4a7e7;
+}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{scroll-padding-top:72px}
+body{background:var(--bg);color:var(--ink);font:15px/1.7 var(--f-body);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:30;background:var(--bg)}
+a{color:var(--accent)}
+code,kbd,pre,.mono{font-family:var(--f-mono);font-size:.9em}
+:not(pre)>code{background:var(--code-bg);padding:.1em .4em;border-radius:5px;color:var(--ink)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+h1,h2,h3{font-family:var(--f-display);text-wrap:balance;margin:0;letter-spacing:-.01em}
+h1{font-size:clamp(34px,4.4vw,54px);line-height:1.12;font-weight:700}
+h2{font-size:clamp(24px,2.5vw,31px);line-height:1.25;font-weight:700}
+h3{font-size:17px;line-height:1.4;font-weight:600}
+p{margin:0}
+.wrap{max-width:1240px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.eyebrow{font:600 12px/1.4 var(--f-display);letter-spacing:.08em;color:var(--accent);margin:0 0 14px}
+.lead{font-size:16.5px;line-height:1.8;color:var(--ink-2);max-width:36em}
+.muted{color:var(--ink-3)}
+.small{font-size:13px}
+
+/* top bar */
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--bar);-webkit-backdrop-filter:saturate(1.4) blur(12px);backdrop-filter:saturate(1.4) blur(12px);border-bottom:1px solid var(--line)}
+.bar-in{display:flex;align-items:center;gap:18px;height:58px}
+.brand{display:flex;align-items:center;gap:9px;font:700 16.5px/1 var(--f-display);color:var(--ink);text-decoration:none;flex:none}
+.brand svg{width:24px;height:24px}
+.tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;min-width:0;flex:1;height:100%;align-items:stretch}
+.tabs::-webkit-scrollbar{display:none}
+.tabs a{position:relative;display:flex;align-items:center;gap:7px;padding:0 13px;color:var(--ink-3);text-decoration:none;font-weight:500;white-space:nowrap;font-size:14.5px;border-radius:0}
+.tabs a:hover{color:var(--ink)}
+.tabs a .k{font:500 11px/1 var(--f-mono);color:var(--ink-3);border:1px solid var(--line-2);border-radius:4px;padding:2px 4px;opacity:.8}
+.tabs a[aria-selected="true"]{color:var(--ink)}
+.tabs a[aria-selected="true"]::after{content:"";position:absolute;left:13px;right:13px;bottom:-1px;height:2px;background:var(--accent);border-radius:2px}
+.tabs a:focus-visible{outline-offset:-4px}
+.sample{flex:none;font-size:12.5px;color:var(--ink-3);white-space:nowrap;border:1px solid var(--line);padding:4px 11px;border-radius:99px;background:var(--surface)}
+.sample b{color:var(--ink);font-weight:600}
+
+/* panels */
+.panel{padding-block:44px 72px}
+.panel:not([hidden]){animation:rise .32s ease both}
+@keyframes rise{from{opacity:.35;transform:translateY(6px)}to{opacity:1;transform:none}}
+.ph{display:grid;gap:12px;max-width:44em;margin-bottom:28px}
+.ph p{color:var(--ink-2);font-size:15.5px}
+.split{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:44px;align-items:start}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;gap:8px;font:500 14px/1 var(--f-body);padding:10px 15px;border-radius:9px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink);cursor:pointer;text-decoration:none}
+.btn:hover{border-color:var(--ink-3)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn svg{width:15px;height:15px}
+.btn.sm{padding:7px 11px;font-size:13px;border-radius:8px}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+
+/* disclosures */
+.more{margin-top:36px;border-top:1px solid var(--line)}
+details.fold{border-bottom:1px solid var(--line)}
+details.fold>summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:14px;padding:16px 4px;flex-wrap:wrap}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary::before{content:"";flex:none;width:8px;height:8px;border-right:1.6px solid var(--ink-3);border-bottom:1.6px solid var(--ink-3);transform:translateY(-2px) rotate(-45deg);transition:transform .2s}
+details.fold[open]>summary::before{transform:translateY(-4px) rotate(45deg)}
+details.fold>summary b{font-weight:600;font-size:15px}
+details.fold>summary span{color:var(--ink-3);font-size:13.5px}
+.fold-body{padding:2px 4px 22px 26px;min-width:0}
+
+/* tables */
+.tbl-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--ink-3);font-size:12px;letter-spacing:.04em}
+td.num{text-align:right;white-space:nowrap}
+
+/* terminal */
+.term{background:var(--term-bg);color:var(--term-ink);border-radius:12px;border:1px solid var(--term-line);overflow:hidden;min-width:0}
+.term-h{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--term-line);font:500 12px/1.4 var(--f-mono);color:var(--term-dim)}
+.term-h i{width:9px;height:9px;border-radius:50%;background:#2a3346;flex:none}
+.term-h .sp{flex:1}
+.term pre{margin:0;padding:14px 16px;font:12.5px/1.75 var(--f-mono);overflow-x:auto;white-space:pre}
+.term .p{color:var(--term-dim)} .term .k{color:var(--term-k)} .term .s{color:var(--term-s)} .term .ok{color:var(--term-ok)} .term .d{color:var(--term-dim)} .term .b{color:#fff;font-weight:500}
+.term .ln{display:block}
+.term .ln.new{animation:ln .25s ease both}
+@keyframes ln{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:none}}
+
+/* authority chips */
+.au{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap;line-height:1}
+.au svg{width:26px;height:8px;flex:none;overflow:visible}
+.au line{stroke-width:2.4;stroke-linecap:round}
+.au-sem line{stroke:var(--a-sem)}
+.au-run line{stroke:var(--a-run);stroke-dasharray:3 3}
+.au-rule line{stroke:var(--a-rule);stroke-dasharray:7 4}
+.au-auth line{stroke:var(--a-auth);stroke-dasharray:11 3 2 3}
+.au-hyp line{stroke:var(--a-hyp);stroke-dasharray:.5 4.5}
+.au .en{font:400 11px/1 var(--f-mono);color:var(--ink-3)}
+
+/* ---------- overview ---------- */
+.ov{display:grid;grid-template-columns:minmax(0,4.6fr) minmax(0,7.4fr);gap:44px;align-items:center}
+.ov-copy{display:grid;gap:22px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin:4px 0 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stats div{padding:14px 14px 14px 0}
+.stats div+div{padding-left:14px;border-left:1px solid var(--line)}
+.stats dt{font:600 25px/1.1 var(--f-display);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.stats dt small{font-size:14px;font-weight:500;color:var(--ink-2);margin-left:2px}
+.stats dd{margin:6px 0 0;font-size:12.5px;color:var(--ink-3);line-height:1.45}
+
+.stage{position:relative;height:580px;border-radius:18px;background:var(--stage);overflow:hidden;isolation:isolate;color:var(--stage-ink);box-shadow:0 30px 60px -30px rgba(7,10,16,.55)}
+.stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:pan-y;cursor:grab;outline:none}
+.stage canvas:active{cursor:grabbing}
+.stage::after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(120% 80% at 50% 38%,transparent 55%,rgba(7,10,16,.75) 100%);z-index:1}
+.stage>*:not(canvas){z-index:2}
+.lbls{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.lbl{position:absolute;left:0;top:0;font:500 11.5px/1 var(--f-mono);color:var(--stage-ink);white-space:nowrap;padding:3px 6px;border-radius:5px;background:rgba(7,10,16,.62);transform:translate(-50%,-50%);transition:opacity .25s}
+.lbl.hi{color:#fff;background:rgba(51,70,211,.55)}
+.lbl.doc{box-shadow:inset 0 0 0 1px rgba(240,178,58,.6)}
+.lbl.grp{background:none;color:var(--stage-dim);font-size:10.5px;letter-spacing:.06em;padding:0}
+.hud{position:absolute;left:16px;top:14px;font:500 11.5px/1.5 var(--f-mono);color:var(--stage-dim);display:flex;gap:6px 14px;flex-wrap:wrap;max-width:calc(100% - 230px);pointer-events:none}
+.hud b{color:var(--stage-ink);font-weight:500}
+.st-ctrl{position:absolute;right:14px;top:12px;display:flex;gap:6px}
+.st-ctrl button{font:500 12px/1 var(--f-body);color:var(--stage-ink);background:rgba(255,255,255,.06);border:1px solid var(--stage-line);border-radius:7px;padding:7px 10px;cursor:pointer}
+.st-ctrl button:hover{background:rgba(255,255,255,.12)}
+.st-foot{pointer-events:none;position:absolute;left:0;right:0;bottom:0;padding:14px 16px 14px;display:grid;gap:10px;background:linear-gradient(transparent,rgba(7,10,16,.92) 34%)}
+.cap{display:flex;align-items:baseline;gap:10px 14px;flex-wrap:wrap;font:12px/1.5 var(--f-mono);color:var(--stage-dim);min-height:20px}
+.cap .q{color:var(--stage-hi)}
+.cap .r{color:var(--stage-ink);font-family:var(--f-body);font-size:13px}
+.cap .ms{margin-left:auto;color:var(--stage-dim)}
+.qs3d{pointer-events:auto;display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+.qs3d::-webkit-scrollbar{display:none}
+.qs3d button{position:relative;flex:none;font:500 13px/1 var(--f-body);color:var(--stage-dim);background:rgba(255,255,255,.04);border:1px solid var(--stage-line);border-radius:99px;padding:8px 13px;cursor:pointer;overflow:hidden}
+.qs3d button:hover{color:var(--stage-ink)}
+.qs3d button[aria-pressed="true"]{color:#fff;border-color:rgba(170,184,255,.55);background:rgba(51,70,211,.35)}
+.qs3d button .pg{position:absolute;left:0;bottom:0;height:2px;background:var(--stage-hi);width:0}
+.ncard{position:absolute;right:14px;top:52px;width:min(300px,calc(100% - 28px));background:var(--stage-card);border:1px solid var(--stage-line);border-radius:12px;padding:14px 15px;display:grid;gap:9px;font-size:13px;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+.ncard .nm{font:600 14px/1.35 var(--f-mono);color:#fff;word-break:break-all;padding-right:22px}
+.ncard .loc{font:11.5px/1.4 var(--f-mono);color:var(--stage-dim);word-break:break-all}
+.ncard .sig{font:11.5px/1.5 var(--f-mono);color:var(--stage-ink);background:rgba(255,255,255,.05);border-radius:6px;padding:7px 8px;white-space:pre-wrap;word-break:break-word}
+.ncard .nums{display:flex;gap:14px;color:var(--stage-dim);font-size:12px}
+.ncard .nums b{color:var(--stage-ink);font-family:var(--f-display);font-size:14px}
+.ncard .doc{color:#f3dfb6;font-size:12.5px;line-height:1.6;border-left:2px dotted var(--stage-amber);padding-left:9px}
+.ncard .x{position:absolute;right:8px;top:8px;width:26px;height:26px;border-radius:6px;border:0;background:none;color:var(--stage-dim);cursor:pointer;font-size:16px;line-height:1}
+.ncard .x:hover{color:#fff;background:rgba(255,255,255,.08)}
+.ncard .go{justify-self:start;font:500 12.5px/1 var(--f-body);color:#fff;background:rgba(51,70,211,.7);border:0;border-radius:7px;padding:8px 11px;cursor:pointer}
+.stip{position:absolute;left:0;top:0;pointer-events:none;font:500 11.5px/1 var(--f-mono);color:#fff;background:rgba(51,70,211,.85);padding:5px 7px;border-radius:6px;transform:translate(-50%,calc(-100% - 12px));white-space:nowrap}
+.nogl{position:absolute;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:var(--stage-dim);font-size:14px}
+
+.asks{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:40px}
+.ask{display:grid;gap:10px;align-content:start;padding:18px 18px 16px;border-radius:14px;background:var(--surface);border:1px solid var(--line);text-decoration:none;color:var(--ink);transition:border-color .2s,transform .2s}
+.ask:hover{border-color:var(--accent);transform:translateY(-2px)}
+.ask .t{font:500 11.5px/1 var(--f-display);letter-spacing:.06em;color:var(--ink-3)}
+.ask .qq{font-weight:600;font-size:15.5px;line-height:1.45}
+.ask .aa{font-size:13px;color:var(--ink-2);line-height:1.6}
+.ask .aa code{font-size:12px}
+.ask .arr{font:500 12.5px/1 var(--f-body);color:var(--accent);margin-top:2px}
+
+/* ---------- index ---------- */
+.cmdline{display:flex;align-items:center;gap:10px;background:var(--term-bg);color:var(--term-ink);border-radius:10px;padding:11px 12px 11px 15px;font:13px/1.5 var(--f-mono);border:1px solid var(--term-line)}
+.cmdline code{background:none;padding:0;color:inherit;flex:1;min-width:0;overflow-x:auto;white-space:nowrap;scrollbar-width:none}
+.cmdline .p{color:var(--term-dim)}
+.copy{flex:none;font:500 12px/1 var(--f-body);color:var(--term-ink);background:rgba(255,255,255,.07);border:1px solid var(--term-line);border-radius:6px;padding:6px 9px;cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.stages{list-style:none;margin:0;padding:0;display:grid;gap:4px}
+.stages li{display:grid;grid-template-columns:30px minmax(0,1fr);gap:4px 12px;padding:13px 12px;border-radius:12px;cursor:default;transition:background .2s}
+.stages li.on,.stages li:hover{background:var(--surface)}
+.stages .no{grid-row:span 2;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font:600 13px/1 var(--f-display);border:1.5px solid var(--line-2);color:var(--ink-3)}
+.stages li.on .no{border-color:var(--accent);color:var(--accent)}
+.stages .hd{display:flex;align-items:baseline;gap:6px 12px;flex-wrap:wrap}
+.stages .hd b{font-weight:600}
+.stages .hd span{font:500 12.5px/1.3 var(--f-mono);color:var(--ink-2);font-variant-numeric:tabular-nums}
+.stages p{font-size:13.5px;color:var(--ink-3);line-height:1.65}
+.idx-demo{display:grid;gap:18px;min-width:0}
+.stack-box{position:relative;height:430px;border-radius:16px;background:var(--surface);border:1px solid var(--line);overflow:hidden;perspective:1500px}
+.stack{position:absolute;left:50%;top:45%;width:0;height:0;transform-style:preserve-3d;transform:rotateX(58deg) rotateZ(-34deg)}
+.layer{position:absolute;width:330px;height:200px;left:-165px;top:-100px;border-radius:14px;transform-style:preserve-3d;transition:transform .5s cubic-bezier(.2,.7,.2,1),opacity .4s,box-shadow .4s;background:var(--surface-2);border:1px solid var(--line-2);opacity:.55;overflow:hidden}
+.layer.on{opacity:1;box-shadow:0 0 0 1px var(--accent),0 24px 40px -20px rgba(51,70,211,.45)}
+.layer[data-i="0"]{transform:translateZ(-110px)}
+.layer[data-i="1"]{transform:translateZ(0)}
+.layer[data-i="2"]{transform:translateZ(110px)}
+.stack-box.spread .layer[data-i="0"]{transform:translateZ(-140px)}
+.stack-box.spread .layer[data-i="2"]{transform:translateZ(140px)}
+.layer .tag{position:absolute;left:12px;top:10px;font:600 11px/1 var(--f-mono);color:var(--ink-2);letter-spacing:.04em}
+.tiles{position:absolute;inset:32px 14px 14px;display:grid;grid-template-columns:repeat(12,1fr);gap:5px}
+.tiles i{border-radius:3px;background:var(--line-2)}
+.tiles i.ws{background:var(--accent)}
+.layer.scan .tiles i{animation:tile .5s ease both}
+@keyframes tile{from{opacity:0;transform:scale(.4)}to{opacity:1;transform:none}}
+.dots{position:absolute;inset:32px 14px 14px;border-radius:8px;background-image:radial-gradient(circle,var(--ink-3) 1.1px,transparent 1.5px);background-size:9px 9px;opacity:.75}
+.dots b{position:absolute;width:7px;height:7px;border-radius:50%;background:var(--a-sem)}
+.layer svg.net{position:absolute;inset:28px 10px 10px;width:calc(100% - 20px);height:calc(100% - 38px)}
+.net line{stroke:var(--accent);stroke-opacity:.5;stroke-width:1}
+.net circle{fill:var(--accent)}
+.net circle.doc{fill:var(--a-auth)}
+.stack-cap{position:absolute;left:0;bottom:0;right:0;padding:10px 16px;background:var(--surface);border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-3);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.langs td:first-child{font-weight:600;white-space:nowrap}
+
+/* ---------- explore ---------- */
+.tools{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;padding:12px;border-radius:14px;background:var(--surface);border:1px solid var(--line);margin-bottom:14px}
+.tools label.srch{display:flex;align-items:center;gap:8px;border:1px solid var(--line-2);border-radius:9px;padding:0 10px;background:var(--bg);min-width:0;flex:1 1 240px;max-width:340px}
+.tools label.srch svg{width:15px;height:15px;color:var(--ink-3);flex:none}
+.tools input[type=search]{border:0;background:none;font:13.5px/1 var(--f-mono);color:var(--ink);padding:9px 0;width:100%;min-width:0;outline:none}
+.seg{display:inline-flex;border:1px solid var(--line-2);border-radius:9px;padding:2px;background:var(--bg)}
+.seg button{font:500 13px/1 var(--f-body);color:var(--ink-3);background:none;border:0;border-radius:7px;padding:8px 11px;cursor:pointer;white-space:nowrap}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(15,21,34,.12)}
+.ctl{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2)}
+.ctl select{font:13px/1 var(--f-mono);color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:8px;padding:7px 8px;max-width:220px}
+.sw{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2);cursor:pointer;user-select:none}
+.sw input{appearance:none;-webkit-appearance:none;width:32px;height:18px;border-radius:99px;background:var(--line-2);position:relative;cursor:pointer;margin:0;transition:background .2s}
+.sw input::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .2s}
+.sw input:checked{background:var(--accent)}
+.sw input:checked::after{transform:translateX(14px)}
+.picks{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px}
+.picks button{font:500 12.5px/1 var(--f-mono);color:var(--ink-2);background:none;border:1px dashed var(--line-2);border-radius:7px;padding:7px 9px;cursor:pointer}
+.picks button:hover,.picks button[aria-pressed="true"]{color:var(--accent);border-color:var(--accent);border-style:solid}
+.ex{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:14px;align-items:start}
+.graph{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow-x:auto;min-width:0;position:relative}
+.graph svg{display:block;margin:0 auto}
+.graph .colh{font:600 11px/1 var(--f-display);letter-spacing:.06em;fill:var(--ink-3)}
+.gn rect{fill:var(--bg);stroke:var(--line-2);stroke-width:1;transition:stroke .15s}
+.gn text{font:12px/1 var(--f-mono);fill:var(--ink)}
+.gn .crate{font-size:9.5px;fill:var(--ink-3)}
+.gn{cursor:pointer}
+.gn:hover rect,.gn:focus-visible rect{stroke:var(--accent)}
+.gn:focus-visible{outline:none}
+.gn.focus rect{fill:var(--accent);stroke:var(--accent)}
+.gn.focus text{fill:var(--accent-ink)}
+.gn.focus .crate{fill:var(--accent-ink);opacity:.75}
+.gn.cand rect{stroke-dasharray:4 3}
+.gn .dm{fill:var(--a-auth)}
+.ge{fill:none;stroke:var(--a-sem);stroke-width:1.5;stroke-opacity:.55}
+.ge.cand{stroke:var(--ink-3);stroke-dasharray:4 4;stroke-opacity:.8}
+.ge.path{stroke:var(--accent);stroke-width:2.2;stroke-opacity:1}
+.gmore rect{fill:none;stroke:var(--line-2);stroke-dasharray:3 3}
+.gmore text{font:12px/1 var(--f-body);fill:var(--ink-3)}
+.gfold{cursor:pointer}
+.gfold rect{fill:var(--accent-soft);stroke:none}
+.gfold text{font:500 12px/1 var(--f-body);fill:var(--accent)}
+.glegend{display:flex;flex-wrap:wrap;gap:6px 18px;padding:10px 14px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-3)}
+.glegend span{display:inline-flex;align-items:center;gap:7px}
+.glegend svg{width:26px;height:8px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;display:grid;gap:14px;min-width:0}
+.card .nm{font:600 15px/1.4 var(--f-mono);word-break:break-all}
+.card .loc{font:12px/1.5 var(--f-mono);color:var(--ink-3);word-break:break-all}
+.card pre.sig{margin:0;font:12px/1.6 var(--f-mono);background:var(--code-bg);border-radius:8px;padding:10px 11px;white-space:pre-wrap;word-break:break-word}
+.kv{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line);border-radius:10px}
+.kv div{padding:9px 10px}
+.kv div+div{border-left:1px solid var(--line)}
+.kv b{display:block;font:600 19px/1.1 var(--f-display);font-variant-numeric:tabular-nums}
+.kv span{font-size:12px;color:var(--ink-3)}
+.card .docq{font-size:13.5px;line-height:1.7;color:var(--ink-2);margin:0;padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--a-auth) 10%,var(--surface))}
+.card .docq .au{margin-bottom:6px}
+.card .idl{font:11.5px/1.4 var(--f-mono);color:var(--ink-3);display:flex;gap:8px;align-items:center;justify-content:space-between}
+.ex-term{margin-top:14px}
+
+/* ---------- intent ---------- */
+.it{display:grid;grid-template-columns:minmax(0,4fr) minmax(0,8fr);gap:36px;align-items:start}
+.qlist{display:grid;gap:8px;margin:6px 0 26px}
+.qlist button{text-align:left;font:500 15px/1.5 var(--f-body);color:var(--ink-2);background:none;border:1px solid var(--line);border-radius:12px;padding:13px 15px;cursor:pointer;display:grid;gap:4px}
+.qlist button small{font-size:12.5px;color:var(--ink-3);font-weight:400}
+.qlist button:hover{border-color:var(--line-2);color:var(--ink)}
+.qlist button[aria-pressed="true"]{border-color:var(--accent);color:var(--ink);background:var(--surface);box-shadow:var(--shadow)}
+.legend h3{font-size:14px;margin-bottom:10px}
+.leg{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.leg li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;padding:9px 0;border-top:1px solid var(--line);align-items:center}
+.leg li p{grid-column:1/-1;font-size:12.5px;color:var(--ink-3);line-height:1.6}
+.leg .sw{font-size:12px}
+.ans{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:26px 26px 22px;display:grid;gap:18px;box-shadow:var(--shadow);min-width:0}
+.ans .sum{font-size:17px;line-height:1.75;color:var(--ink)}
+.ans .meta{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:12.5px;color:var(--ink-3)}
+.claims{list-style:none;margin:0;padding:0;display:grid;gap:0}
+.claim{display:grid;gap:7px;padding:14px 0;border-top:1px solid var(--line)}
+.claim-h{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap}
+.claim-h .loc{font:12px/1 var(--f-mono);color:var(--ink-3)}
+.claim p{font-size:14.5px;line-height:1.7;color:var(--ink-2)}
+.claim pre{margin:4px 0 0;font:12.5px/1.7 var(--f-mono);background:var(--code-bg);padding:10px 12px;border-radius:8px;white-space:pre-wrap;color:var(--ink)}
+.claim details summary{cursor:pointer;font-size:12.5px;color:var(--accent);width:max-content}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:3px 9px 3px 7px;border-radius:99px;border:1px solid var(--line-2);color:var(--ink)}
+.pill svg{width:12px;height:12px}
+.pill .i-ok{color:var(--ok)} .pill .i-warn{color:var(--warn)} .pill .i-bad{color:var(--bad)}
+.rev{font-size:12.5px;color:var(--ink-3)}
+.hidden-note{font-size:13px;color:var(--ink-3);display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px}
+.hidden-note button{font:500 12.5px/1 var(--f-body);color:var(--accent);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.fnchips{display:flex;gap:6px;flex-wrap:wrap}
+.fnchips button{font:12px/1 var(--f-mono);color:var(--ink-2);border:1px solid var(--line-2);background:var(--bg);border-radius:6px;padding:6px 8px;cursor:pointer}
+.fnchips button:hover{color:var(--accent);border-color:var(--accent)}
+
+/* ---------- mcp ---------- */
+.ops{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;border-top:1px solid var(--line)}
+.ops div{padding:10px 0;border-bottom:1px solid var(--line);display:grid;gap:2px}
+.ops div:nth-child(odd){padding-right:14px}
+.ops div:nth-child(even){padding-left:14px;border-left:1px solid var(--line)}
+.ops code{background:none;padding:0;font-weight:500;color:var(--ink);font-size:13px}
+.ops span{font-size:12.5px;color:var(--ink-3)}
+.mcp-l{display:grid;gap:22px;min-width:0}
+.cfg{position:relative}
+.cfg .copy{position:absolute;right:10px;top:9px}
+.chat{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;min-width:0;box-shadow:var(--shadow)}
+.chat-h{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);font-size:13px;color:var(--ink-3)}
+.chat-h b{color:var(--ink);font-weight:600}
+.chat-h .sp{flex:1}
+.msgs{padding:18px 16px;display:grid;gap:14px;min-height:420px;align-content:start}
+.msg{max-width:92%;min-width:0}
+.msg.new{animation:rise .3s ease both}
+.msg.user{justify-self:end;background:var(--accent);color:var(--accent-ink);padding:10px 14px;border-radius:14px 14px 4px 14px;font-size:14.5px}
+.msg.agent{background:var(--bg);border:1px solid var(--line);padding:13px 15px;border-radius:14px 14px 14px 4px;font-size:14.5px;line-height:1.8}
+.msg.agent .au{vertical-align:-1px;margin:0 2px;font-size:11.5px;padding:2px 6px;border-radius:5px;background:var(--surface);border:1px solid var(--line)}
+.msg.agent .au svg{width:18px}
+.msg.tool{width:100%;max-width:100%}
+.msg.tool .term pre{font-size:12px;line-height:1.7}
+.msg.tool .term-h{font-size:11.5px}
+.who{font:500 11.5px/1 var(--f-display);letter-spacing:.05em;color:var(--ink-3);margin-bottom:6px}
+.msg.user .who{color:var(--accent-ink);opacity:.75}
+.perf svg{display:block;width:100%;height:auto;overflow:visible}
+.perf .bl{font:12px/1 var(--f-mono);fill:var(--ink-2)}
+.perf .bv{font:500 12px/1 var(--f-mono);fill:var(--ink)}
+.perf .gl{stroke:var(--line);stroke-width:1}
+.perf .gt{font:11px/1 var(--f-mono);fill:var(--ink-3)}
+.perf .bar{fill:var(--a-sem)}
+.perf .hit{fill:transparent;cursor:default}
+.perf .hit:hover+.bar,.perf g:hover .bar{filter:brightness(1.15)}
+.ptip{position:fixed;pointer-events:none;z-index:40;background:var(--ink);color:var(--bg);font:12px/1.5 var(--f-mono);padding:6px 9px;border-radius:7px;white-space:nowrap}
+
+/* footer */
+.foot{border-top:1px solid var(--line);padding-block:26px 40px;font-size:13px;color:var(--ink-3);line-height:1.8}
+.foot .wrap{display:flex;gap:10px 28px;flex-wrap:wrap;justify-content:space-between}
+.foot p{max-width:62em}
+
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+@media (max-width:1080px){
+  .ov,.split,.it{grid-template-columns:minmax(0,1fr);gap:30px}
+  .asks{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ex{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:720px){
+  .sample{display:none}
+  .bar-in{gap:10px}
+  .brand span{display:none}
+  .tabs a{padding:0 10px;font-size:14px}
+  .tabs a .k{display:none}
+  .panel{padding-block:30px 56px}
+  .stage{height:470px;border-radius:14px}
+  .hud{max-width:calc(100% - 130px);font-size:10.5px}
+  .hud .hx{display:none}
+  .st-ctrl #st-reset{display:none}
+  .ncard{top:auto;bottom:108px}
+  .asks{grid-template-columns:minmax(0,1fr)}
+  .stats dt{font-size:21px}
+  .stack-box{height:360px}
+  .stack{transform:rotateX(58deg) rotateZ(-34deg) scale(.78)}
+  .ans{padding:20px 16px 16px}
+  .ops{grid-template-columns:minmax(0,1fr)}
+  .ops div:nth-child(even){padding-left:0;border-left:0}
+  .ops div:nth-child(odd){padding-right:0}
+  .cap .ms{margin-left:0}
+}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+}
+/* ===== brocade console components ===== */
+:root{--map:var(--b-o7);--rs:var(--b-o5);--go:var(--b-o6)}
+html{scroll-padding-top:84px}
+body{font-size:14px;line-height:1.7;background-color:var(--b-ground);
+  background-image:linear-gradient(color-mix(in srgb,var(--b-grid-line) 85%,transparent) 1px,transparent 1px),linear-gradient(90deg,color-mix(in srgb,var(--b-grid-line) 85%,transparent) 1px,transparent 1px);
+  background-size:32px 32px;background-position:center top;background-attachment:fixed}
+body::before{background:var(--b-ground)}
+a{color:var(--b-action)}
+:not(pre)>code{background:var(--b-sunk);border:1px solid var(--b-line);border-radius:4px;padding:0 .35em;font-size:.88em}
+h1,h2,h3{font-family:var(--sans);letter-spacing:0;font-weight:600}
+h1{font-size:clamp(26px,3vw,36px);line-height:1.22}
+h2{font-size:clamp(20px,2vw,24px);line-height:1.3}
+h3{font-size:14px}
+.eyebrow{font:600 12px/1.4 var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--b-hue-1)}
+.lead{font-size:14.5px;line-height:1.8;color:var(--b-ink-2)}
+.ph p{font-size:14px;color:var(--b-ink-2)}
+.muted,.small.muted{color:var(--b-ink-4)}
+
+/* floating glass top bar */
+.bar{background:none;border:0;-webkit-backdrop-filter:none;backdrop-filter:none;padding-top:10px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.bar .bar-in{max-width:1240px;margin:0 auto;height:auto;padding:6px 8px 6px 14px;gap:14px;border:1px solid var(--b-line);border-radius:11px;
+  background-color:var(--b-glass);
+  background-image:linear-gradient(90deg,color-mix(in srgb,var(--b-hue-1) 13%,transparent),color-mix(in srgb,var(--b-hue-4) 7%,transparent) 45%,transparent 80%);
+  -webkit-backdrop-filter:blur(16px) saturate(1.14);backdrop-filter:blur(16px) saturate(1.14);box-shadow:var(--b-shadow)}
+.brand{font:600 14px/1 var(--mono);gap:7px}
+.brand svg{width:20px;height:20px}
+.tabs{flex:0 1 auto;height:auto;align-items:center;gap:2px;padding:2px;background:var(--b-sunk);border:1px solid var(--b-line);border-radius:6px}
+.tabs a{padding:5px 11px;border-radius:5px;font-size:12.5px;line-height:1.4;color:var(--b-ink-3)}
+.tabs a:hover{background:color-mix(in srgb,var(--b-ink) 6%,transparent);color:var(--b-ink-2)}
+.tabs a[aria-selected="true"]{background:var(--b-card);color:var(--b-ink);font-weight:500;box-shadow:0 1px 2px rgba(0,0,0,.16)}
+.tabs a[aria-selected="true"]::after,.tabs a .k{display:none}
+.sample{margin-left:auto;font:10px/1.6 var(--mono);letter-spacing:.06em;padding:2px 7px;border-radius:5px;border:1px solid var(--b-line);background:none;color:var(--b-ink-3)}
+.sample b{color:var(--b-ink-2);font-weight:600}
+
+/* panels: hairline card + soft shadow; band headers */
+.card,.ans,.chat,.graph,.tools,.stack-box,.ask{background:var(--b-card);border:1px solid var(--b-line);border-radius:10px;box-shadow:var(--b-sheet-shadow)}
+.chat-h,.glegend,.stack-cap,.term-h{background:var(--b-band);border-color:var(--b-line-soft)}
+.chat-h{min-height:36px;padding:0 13px}
+.glegend{font-size:12px}
+.ask{padding:0;gap:0;overflow:hidden;transition:border-color .2s}
+.ask:hover{transform:none;border-color:color-mix(in srgb,var(--b-action) 45%,var(--b-line))}
+.ask .t{display:flex;align-items:center;min-height:34px;padding:0 13px;background:var(--b-band);border-bottom:1px solid var(--b-line-soft);font:600 11px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--b-ink-3)}
+.ask .qq{padding:12px 13px 0;font-size:14.5px}
+.ask .aa{padding:6px 13px 0;font-size:12.5px;color:var(--b-ink-3)}
+.ask .arr{padding:10px 13px 13px;font-size:12.5px;color:var(--b-action)}
+.stats{border-color:var(--b-line)}
+.stats div+div{border-color:var(--b-line)}
+.stats dt{font:500 24px/1.1 var(--mono)}
+.stats dt small{font:12px var(--sans);color:var(--b-ink-3)}
+.stats dd{color:var(--b-ink-4);font-size:12px}
+
+/* controls */
+.btn{min-height:30px;padding:0 12px;font:12.5px/1 var(--sans);border:1px solid var(--b-line);border-radius:6px;background:var(--b-btn);color:var(--b-ink)}
+.btn:hover{border-color:var(--b-line);background:var(--b-btn-h)}
+.btn.pri{background:var(--b-action);border-color:transparent;color:var(--b-action-on);font-weight:500}
+.btn.pri:hover{filter:none;background:var(--b-action-hover)}
+.btn.sm{min-height:26px;padding:0 10px;font-size:12px;border-radius:6px}
+.seg{background:var(--b-sunk);border:1px solid var(--b-line);border-radius:6px;padding:2px}
+.seg button{font-size:12.5px;padding:6px 11px;border-radius:5px;color:var(--b-ink-3)}
+.seg button[aria-pressed="true"]{background:var(--b-card);color:var(--b-ink);font-weight:500;box-shadow:0 1px 2px rgba(0,0,0,.16)}
+.qs3d button[aria-pressed="true"]{background:rgba(145,184,242,.18);border-color:rgba(145,184,242,.5)}
+.sw input:checked{background:var(--b-action)}
+.picks button{font-size:12px;border-radius:6px;border-style:solid;border-color:var(--b-line);background:var(--b-btn);color:var(--b-ink-2)}
+.picks button:hover,.picks button[aria-pressed="true"]{border-color:var(--b-action);color:var(--b-action);background:var(--b-action-wash)}
+.tools label.srch,.tools input[type=search],.ctl select{background:var(--b-sunk);border-color:var(--b-line);border-radius:6px}
+.qlist button{border-radius:10px;border-color:var(--b-line);background:var(--b-card)}
+.qlist button[aria-pressed="true"]{border-color:var(--b-action);box-shadow:var(--b-sheet-shadow)}
+.stages li.on,.stages li:hover{background:var(--b-card)}
+.stages li.on .no{border-color:var(--b-action);color:var(--b-action)}
+.layer.on{box-shadow:0 0 0 1px var(--b-action),0 24px 40px -20px rgba(37,99,185,.35)}
+
+/* terminals become brocade code blocks */
+.term,.cmdline{background:var(--b-sunk);color:var(--b-ink-2);border:1px solid var(--b-line);border-radius:10px}
+.term-h{color:var(--b-ink-4);min-height:32px}
+.term-h i{display:none}
+.term .b{color:var(--b-ink);font-weight:600}
+.copy{background:var(--b-btn);color:var(--b-ink-2);border:1px solid var(--b-line);border-radius:6px}
+.copy:hover{background:var(--b-btn-h)}
+.cmdline .p{color:var(--b-ink-4)}
+
+/* tables, folds, chips */
+th{background:var(--b-band);font:600 10.5px/1.4 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--b-ink-3)}
+td{border-color:var(--b-line)}
+.more,details.fold{border-color:var(--b-line)}
+details.fold>summary b{font-size:14px}
+details.fold>summary span{color:var(--b-ink-4)}
+.pill{font:10px/1.6 var(--mono);letter-spacing:.06em;padding:2px 7px;border-radius:5px;border-color:var(--b-line);color:var(--b-ink-3)}
+.claim pre,.card pre.sig,.docq{background:var(--b-sunk);border:1px solid var(--b-line)}
+.card .docq{background:var(--b-sunk)}
+.ans .sum{font-size:15.5px}
+.msg.user{background:var(--b-action);color:var(--b-action-on);border-radius:10px 10px 3px 10px}
+.msg.agent{background:var(--b-block);border-color:var(--b-line);border-radius:10px 10px 10px 3px}
+.msg.agent .au{background:var(--b-card)}
+.ops div{border-color:var(--b-line)}
+.ops code{border:0;background:none;padding:0}
+.foot{border-color:var(--b-line);color:var(--b-ink-4);font-size:12.5px}
+.panel:not([hidden]){animation-duration:.2s}
+
+/* 3D stage: brocade dark ground with its 32px grid */
+.stage{border:1px solid var(--b-line);border-radius:10px;box-shadow:var(--b-sheet-shadow);background:#0f1012}
+.stage::before{content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+  background-image:linear-gradient(rgba(44,46,49,.55) 1px,transparent 1px),linear-gradient(90deg,rgba(44,46,49,.55) 1px,transparent 1px);background-size:32px 32px}
+.stage::after{background:radial-gradient(120% 80% at 50% 38%,transparent 60%,rgba(15,16,18,.7) 100%)}
+.st-ctrl button{border-radius:6px;background:rgba(226,228,231,.06);border-color:rgba(226,228,231,.12)}
+.ncard{border-radius:10px;background:rgba(31,32,35,.92)}
+.hud,.cap,.st-key{font-family:var(--mono)}
+.cap .r{font-family:var(--sans)}
+.qs3d button{border-radius:6px}
+.lbl{background:rgba(15,16,18,.72);border-radius:4px}
+.lbl.hi{background:rgba(145,184,242,.22);color:#fff}
+.lbl.grp{font:600 10.5px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:#8d9196;background:none;padding:0;transform:none}
+.lbl.rust{color:#f3c4c2}.lbl.go{color:#c9e6eb}.lbl.map{color:#e3d4f4;box-shadow:inset 0 0 0 1px rgba(196,167,231,.45)}.lbl.c{color:#c8d7f2}
+.st-key{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;color:var(--stage-dim)}
+.st-key span{display:inline-flex;align-items:center;gap:6px}
+.st-key .d{width:9px;height:9px;border-radius:50%;display:inline-block}
+.st-key .d-rs{background:#ea9a97}.st-key .d-go{background:#9ccfd8}.st-key .d-map{background:#c4a7e7;border-radius:2px}.st-key .d-c{background:#7da1e3}
+.st-key .k-x{display:inline-block;width:18px;border-top:2px dashed #8bbe95}
+
+/* index stack + explorer */
+.ov-copy,.mcp-l,.idx-demo{grid-template-columns:minmax(0,1fr)}
+.ov h1 .nw{white-space:nowrap}
+.layer{background:var(--b-block);border-color:var(--b-grid-line)}
+.tiles{grid-template-columns:repeat(8,1fr)}
+.tiles i{background:var(--b-grid-line)}
+.tiles i.rs{background:var(--rs)}.tiles i.go{background:var(--go)}.tiles i.c{background:var(--map)}
+.dots b{background:var(--b-o1)}
+.net line{stroke:var(--b-ink-4)}
+.net line.tl{stroke:var(--a-rule);stroke-dasharray:3 3;stroke-opacity:.9}
+.net circle.rust{fill:var(--rs)}.net circle.go{fill:var(--go)}.net circle.map{fill:var(--map)}.net circle.c{fill:var(--b-o4)}
+.graph .colh{font:600 10.5px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;fill:var(--b-ink-4)}
+.gn rect{fill:var(--b-block);stroke:var(--b-grid-line)}
+.gn.l-rust rect{fill:color-mix(in srgb,var(--rs) 10%,var(--b-block))}
+.gn.l-go rect{fill:color-mix(in srgb,var(--go) 10%,var(--b-block))}
+.gn.l-map rect{fill:color-mix(in srgb,var(--map) 12%,var(--b-block));stroke:var(--map)}
+.gn.focus rect{fill:var(--b-action)!important;stroke:var(--b-action)!important}
+.gn.focus text{fill:var(--b-action-on)}
+.ge{stroke:var(--a-sem)}
+.ge.tail{stroke:var(--a-rule);stroke-dasharray:6 4;stroke-opacity:.95;stroke-width:1.8}
+.ge.ifc{stroke:var(--a-sem);stroke-dasharray:2 3;stroke-opacity:.85}
+.ge.map{stroke:var(--map);stroke-opacity:.9}
+.ge.map.rule{stroke-dasharray:6 4}
+.ge.cand{stroke:var(--b-ink-4);stroke-dasharray:3 3;stroke-opacity:.8}
+.ge.path{stroke-width:2.4;stroke-opacity:1}
+.gel rect{fill:var(--b-card);stroke:var(--b-line)}
+.gel text{font:500 10.5px/1 var(--sans);fill:var(--b-ink)}
+.gfold{cursor:pointer}.gfold rect{fill:var(--b-action-wash)}.gfold text{font:500 12px/1 var(--sans);fill:var(--b-action)}
+.gmore rect{stroke:var(--b-grid-line)}
+.kv{border-color:var(--b-line)}.kv div+div{border-color:var(--b-line)}
+.kv b{font:500 18px/1.1 var(--mono)}
+.fact2{font-size:13px;color:var(--b-ink-2);line-height:1.6}
+.en-doc{display:block;margin-top:6px;font:12px/1.65 var(--mono);white-space:pre-line;color:var(--b-ink-2);max-height:220px;overflow:auto}
+.claim pre[lang="en"]{font-size:12px}
+.perf .bar{fill:var(--b-o1)}
+.ptip{background:var(--b-ink);color:var(--b-ground);border-radius:6px}
+@media (max-width:720px){
+  .bar .bar-in{padding:5px 6px 5px 10px;gap:8px}
+  .tabs a{padding:5px 8px;font-size:12.5px}
+}
+.cmdline code,.term code{border:0;background:none;padding:0}
+
+/* ===== content sits on an opaque plain sheet; the grid only shows around it ===== */
+.panel{padding-block:16px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.panel>.wrap{max-width:1240px;margin:0 auto;padding:32px 34px 38px;border:1px solid var(--b-line);border-radius:14px;box-shadow:var(--b-sheet-shadow);
+  background:var(--b-sheet)}
+.foot .wrap{max-width:1240px}
+
+/* ===== 3D stage: light by default, dotted ground, brocade controls ===== */
+:root{--stage-bg:var(--b-block);--stage-dot:color-mix(in srgb,var(--b-ink) 14%,transparent);--stage-ink:var(--b-ink);--stage-dim:var(--b-ink-3);--stage-line:var(--b-line);
+  --stage-card:color-mix(in srgb,var(--b-card) 95%,transparent);--stage-hi:var(--b-action);--stage-lbl:rgba(255,255,255,.92)}
+:root[data-theme="dark"]{--stage-bg:#17181a;--stage-dot:rgba(226,228,231,.11);--stage-lbl:rgba(31,32,35,.9)}
+.stage{background-color:var(--stage-bg);background-image:radial-gradient(circle,var(--stage-dot) 1.1px,transparent 1.6px);background-size:16px 16px;color:var(--stage-ink);border:1px solid var(--b-line);box-shadow:none}
+.stage::before,.stage::after{display:none}
+.hud{color:var(--stage-dim)}.hud b{color:var(--stage-ink)}
+.st-ctrl button{color:var(--b-ink-2);background:var(--b-btn);border:1px solid var(--b-line)}
+.st-ctrl button:hover{background:var(--b-btn-h)}
+.st-foot{background:linear-gradient(color-mix(in srgb,var(--stage-bg) 0%,transparent),color-mix(in srgb,var(--stage-bg) 96%,transparent) 30%)}
+.cap{color:var(--stage-dim)}.cap .q{color:var(--b-action)}.cap .r{color:var(--stage-ink)}.cap .ms{color:var(--b-ink-4)}
+.qs3d button{color:var(--b-ink-3);background:var(--b-card);border:1px solid var(--b-line)}
+.qs3d button:hover{color:var(--b-ink)}
+.qs3d button[aria-pressed="true"]{background:var(--b-action-wash);border-color:color-mix(in srgb,var(--b-action) 50%,transparent);color:var(--b-action)}
+.qs3d button .pg{background:var(--b-action)}
+.ncard{background:var(--stage-card);border:1px solid var(--b-line);box-shadow:var(--b-shadow);color:var(--b-ink-2)}
+.ncard .nm{color:var(--b-ink)}.ncard .loc{color:var(--b-ink-3)}.ncard .sig{background:var(--b-sunk);color:var(--b-ink-2)}
+.ncard .nums{color:var(--b-ink-3)}.ncard .nums b{color:var(--b-ink)}
+.ncard .doc{color:var(--b-ink-2);border-left-color:var(--b-gold)}
+.ncard .x{color:var(--b-ink-3)}.ncard .x:hover{color:var(--b-ink);background:color-mix(in srgb,var(--b-ink) 6%,transparent)}
+.ncard .go{background:var(--b-action);color:var(--b-action-on)}
+.stip{background:var(--b-ink);color:var(--b-card)}
+.nogl{color:var(--b-ink-3)}
+.lbl{background:var(--stage-lbl);color:var(--b-ink-2);box-shadow:0 0 0 1px var(--b-line)}
+.lbl.hi{background:var(--b-card);color:var(--b-ink);box-shadow:0 0 0 1px color-mix(in srgb,var(--b-action) 45%,transparent),0 1px 2px rgba(0,0,0,.08)}
+.lbl.rust{color:color-mix(in srgb,var(--b-o5) 55%,var(--b-ink))}.lbl.go{color:color-mix(in srgb,var(--b-o6) 55%,var(--b-ink))}
+.lbl.map{color:color-mix(in srgb,var(--b-o7) 55%,var(--b-ink));box-shadow:0 0 0 1px color-mix(in srgb,var(--b-o7) 45%,transparent)}.lbl.c{color:color-mix(in srgb,var(--b-o4) 55%,var(--b-ink))}
+.lbl.grp{color:var(--b-ink-4);background:none;box-shadow:none}
+.st-key{color:var(--stage-dim)}
+.st-key .d-rs{background:var(--b-o5)}.st-key .d-go{background:var(--b-o6)}.st-key .d-map{background:var(--b-o7)}.st-key .d-c{background:var(--b-o4)}
+.st-key .k-x{border-top:2px solid var(--b-o3)}
+@media (max-width:720px){.panel>.wrap{padding:20px 14px 26px;border-radius:12px}}
+/* bigger 3D stage */
+.ov{grid-template-columns:minmax(0,3.9fr) minmax(0,8.1fr);gap:36px}
+.stage{height:720px}
+@media (max-width:1080px){.ov{grid-template-columns:minmax(0,1fr)}.stage{height:640px}}
+@media (max-width:720px){.stage{height:540px}}
+.ov h1{font-size:clamp(24px,2.3vw,32px)}
+</style>
+
+<header class="bar">
+  <div class="wrap bar-in">
+    <a class="brand" href="#overview" aria-label="CodeQuest 概览">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 21 8l-9 5-9-5z" fill="var(--accent)"/><path d="m3 12 9 5 9-5" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linejoin="round" opacity=".6"/><path d="m3 16 9 5 9-5" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linejoin="round" opacity=".3"/></svg>
+      <span>CodeQuest</span>
+    </a>
+    <nav class="tabs" role="tablist" aria-label="产品导览">
+      <a role="tab" id="t-overview" href="#overview" aria-controls="p-overview" aria-selected="true">概览 <span class="k">1</span></a>
+      <a role="tab" id="t-index" href="#index" aria-controls="p-index" aria-selected="false" tabindex="-1">索引 <span class="k">2</span></a>
+      <a role="tab" id="t-explore" href="#explore" aria-controls="p-explore" aria-selected="false" tabindex="-1">调用图 <span class="k">3</span></a>
+      <a role="tab" id="t-intent" href="#intent" aria-controls="p-intent" aria-selected="false" tabindex="-1">设计意图 <span class="k">4</span></a>
+      <a role="tab" id="t-mcp" href="#mcp" aria-controls="p-mcp" aria-selected="false" tabindex="-1">接入 MCP <span class="k">5</span></a>
+    </nav>
+    <span class="sample">示例 <b>Sandbox.create()</b> · 计数为示意</span>
+  </div>
+</header>
+
+<main>
+<!-- ================= OVERVIEW ================= -->
+<section class="panel" id="p-overview" role="tabpanel" aria-labelledby="t-overview">
+  <div class="wrap">
+    <div class="ov">
+      <div class="ov-copy">
+        <div>
+          <p class="eyebrow">产品演示 · 用 CodeQuest 读 brocade 的沙箱服务</p>
+          <h1>一次 <span class="nw">POST /sandboxes</span><br>追到内核里的 eBPF 表</h1>
+        </div>
+        <p class="lead">创建一个沙箱，请求要依次穿过 Rust 写的 CubeAPI、Go 写的 CubeMaster 和 Cubelet，最后由 CubeVS 写进 eBPF 表。中间隔着 HTTP、gRPC、配置文件和接口，IDE 的“跳到定义”在每一处都会断。CodeQuest 跟着各服务的真实构建，把这些断点接起来，每条连线都标明依据。</p>
+        <dl class="stats">
+          <div><dt>22<small>跳</small></dt><dd>从 HTTP 路由到 eBPF 表</dd></div>
+          <div><dt>4<small>个服务</small></dt><dd>Rust、Go 和 eBPF C</dd></div>
+          <div><dt>5<small>类断点</small></dt><dd>HTTP、gRPC、配置、接口、表名</dd></div>
+        </dl>
+        <div class="row">
+          <a class="btn pri" href="#explore" data-focus="create_sandbox@api" data-mode="path" data-target="deny_out">看完整路径 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+          <a class="btn" href="#index">看它怎么索引</a>
+        </div>
+      </div>
+
+      <div class="stage" id="stage">
+        <canvas id="gl" tabindex="0" aria-label="创建沙箱涉及的函数，按服务分层：从上到下依次是 CubeAPI、CubeMaster、Cubelet、CubeVS、BPF 表和 eBPF。拖动旋转，点击节点查看详情。"></canvas>
+        <div class="lbls" id="lbls" aria-hidden="true"></div>
+        <div class="hud" aria-hidden="true"><span>brocade / cube</span><span><b id="hud-n">0</b> 个函数和表</span></div>
+        <div class="st-ctrl">
+          <button type="button" id="st-play" aria-pressed="true">暂停导览</button>
+          <button type="button" id="st-reset">重置视角</button>
+        </div>
+        <div class="stip" id="stip" hidden></div>
+        <aside class="ncard" id="ncard" hidden aria-live="polite"></aside>
+        <div class="st-foot">
+          <div class="st-key" aria-hidden="true"><span><i class="d d-rs"></i>Rust</span><span><i class="d d-go"></i>Go</span><span><i class="d d-map"></i>BPF 表</span><span><i class="d d-c"></i>eBPF</span><span><i class="k-x"></i>跨边界连接（绿色）</span></div>
+          <div class="cap" id="cap" aria-live="polite"></div>
+          <div class="qs3d" id="qs3d" role="group" aria-label="示例问题"></div>
+        </div>
+        <p class="nogl" id="nogl" hidden>这个浏览器没有可用的 WebGL，3D 图无法显示。其余几个页签不受影响。</p>
+      </div>
+    </div>
+
+    <div class="asks">
+      <a class="ask" href="#explore" data-focus="create_sandbox@api" data-mode="path" data-target="deny_out">
+        <span class="t">调用图</span>
+        <span class="qq">POST /sandboxes 最后改了哪张 eBPF 表？</span>
+        <span class="aa">22 跳到 <code>deny_out</code>，中间跨过 HTTP、gRPC 和配置派发，每一跳都有源码行号。</span>
+        <span class="arr">看这条路径 →</span>
+      </a>
+      <a class="ask" href="#explore" data-focus="Engine.parallelRunSteps" data-mode="out" data-cand="1">
+        <span class="t">调用图</span>
+        <span class="qq">Cubelet 创建沙箱时跑了哪些插件？</span>
+        <span class="aa">接口 <code>Flow.Create</code> 有 12 个实现，<code>config.toml</code> 第 196 行选中其中 10 个，分 4 组执行。</span>
+        <span class="arr">看派发 →</span>
+      </a>
+      <a class="ask" href="#intent" data-q="1">
+        <span class="t">设计意图</span>
+        <span class="qq">网络建到一半，进程崩了怎么办？</span>
+        <span class="aa">先把“正在创建”落盘再动内核状态，作者在注释里写清了每个不可回退的点。</span>
+        <span class="arr">看依据 →</span>
+      </a>
+      <a class="ask" href="#intent" data-q="2">
+        <span class="t">设计意图</span>
+        <span class="qq">allow_internet_access=false 在哪一层生效？</span>
+        <span class="aa">一个参数穿过 4 个服务：Rust 校验，Go 合并模板、补默认值，最后变成 eBPF 表里的一条 0.0.0.0/0。</span>
+        <span class="arr">看依据 →</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ================= INDEX ================= -->
+<section class="panel" id="p-index" role="tabpanel" aria-labelledby="t-index" hidden>
+  <div class="wrap">
+    <div class="split">
+      <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:22px;min-width:0">
+        <div class="ph" style="margin:0">
+          <p class="eyebrow" style="margin:0">索引</p>
+          <h2>一条命令，挂在真实构建上</h2>
+          <p>brocade 的沙箱服务由 Rust、Go 和 eBPF C 组成。CodeQuest 把记录器挂进平时的构建命令，三种语言各用自己的编译器取语义，再把服务之间的连接对齐。</p>
+        </div>
+        <div class="cmdline"><span class="p">$</span><code id="idx-cmd">cq index --name cube -- make -C components/cube all</code><button class="copy" type="button" data-copy="idx-cmd">复制</button></div>
+        <ol class="stages" id="stages">
+          <li data-i="0"><span class="no">1</span><div class="hd"><b>真实构建</b><span>cargo · go build · clang -target bpf</span></div><p>记录 CubeAPI 的每次 rustc 调用、各个 Go 服务的包图，以及 bpf2go 发起的 clang 调用。</p></li>
+          <li data-i="1"><span class="no">2</span><div class="hd"><b>原生语义</b><span>rust-analyzer · go/types · clang</span></div><p>按编译时的参数，分别取 Rust HIR、Go 类型检查结果和 C 的 AST。</p></li>
+          <li data-i="2"><span class="no">3</span><div class="hd"><b>关系图</b><span>含 5 类跨边界连接</span></div><p>服务内部的调用来自编译器；HTTP 路由、gRPC 方法、配置里的插件 ID、接口实现和 BPF 表名，按规则对齐后连上，并单独标注。</p></li>
+        </ol>
+        <div class="row"><button class="btn" type="button" id="replay"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9l7-4.5z" fill="currentColor"/></svg>回放索引过程</button><span class="small muted">耗时为示意，回放压缩到 6 秒</span></div>
+      </div>
+      <div class="idx-demo">
+        <div class="stack-box spread" id="stack-box" aria-label="三层索引结构示意">
+          <div class="stack" id="stack">
+            <div class="layer on" data-i="0"><span class="tag">真实构建 · 编译单元</span><div class="tiles" id="tiles"></div></div>
+            <div class="layer on" data-i="1"><span class="tag">原生语义 · 符号与类型</span><div class="dots" id="dots"></div></div>
+            <div class="layer on" data-i="2"><span class="tag">关系图 · 调用 / 跨边界 / 读写表</span><svg class="net" id="net" viewBox="0 0 310 162" preserveAspectRatio="none" aria-hidden="true"></svg></div>
+          </div>
+          <div class="stack-cap"><span>橙色 Rust · 青色 Go · 紫色 eBPF</span><span>悬停左侧阶段可高亮对应层</span></div>
+        </div>
+        <div class="term" role="figure" aria-label="索引命令的输出">
+          <div class="term-h"><i></i><i></i><i></i><span class="sp">brocade/components/cube</span><span id="idx-time">2:41</span></div>
+          <pre id="idx-log"></pre>
+        </div>
+      </div>
+    </div>
+    <div class="more">
+      <details class="fold">
+        <summary><b>5 类跨边界连接怎么得出</b><span>编译器单独看不到，按规则对齐两边的定义</span></summary>
+        <div class="fold-body tbl-wrap">
+          <table>
+            <thead><tr><th>断点</th><th>一边</th><th>另一边</th><th>依据</th></tr></thead>
+            <tbody>
+              <tr><td>HTTP</td><td>Rust <code>format!("{}/cube/sandbox")</code><br><span class="muted">CubeAPI/src/cubemaster/mod.rs:64</span></td><td>Go <code>g.POST(SandboxAction, …)</code>，路由组 <code>/cube</code><br><span class="muted">CubeMaster/…/cube/routes.go:22、cube.go:16–17</span></td><td>规则推导：方法和路径相同</td></tr>
+              <tr><td>gRPC</td><td>生成的 <code>CubeboxMgrClient.Create</code><br><span class="muted">CubeMaster/pkg/cubelet/actions.go:56</span></td><td><code>(*service).Create</code><br><span class="muted">Cubelet/services/cubebox/service.go:329</span></td><td>规则推导：<code>service CubeboxMgr { rpc Create }</code>（cubebox.proto:17）</td></tr>
+              <tr><td>配置派发</td><td>接口调用 <code>flow.Create</code><br><span class="muted">Cubelet/plugins/workflow/engine.go:507</span></td><td>12 个 <code>Flow</code> 实现，按 <code>ID()</code> 注册</td><td>规则推导：<code>config.toml:196</code> 列出的 10 个 ID 与 <code>const.go</code> 里的常量相同</td></tr>
+              <tr><td>接口</td><td><code>NetworkRuntime</code>、<code>cubevsAdapter</code></td><td><code>NetworkController</code>、<code>realCubeVSAdapter</code></td><td>语义解析：接口只有一个生产实现</td></tr>
+              <tr><td>BPF 表</td><td>Go <code>loadPinnedMap(MapNameDenyOut)</code></td><td>C <code>} deny_out SEC(".maps")</code><br><span class="muted">CubeNet/src/map.h:171</span></td><td>规则推导：常量值与表名相同</td></tr>
+            </tbody>
+          </table>
+          <p class="small muted" style="margin-top:10px">按规则跨边界连线是 CodeQuest 规划中的能力，当前版本还不会生成。</p>
+        </div>
+      </details>
+      <details class="fold">
+        <summary><b>支持的语言</b><span>Rust、Go、C/C++ 各自怎么接入构建</span></summary>
+        <div class="fold-body tbl-wrap">
+          <table class="langs">
+            <thead><tr><th>语言</th><th>接入构建的方式</th><th>语义来源</th></tr></thead>
+            <tbody>
+              <tr><td>Rust</td><td><code>RUSTC_WRAPPER</code> 记录 cargo 发起的每次 rustc 调用</td><td>rust-analyzer HIR，按编译单元配置导出</td></tr>
+              <tr><td>Go</td><td><code>go list -json</code> 取包图与构建标签</td><td><code>go/types</code> 类型检查结果</td></tr>
+              <tr><td>C/C++</td><td><code>compile_commands.json</code> 或包装编译器调用（含 <code>clang -target bpf</code>）</td><td>clang 前端的 AST 与引用解析</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ================= EXPLORE ================= -->
+<section class="panel" id="p-explore" role="tabpanel" aria-labelledby="t-explore" hidden>
+  <div class="wrap">
+    <div class="ph">
+      <p class="eyebrow" style="margin:0">调用图</p>
+      <h2>跨服务、跨语言的“跳到定义”</h2>
+      <p>选一个函数，看谁调用它、它调用谁，或者查两个函数之间的路径。虚线是跨边界的连接：HTTP、gRPC、配置派发和按表名对应，都标出了依据。不在配置里的派发候选默认折叠。</p>
+    </div>
+    <div class="tools">
+      <label class="srch" for="ex-q"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><input id="ex-q" type="search" list="ex-list" placeholder="按名字找函数或表，如 createState" autocomplete="off"><datalist id="ex-list"></datalist></label>
+      <div class="seg" id="ex-mode" role="group" aria-label="方向">
+        <button type="button" data-m="both" aria-pressed="true">双向</button>
+        <button type="button" data-m="in" aria-pressed="false">调用方</button>
+        <button type="button" data-m="out" aria-pressed="false">被调用</button>
+        <button type="button" data-m="path" aria-pressed="false">路径</button>
+      </div>
+      <div class="ctl" id="ex-depth-w"><span>深度</span><div class="seg" id="ex-depth" role="group" aria-label="深度"><button type="button" data-d="1" aria-pressed="true">1</button><button type="button" data-d="2" aria-pressed="false">2</button><button type="button" data-d="3" aria-pressed="false">3</button></div></div>
+      <label class="ctl" id="ex-target-w" for="ex-target" hidden><span>到</span><select id="ex-target"></select></label>
+      <label class="sw" for="ex-cand"><input type="checkbox" id="ex-cand">显示未配置的派发候选</label>
+    </div>
+    <div class="picks" id="ex-picks" role="group" aria-label="常看的函数"></div>
+    <div class="ex">
+      <div class="graph" id="ex-graph">
+        <div id="ex-svg"></div>
+        <div class="glegend">
+          <span><svg viewBox="0 0 26 8"><line x1="1" y1="4" x2="25" y2="4" stroke="var(--a-sem)" stroke-width="2"/></svg>调用（编译器解析）</span>
+          <span><svg viewBox="0 0 26 8"><line x1="1" y1="4" x2="25" y2="4" stroke="var(--a-rule)" stroke-width="2" stroke-dasharray="6 4"/></svg>跨边界（规则推导）</span>
+          <span><svg viewBox="0 0 26 8"><line x1="1" y1="4" x2="25" y2="4" stroke="var(--map)" stroke-width="2"/></svg>读写 BPF 表</span>
+          <span><svg viewBox="0 0 26 8"><line x1="1" y1="4" x2="25" y2="4" stroke="var(--ink-3)" stroke-width="2" stroke-dasharray="3 3"/></svg>未配置的派发候选</span>
+        </div>
+      </div>
+      <aside class="card" id="ex-card" aria-live="polite"></aside>
+    </div>
+    <div class="term ex-term" role="figure" aria-label="对应的 MCP 查询与结果">
+      <div class="term-h"><i></i><i></i><i></i><span class="sp">cq mcp · query_codequest</span><span id="ex-ms"></span></div>
+      <pre id="ex-term"></pre>
+    </div>
+    <div class="more" style="margin-top:20px">
+      <details class="fold">
+        <summary><b>原始返回</b><span>当前查询的 JSON，含依据强度和跨边界证据</span></summary>
+        <div class="fold-body"><div class="term"><pre id="ex-json"></pre></div></div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ================= INTENT ================= -->
+<section class="panel" id="p-intent" role="tabpanel" aria-labelledby="t-intent" hidden>
+  <div class="wrap">
+    <div class="it">
+      <div>
+        <div class="ph" style="margin-bottom:16px">
+          <p class="eyebrow" style="margin:0">设计意图</p>
+          <h2>代码为什么这样写</h2>
+          <p>选一个问题。答案由几条依据拼成，每条都写明来源和强度；作者原话保留英文原文。</p>
+        </div>
+        <div class="qlist" id="it-qs" role="group" aria-label="设计问题"></div>
+        <div class="legend">
+          <h3>五类依据</h3>
+          <ul class="leg" id="it-leg"></ul>
+        </div>
+      </div>
+      <article class="ans" id="it-ans" aria-live="polite"></article>
+    </div>
+  </div>
+</section>
+
+<!-- ================= MCP ================= -->
+<section class="panel" id="p-mcp" role="tabpanel" aria-labelledby="t-mcp" hidden>
+  <div class="wrap">
+    <div class="split">
+      <div class="mcp-l">
+        <div class="ph" style="margin:0">
+          <p class="eyebrow" style="margin:0">接入 MCP</p>
+          <h2>给 Agent 一个能查证的代码库</h2>
+          <p>CodeQuest 以 MCP 服务运行。Agent 用 <code>query_codequest</code> 查调用、路径和作者注释，每条结果都带源码位置和依据强度，回答时可以直接引用。</p>
+        </div>
+        <div class="term cfg"><div class="term-h"><span class="sp">mcp.json</span></div><button class="copy" type="button" data-copy="mcp-cfg">复制</button><pre id="mcp-cfg">{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"codequest"</span>: {
+      <span class="k">"command"</span>: <span class="s">"cq"</span>,
+      <span class="k">"args"</span>: [<span class="s">"mcp"</span>]
+    }
+  }
+}</pre></div>
+        <div>
+          <h3 style="margin-bottom:10px">最常用的 8 个操作</h3>
+          <div class="ops">
+            <div><code>callers</code><span>谁调用它，带调用所在行</span></div>
+            <div><code>callees</code><span>它调用谁，可含派发候选</span></div>
+            <div><code>trace</code><span>沿调用链展开多层</span></div>
+            <div><code>path</code><span>两个函数之间的调用路径，可跨服务</span></div>
+            <div><code>docs</code><span>挂在符号上的作者陈述</span></div>
+            <div><code>source</code><span>按版本取冻结的源码片段</span></div>
+            <div><code>details</code><span>定义、签名、位置与归属</span></div>
+            <div><code>search</code><span>按名字、文件、种类找符号</span></div>
+          </div>
+        </div>
+        <div class="more" style="margin-top:0">
+          <details class="fold">
+            <summary><b>其余操作</b><span>大纲、引用、覆盖、版本对比等 11 个</span></summary>
+            <div class="fold-body">
+              <div class="ops">
+                <div><code>outline</code><span>文件里的符号大纲</span></div>
+                <div><code>references</code><span>全部引用点</span></div>
+                <div><code>overview</code><span>项目结构概览</span></div>
+                <div><code>coverage</code><span>索引覆盖范围与已知缺口</span></div>
+                <div><code>doc_search</code><span>在作者文档里全文检索</span></div>
+                <div><code>semantic</code><span>按描述找相近的符号</span></div>
+                <div><code>cypher</code><span>直接查询图数据库</span></div>
+                <div><code>compare</code><span>对比两个版本的关系差异</span></div>
+                <div><code>changes</code><span>改动影响了哪些调用方</span></div>
+                <div><code>traces</code><span>导入测试或压测的运行观测</span></div>
+                <div><code>status</code><span>版本与计数</span></div>
+              </div>
+            </div>
+          </details>
+          <details class="fold">
+            <summary><b>查询延迟</b><span>示意数据，常用查询 p50 都在 65 ms 以内</span></summary>
+            <div class="fold-body perf" id="perf"></div>
+          </details>
+        </div>
+      </div>
+      <div class="chat">
+        <div class="chat-h"><b>Agent 会话</b><span class="sp">接入 CodeQuest 后的一次问答</span><button class="btn sm" type="button" id="chat-replay"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9l7-4.5z" fill="currentColor"/></svg>回放</button></div>
+        <div class="msgs" id="msgs"></div>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>函数名、行号、调用关系、配置和注释原文都取自 brocade 仓库 <code>components/cube</code>（CubeAPI、CubeMaster、Cubelet、CubeNet）。计数和耗时是示意值。跨边界连接（HTTP、gRPC、配置派发、表名对应）是 CodeQuest 规划中的能力；标为“推测”的几条是读代码得出的判断，没有运行验证。</p>
+    <span>CodeQuest · 2026-11</span>
+  </div>
+</footer>
+<div class="ptip" id="ptip" hidden></div>
+
+<script type="application/json" id="cq-data">{"n":[["build_router","rust","api","CubeAPI/src/routes.rs",38,"pub fn build_router(state: AppState) -> Router","",""],["create_sandbox","rust","api","CubeAPI/src/handlers/sandboxes.rs",180,"pub async fn create_sandbox( State(state): State<AppState>, Json(body): Json<NewSandbox>, ) -> AppResult<impl IntoResponse>","",""],["SandboxService::create_sandbox","rust","api","CubeAPI/src/services/sandboxes.rs",155,"pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox>","",""],["build_cube_network_config","rust","api","CubeAPI/src/services/sandboxes.rs",1188,"pub(crate) fn build_cube_network_config( allow_internet_access: Option<bool>, network: Option<&SandboxNetworkConfig>, ) -> AppResult<Option<CubeNetworkConfig>>","",""],["CubeMasterClient::create_sandbox","rust","api","CubeAPI/src/cubemaster/mod.rs",60,"// ── Sandbox: existing APIs ───────────────────────────────────────────── /// POST /cube/sandbox — create a new sandbox. pub async fn create_sandbox( &self, req: &CreateSandboxRequest, ) -> Result<Cr","POST /cube/sandbox — create a new sandbox.",""],["createSandboxGinHandler","go","master","CubeMaster/pkg/service/httpservice/cube/sandboxutil.go",13,"func createSandboxGinHandler(c)","",""],["createSandbox","go","master","CubeMaster/pkg/service/httpservice/cube/sandbox_create.go",32,"func createSandbox(r, rt)","",""],["constructCreateReq","go","master","CubeMaster/pkg/service/httpservice/cube/sandbox_create.go",133,"func constructCreateReq(r)","",""],["mergeCubeNetworkConfigs","go","master","CubeMaster/pkg/service/httpservice/cube/cubeboxutil.go",275,"func mergeCubeNetworkConfigs(templateCfg, requestCfg)","",""],["CreateSandbox","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",105,"func CreateSandbox(ctx, req)","",""],["createSandboxContext.Handle","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",184,"func (createSandboxContext) Handle()","",""],["createSandboxContext.handleCubelet","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",202,"func (createSandboxContext) handleCubelet()","",""],["createSandboxContext.schedule","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",468,"func (createSandboxContext) schedule()","",""],["createSandboxContext.refreshAndAdmitHost","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",251,"func (createSandboxContext) refreshAndAdmitHost()","",""],["createSandboxContext.callCubelet","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",278,"func (createSandboxContext) callCubelet()","",""],["createSandboxContext.dealSuccResult","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",300,"func (createSandboxContext) dealSuccResult()","",""],["createSandboxContext.failover","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",378,"func (createSandboxContext) failover()","",""],["Create","go","master","CubeMaster/pkg/cubelet/actions.go",47,"func Create(ctx, calleeEp, req)","",""],["service.Create","go","cubelet","Cubelet/services/cubebox/service.go",329,"func (service) Create(ctx, req)","",""],["Engine.Create","go","cubelet","Cubelet/plugins/workflow/engine.go",608,"func (Engine) Create(ctx, opts)","",""],["Engine.run","go","cubelet","Cubelet/plugins/workflow/engine.go",398,"func (Engine) run(do, ctx, opts)","",""],["Engine.parallelRunSteps","go","cubelet","Cubelet/plugins/workflow/engine.go",476,"func (Engine) parallelRunSteps(do, ctx, opts, step)","",""],["Engine.failover","go","cubelet","Cubelet/plugins/workflow/engine.go",539,"func (Engine) failover(ctx, opts)","",""],["delegateNetworkManager.Create","go","cubelet","Cubelet/network/plugin.go",139,"func (delegateNetworkManager) Create(ctx, opts)","",""],["local.Create","go","cubelet","Cubelet/network/plugin_tap.go",170,"func (local) Create(ctx, opts)","Create translates Cubelet workflow intent into a runtime EnsureNetwork call,\nthen converts the runtime response back into the legacy ShimNetReq expected by\nthe sandbox shim. This keeps the external workflow contract stable while moving\nhost-side network ownership into networkRuntime.",""],["buildNetworkRuntimeCubeNetworkConfig","go","cubelet","Cubelet/network/plugin_policy.go",20,"func buildNetworkRuntimeCubeNetworkConfig(request)","",""],["NetworkController.EnsureNetwork","go","cubelet","Cubelet/network/runtime/controller.go",452,"func (NetworkController) EnsureNetwork(ctx, req)","EnsureNetwork is the idempotent public create entry point. It serializes only\nrequests for the same sandbox, then lets different sandboxes perform heavy TAP\ncreation and datapath programming concurrently.",""],["NetworkController.createState","go","cubelet","Cubelet/network/runtime/controller.go",599,"func (NetworkController) createState(ctx, req)","createState builds the network for a sandbox. It does NOT hold s.mu across\nthe heavy work: the global mutex is only taken briefly inside acquireTap /\nreleaseAcquiredTap / cleanupConflictingTap to mutate the in-memory pools and\ncollections. The expensive tap creation, eBPF/cubevs map updates and state\npersistence all run lock-free and operate on resources unique to this tap\n(distinct ifindex/IP/host-port/state file), so concurrent createState calls\nfor different sandboxes proceed in parallel.\n\nctx is currently only used for logging: the underlying netlink/eBPF calls do\nnot accept a context. The per-sandbox lock held by EnsureNetwork serializes\nthis entire operation with ReleaseNetwork for the same sandbox.",""],["NetworkController.acquireTap","go","cubelet","Cubelet/network/runtime/controller.go",813,"func (NetworkController) acquireTap(owner)","acquireTap obtains a Ready tap for a new sandbox through TapPool. The entry\nremains Ready but owner-reserved until success is committed; Active is only\npublished after creating -> success.",""],["NetworkController.applyPortMappings","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",232,"func (NetworkController) applyPortMappings(owner, tap)","applyPortMappings programs CubeVS port maps. If one map fails, previously\ninstalled maps are removed immediately and the error tells the caller whether\ncleanup itself also failed.",""],["NetworkController.registerCubeVSTap","go","cubelet","Cubelet/network/runtime/cubevs_adapter.go",98,"func (NetworkController) registerCubeVSTap(ifindex, ip, sandboxID, cfg)","registerCubeVSTap writes the complete TAP metadata and policy options into\nCubeVS for a newly-created sandbox.",""],["NetworkController.pushEgressForState","go","cubelet","Cubelet/network/runtime/cubeegress_adapter.go",119,"func (NetworkController) pushEgressForState(ctx, state)","pushEgressForState is the EnsureNetwork side dispatcher. When there are L7\nrules, transient push failures are retried synchronously before creation is\naborted; permanent 4xx errors are returned immediately.",""],["cubeVSTapRegistration","go","cubelet","Cubelet/network/runtime/policy_builder.go",169,"func cubeVSTapRegistration(cfg)","",""],["NetworkController.cleanupCreateFailure","go","cubelet","Cubelet/network/runtime/controller.go",777,"func (NetworkController) cleanupCreateFailure(ctx, state, cause)","cleanupCreateFailure moves a partially-created TAP into Cleaning and performs\none bounded cleanup attempt. The durable creating state remains when cleanup\nfails, and maintenance retries it on its next periodic pass. This helper is\nintentionally pre-success only: committed success is never rolled back here.",""],["AddTAPDevice","go","cubevs","CubeNet/cubevs/tap.go",62,"func AddTAPDevice(ifindex, ip, id, version, opts)","AddTAPDevice adds a new device to CubeVS.",""],["UpsertTAPDeviceMetadata","go","cubevs","CubeNet/cubevs/tap.go",76,"func UpsertTAPDeviceMetadata(ifindex, ip, id, version)","UpsertTAPDeviceMetadata registers or refreshes TAP metadata without touching\nper-sandbox policy maps. Recovery paths use this to repair metadata while\npreserving allow_out_v3, deny_out and dns_allow_v2 contents.",""],["applyNetPolicy","go","cubevs","CubeNet/cubevs/netpolicy.go",1398,"func applyNetPolicy(ifindex, opts)","applyNetPolicy configures egress network policy for the given ifindex\nbased on MVMOptions.\n\nRules:\n  - AllowOut IP/CIDR targets are inserted into allow_out_v3 inner map.\n  - L7AllowOut IP/CIDR targets are inserted into allow_out_v3 with the L7 flag.\n  - AllowOut domain targets are inserted into dns_allow_v2 inner map.\n  - L7AllowOut domain targets are inserted into dns_allow_v2 with the L7 flag.\n  - Default private/link-local DenyOut ranges are preloaded when a TAP enters\n    the free pool. Replace paths replay them after flushing policy maps.\n  - AllowInternetAccess=false: DenyOut is set to \"0.0.0.0/0\" (deny all).",""],["applyNetPolicyWithMode","go","cubevs","CubeNet/cubevs/netpolicy.go",1409,"func applyNetPolicyWithMode(ifindex, opts, replace)","",""],["buildNetPolicyPlan","go","cubevs","CubeNet/cubevs/netpolicy.go",658,"func buildNetPolicyPlan(opts)","",""],["syncDenyOutInner","go","cubevs","CubeNet/cubevs/netpolicy.go",1303,"func syncDenyOutInner(ifindex, entries)","syncDenyOutInner converges deny_out for one TAP. Every row is managed, so the\ncaller must pass the effective set including the always-denied private and\nlink-local ranges — otherwise an update would drop the invariant deny rules.",""],["syncAllowOutInner","go","cubevs","CubeNet/cubevs/netpolicy.go",1269,"func syncAllowOutInner(ifindex, entries)","syncAllowOutInner converges allow_out_v3 for one TAP on the desired entries.\n\nOnly static rows are managed. DNS-learned rows (non-zero expiry) are left\nexactly as they are: their lifetime belongs to the TTL and the reaper, and a\nrevoked domain rule stops producing new ones as soon as dns_allow_v2 is\nsynced. Removing a domain therefore takes effect for already-resolved IPs\nonly once they age out.",""],["AddPortMapping","go","cubevs","CubeNet/cubevs/port.go",17,"func AddPortMapping(ifindex, listenPort, hostPort)","AddPortMapping adds port mapping for host port and guest port.",""],["EnsureQuotaEndpoint","go","cubevs","CubeNet/cubevs/quota.go",301,"func EnsureQuotaEndpoint(instance, iface, index)","Called before newly owned TAPs are exposed to a Guest, not on a later poll.",""],["apply_http_layers","rust","api","CubeAPI/src/routes.rs",236,"fn apply_http_layers(router: Router<AppState>, timeout: Duration) -> Router<AppState>","",""],["build_e2b_router","rust","api","CubeAPI/src/routes.rs",70,"fn build_e2b_router(state: &AppState, auth_configured: bool) -> Router<AppState>","",""],["build_e2b_pause_resume_router","rust","api","CubeAPI/src/routes.rs",120,"/// Pause / Resume / Connect use the 120s lifecycle budget; keep them off the /// default 30s TimeoutLayer. fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Router<AppState","Pause / Resume / Connect use the 120s lifecycle budget; keep them off the\ndefault 30s TimeoutLayer.",""],["build_e2b_snapshot_long_router","rust","api","CubeAPI/src/routes.rs",80,"/// Routes that need the longer 240 s timeout when surfaced under the e2b /// (root) prefix. Currently snapshot create + template/snapshot delete. fn build_e2b_snapshot_long_router(state: &AppState, a","Routes that need the longer 240 s timeout when surfaced under the e2b\n(root) prefix.  Currently snapshot create + template/snapshot delete.",""],["validate_env_vars","rust","api","CubeAPI/src/services/sandboxes.rs",711,"/// Validate environment variable names against the POSIX name convention /// and a deny-list of runtime-loader / path-override names that could /// compromise sandbox isolation. fn validate_env_vars(","Validate environment variable names against the POSIX name convention\nand a deny-list of runtime-loader / path-override names that could\ncompromise sandbox isolation.",""],["validate_unique_volume_mount_names","rust","api","CubeAPI/src/services/sandboxes.rs",759,"/// Each volume (`volumeMounts[].name`) may be mounted at most once per sandbox. fn validate_unique_volume_mount_names(mounts: &[SandboxVolumeMount]) -> AppResult<()>","Each volume (`volumeMounts[].name`) may be mounted at most once per sandbox.",""],["resolve_lifecycle_flags","rust","api","CubeAPI/src/services/sandboxes.rs",1170,"/// Derive CubeMaster's `(auto_pause, auto_resume)` bools from whichever /// lifecycle representation the caller sent. /// /// Two shapes reach this endpoint. `lifecycle` is CubeSandbox's native neste","Derive CubeMaster's `(auto_pause, auto_resume)` bools from whichever\nlifecycle representation the caller sent.\n\nTwo shapes reach this endpoint. `lifecycle` is CubeSandbox's native nested\nobject. The e2b SDK never sends it — `Sandbox.create(lifecycle=...)` is\nflattened client-side into top-level `autoPause` / `autoResume` before the\nrequest goes out. Both are accepted; the nested object wins when present,\nsince an explicit `lifecycle` can only come from a direct API caller who\nmeant it. Neither present keeps today's behaviour: idle sandboxes are\nkilled.",""],["new_request_id","rust","api","CubeAPI/src/services/sandboxes.rs",1101,"fn new_request_id() -> String","",""],["map_create_cubemaster_err","rust","api","CubeAPI/src/services/sandboxes.rs",805,"// parse_response raises CubeMasterError::Api before the create envelope is // visible, so business codes must be classified here rather than by the typed // ret.into_result() check further down (whic","",""],["validate_allow_out_domains_require_deny_all","rust","api","CubeAPI/src/services/mod.rs",20,"pub(crate) fn validate_allow_out_domains_require_deny_all( allow_out: &[String], deny_out: &[String], default_deny_all: bool, ) -> AppResult<()>","",""],["validate_egress_rule_match","rust","api","CubeAPI/src/services/sandboxes.rs",1262,"/// Validate the port/scheme pair on one egress rule match, mirroring the /// SDK client-side contract and the CubeEgress Lua validation: a set port /// must be in [1, 65535] and must be paired with a","Validate the port/scheme pair on one egress rule match, mirroring the\nSDK client-side contract and the CubeEgress Lua validation: a set port\nmust be in [1, 65535] and must be paired with a scheme, and a set scheme\nmust be http or https (case-insensitive — downstream normalizes).",""],["validate_egress_rule_injects","rust","api","CubeAPI/src/services/sandboxes.rs",1244,"fn validate_egress_rule_injects(rule: &EgressRule, index: usize) -> AppResult<()>","",""],["validate_mask_request_host","rust","api","CubeAPI/src/services/sandboxes.rs",1105,"fn validate_mask_request_host(value: &str) -> AppResult<()>","",""],["withTemplateResolveResult","go","master","CubeMaster/pkg/service/httpservice/cube/template_resolve_context.go",33,"func withTemplateResolveResult(ctx, r)","",""],["runInsReq2Affinity","go","master","CubeMaster/pkg/service/httpservice/cube/affinityutil.go",22,"func runInsReq2Affinity(ctx, req)","",""],["registerCreatedSandboxRuntimeRef","go","master","CubeMaster/pkg/service/httpservice/cube/sandbox_create.go",97,"func registerCreatedSandboxRuntimeRef(ctx, req, ret)","",""],["getCaller","go","master","CubeMaster/pkg/service/httpservice/cube/cube.go",56,"func getCaller(r)","",""],["cloneCubeNetworkConfig","go","master","CubeMaster/pkg/service/httpservice/cube/cubeboxutil.go",315,"func cloneCubeNetworkConfig(in)","",""],["appendUniqueCIDRs","go","master","CubeMaster/pkg/service/httpservice/cube/cubeboxutil.go",357,"func appendUniqueCIDRs(base, extra)","",""],["mergeEgressRules","go","master","CubeMaster/pkg/service/httpservice/cube/cubeboxutil.go",321,"func mergeEgressRules(base, extra)","mergeEgressRules combines template + request rules. Because egress rules are\nfirst-match-wins, per-sandbox/request rules must come before template rules.",""],["withCreateOriginRequest","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",90,"func withCreateOriginRequest(ctx, req)","withCreateOriginRequest stashes the original CreateCubeSandboxReq onto the\ncontext so dealSuccResult can hand it to the post-create hook without\nthreading a new field through the createSandboxContext struct.",""],["safePrintCreateCubeSandboxReq","go","master","CubeMaster/pkg/service/sandbox/util.go",1042,"func safePrintCreateCubeSandboxReq(req)","",""],["simplePrintCreateCubeSandboxReq","go","master","CubeMaster/pkg/service/sandbox/util.go",1108,"func simplePrintCreateCubeSandboxReq(req)","",""],["createSandboxContext.setProbeInfo","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",701,"func (createSandboxContext) setProbeInfo()","",""],["filterErrMsg","go","master","CubeMaster/pkg/service/sandbox/util.go",1153,"func filterErrMsg(code)","",""],["safePrintCreateCubeSandboxRes","go","master","CubeMaster/pkg/service/sandbox/util.go",1081,"func safePrintCreateCubeSandboxRes(rsp)","",""],["createSandboxContext.setMasterRsp","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",559,"func (createSandboxContext) setMasterRsp(code, msg)","",""],["admitSelectedHost","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",263,"func admitSelectedHost(selected, getNode)","admitSelectedHost re-reads the selected host from cache and rejects cordoned\nnodes. getNode is injected so unit tests cover all admission paths without a\nlive localcache.",""],["GetCubeletAddr","go","master","CubeMaster/pkg/cubelet/actions.go",212,"func GetCubeletAddr(hostIP)","",""],["createSandboxContext.errRetry","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",409,"func (createSandboxContext) errRetry(err)","",""],["createSandboxContext.errorCodeRetry","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",429,"func (createSandboxContext) errorCodeRetry()","",""],["createSandboxContext.setProxyToRedis","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",567,"func (createSandboxContext) setProxyToRedis()","",""],["createSandboxContext.persistSandboxSpec","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",364,"func (createSandboxContext) persistSandboxSpec()","persistSandboxSpec hands the original create request to the registered\npost-create hook (wired by templatecenter to sandboxspec.Put). Hook\nfailures are logged but never bubble up: spec persistence is best-effort\nand any later flow that needs the spec falls back to base template lookup.",""],["createSandboxContext.Wait","go","master","CubeMaster/pkg/service/sandbox/sandbox_run.go",170,"func (createSandboxContext) Wait()","",""],["prepareCrossNodeRestore","go","cubelet","Cubelet/services/cubebox/cross_node_restore.go",49,"func prepareCrossNodeRestore(ctx, req)","prepareCrossNodeRestore settles the sandbox id and puts the sandbox's\nmetadata disk in place, before anything downstream tries to read the\npackage this create restores from.\n\nA package is the static set of snapshot objects belonging to the node that\nbuilt it, and none of it exists here. What the restore actually needs off\nit is a description — sandbox_spec.json for a Resume, the kernel／image\nconfig for both paths — and that description travels on the metadata disk,\nwhich is imported under the sandbox's own name and lives and dies with the\nsandbox. Nothing package-shaped is created on this node, because no owner\non this node would ever delete it.\n\nThis runs at the entry rather than inside the create workflow because the\nworkflow assigns sandbox ids in parallel with the step that first needs the\ndescription. Minting the id here removes that race: every later step reads\nthe same id off the request. Resume already carries one, since it restores\na sandbox that keeps its identity.\n\nThe rootfs and memory are left to the storage plugin, which imports them\nunder the same sandbox-private naming once the create is under way, so a\ncreate that dies halfway leaves only disks destroy already knows about.",""],["shimIntentPendingError.Error","go","cubelet","Cubelet/services/cubebox/destroy_shim_wait.go",109,"func (shimIntentPendingError) Error()","",""],["expandPauseSnapshotPackage","go","cubelet","Cubelet/services/cubebox/pause_package.go",234,"func expandPauseSnapshotPackage(req)","expandPauseSnapshotPackage fills a Master-thin Create request from the\nsandbox_spec.json packed inside the pause snapshot directory.",""],["resumeFromPauseSandboxID","go","cubelet","Cubelet/services/cubebox/pause_package.go",293,"func resumeFromPauseSandboxID(req)","resumeFromPauseSandboxID returns the sandboxID for Create-from-pause so the\ncaller can take sandboxLifecycleLocks with Pause/Destroy. Empty means a\nnormal Create (no pause snapshot annotation).",""],["checkParam","go","cubelet","Cubelet/services/cubebox/check.go",29,"func checkParam(ctx, realReq)","",""],["metricInfo.AddMetric","go","cubelet","Cubelet/plugins/workflow/engine.go",264,"func (metricInfo) AddMetric(err, id, t)","",""],["Engine.cleanUp","go","cubelet","Cubelet/plugins/workflow/engine.go",458,"func (Engine) cleanUp(ctx, opts)","",""],["BaseWorkflowInfo.GetSandboxID","go","cubelet","Cubelet/plugins/workflow/engine.go",62,"func (BaseWorkflowInfo) GetSandboxID()","",""],["Engine.Init","go","cubelet","Cubelet/plugins/workflow/engine.go",603,"func (Engine) Init(ctx, opts)","",""],["Engine.Destroy","go","cubelet","Cubelet/plugins/workflow/engine.go",613,"func (Engine) Destroy(ctx, opts)","",""],["decodeNetRequest","go","cubelet","Cubelet/network/plugin_tap.go",235,"func decodeNetRequest(raw)","",""],["buildRuntimePolicy","go","cubelet","Cubelet/network/plugin_tap.go",245,"func buildRuntimePolicy(ctx, request)","",""],["formatCubeNetworkAllowInternetAccess","go","cubelet","Cubelet/network/plugin_policy.go",103,"func formatCubeNetworkAllowInternetAccess(cfg)","",""],["lenCubeNetworkList","go","cubelet","Cubelet/network/plugin_policy.go",113,"func lenCubeNetworkList(cfg, allow)","",""],["formatNetworkRuntimeCubeNetworkConfig","go","cubelet","Cubelet/network/plugin_policy.go",123,"func formatNetworkRuntimeCubeNetworkConfig(cfg)","",""],["mapRunRequestCubeNetworkConfig","go","cubelet","Cubelet/network/plugin_policy.go",27,"func mapRunRequestCubeNetworkConfig(in)","",""],["formatCubeNetworkConfig","go","cubelet","Cubelet/network/runtime/policy_builder.go",111,"func formatCubeNetworkConfig(in)","formatCubeNetworkConfig renders a compact log-only view of the policy. It\ndeliberately avoids dumping full L7 rule bodies, which may contain secrets in\nheader-injection rules.",""],["managedState.ensureResponse","go","cubelet","Cubelet/network/runtime/controller.go",1316,"func (managedState) ensureResponse()","ensureResponse returns a defensive-copy response so callers cannot mutate the\ncontroller's managed state through returned slices or maps.",""],["NetworkController.hasPendingLegacyState","go","cubelet","Cubelet/network/runtime/startup_recover.go",881,"func (NetworkController) hasPendingLegacyState(sandboxID)","",""],["NetworkController.ensureHostRoute","go","cubelet","Cubelet/network/runtime/controller.go",1287,"func (NetworkController) ensureHostRoute()","ensureHostRoute reasserts the route to the sandbox CIDR through cube-dev.\nensureHostRoute installs the node-invariant route toward cubeDev once per\nprocess; subsequent creates skip the netlink probe entirely. A failure is\nnot latched: the next create retries the installation.",""],["NetworkController.normalizePortMappings","go","cubelet","Cubelet/network/runtime/controller.go",1216,"func (NetworkController) normalizePortMappings(req)","normalizePortMappings removes invalid zero-container-port entries, fills\ndefaults, and keeps only the last mapping per container port. Sorting makes\npersisted state deterministic across retries.",""],["NetworkController.reservePortMappings","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",218,"func (NetworkController) reservePortMappings(owner, tap, requestedMappings)","reservePortMappings reserves concrete host ports and mirrors them onto the TAP\nso later cleanup can remove exactly the mappings that were attempted.",""],["NetworkController.releaseAcquiredTap","go","cubelet","Cubelet/network/runtime/controller.go",865,"func (NetworkController) releaseAcquiredTap(owner, tap, entry)","releaseAcquiredTap rolls back a tap obtained via acquireTap before the state\nfile reaches creating. At this point no recoverable state file exists and no\nCubeVS/CubeEgress/port binding side effects are allowed, so rollback only\nresets local runtime fields and then releases the in-memory owner reservation.",""],["NetworkController.actualInterfaces","go","cubelet","Cubelet/network/runtime/controller.go",1245,"func (NetworkController) actualInterfaces(tapName, req)","actualInterfaces returns the interface contract visible to Cubelet. The first\ninterface is always bound to the host TAP name because that is the concrete\ndevice created by the runtime.",""],["cloneCubeNetworkConfig","go","cubelet","Cubelet/network/runtime/policy_builder.go",20,"func cloneCubeNetworkConfig(in)","cloneCubeNetworkConfig deep-copies the request policy before it is stored in\nmanagedState. Callers may reuse or mutate their request object after\nEnsureNetwork returns, so the runtime must own an immutable copy.",""],["tapDeviceFromEntry","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",118,"func tapDeviceFromEntry(entry)","tapDeviceFromEntry rebuilds the process-local TAP view from the pool identity.\nReady and Cleaning entries never retain a runtime fd.",""],["NetworkController.takePooledTapFD","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",69,"func (NetworkController) takePooledTapFD(name)","takePooledTapFD moves an idle pooled fd into Active ownership. It returns nil\nwhen the TAP has no retained fd (e.g. recovered after a runtime restart);\nGetTapFile then falls back to a lazy open as before.",""],["NetworkController.cleanupConflictingTap","go","cubelet","Cubelet/network/runtime/startup_recover.go",784,"func (NetworkController) cleanupConflictingTap(ip)","cleanupConflictingTap destroys a stale host tap that collides with a freshly\nallocated IP. It must be called without holding s.mu: the netlink lookup and\nthe destroy syscall run lock-free, while the membership checks against the\nin-memory collections are performed under s.mu. The IP is already exclusively\nowned by the caller (handed out by the allocator) and tap names derive\nuniquely from the IP, so no other goroutine can re-reference this tap between\nthe check and the destroy.\n\nLookup is by the current TAP name then the legacy z-prefixed name\n(RTM_GETLINK), not LinkList. A full dump of every host interface on every\npool-miss create races with concurrent TAP churn and surfaces as netlink\nErrDumpInterrupted under density load.",""],["NetworkController.resetTapPolicyForPool","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",316,"func (NetworkController) resetTapPolicyForPool(tap)","resetTapPolicyForPool removes any old CubeVS policy for a TAP and installs\nthe default-deny policy required before the TAP can enter Ready.",""],["tapPoolEntryFromDevice","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",24,"func tapPoolEntryFromDevice(tap, owner, state)","tapPoolEntryFromDevice converts a live/in-memory TAP into the TapPool state\nrepresentation and validates that the TAP has usable identity fields.",""],["NetworkController.cleanupPortMappings","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",306,"func (NetworkController) cleanupPortMappings(owner, tap)","cleanupPortMappings removes CubeVS mappings and releases PortBinder ownership.",""],["toEgressInput","go","cubelet","Cubelet/network/runtime/cubeegress_adapter.go",50,"func toEgressInput(cfg)","toEgressInput maps the runtime CubeNetworkConfig into the cubeegress\npackage's wire-input shape. Returns nil when there are no L7 rules to push —\nthis is the canonical \"skip the push\" signal that both the per-sandbox push\nand the bulk dump endpoint share, so they can never disagree about whether a\nsandbox has an L7 policy.\n\nCubeEgress wire types intentionally live below this adapter boundary so the\ntransport client never imports the runtime controller model. The mapping is\nmechanical and covered by toEgressInputTranslates_test below.",""],["NetworkController.putEgressPolicyForCreate","go","cubelet","Cubelet/network/runtime/cubeegress_adapter.go",170,"func (NetworkController) putEgressPolicyForCreate(ctx, state, in)","putEgressPolicyForCreate keeps sandbox creation from failing on a single\ntransient CubeEgress admin blip. Three total attempts are deliberately small:\nwith the default 2s per-call timeout the worst case is bounded around six\nseconds, while the two short gaps cover common OpenResty reload/startup races.",""],["extractL7AllowOutTargetsFromRules","go","cubelet","Cubelet/network/runtime/policy_builder.go",211,"func extractL7AllowOutTargetsFromRules(rules)","extractL7AllowOutTargetsFromRules walks the L7 rule list and produces the\n(host, port, scheme) tuples cubevs needs for its per-host dns_allow_v2 /\nallow_out_v3 port set. SNI-only rules and rules without a Match.Host are\ntreated as legacy port-agnostic entries — they expand to {80/http, 443/https}\ndownstream in buildL7Plan. Rules that specify a Port MUST also specify a\nscheme (\"http\" or \"https\"). Any invalid port/scheme pair rejects the whole\nprojection so CubeVS and CubeEgress cannot observe different policies.\n\nDuplicate (host, port, scheme) tuples are deduplicated to keep the map\nvalue's port_count within maxL7PortsPerHost when a user attaches the same\nport to several rules.",""],["NetworkController.beginTapCleanup","go","cubelet","Cubelet/network/runtime/tap_lifecycle.go",198,"func (NetworkController) beginTapCleanup(tap, owner)","beginTapCleanup moves a TAP into Cleaning ownership. It also creates a pool\nentry for recovered/interrupted TAPs that were not already tracked in memory.",""],["NetworkController.closeRuntimeTapOwnership","go","cubelet","Cubelet/network/runtime/tap_cleaner.go",85,"func (NetworkController) closeRuntimeTapOwnership(state)","closeRuntimeTapOwnership releases the Active/cleanup state's sole\nruntime-owned TAP fd back to the idle pool registry after draining frames\nqueued during this lifecycle. Caller-owned handoff duplicates remain the\nshim/hypervisor's responsibility.",""],["NetworkController.cleanupTapOnce","go","cubelet","Cubelet/network/runtime/tap_cleaner.go",27,"func (NetworkController) cleanupTapOnce(state, stateKind, reason)","",""],["DeleteTAPDevice","go","cubevs","CubeNet/cubevs/tap.go",211,"func DeleteTAPDevice(ifindex, ip)","DeleteTAPDevice removes all CubeVS state for a TAP device. It is a compatibility\nwrapper for callers that still want the old all-in-one behavior; new runtime\ncleanup paths should compose CleanupTAPDevicePolicy and DeleteTAPDeviceMetadata\nexplicitly so policy cleanup and metadata cleanup remain separate steps.",""],["ipToUint32","go","cubevs","CubeNet/cubevs/util.go",21,"func ipToUint32(ip)","ipToUint32 converts net.IP(1.2.3.4) to big endian integer(0x04030201).",""],["stringToByteArray","go","cubevs","CubeNet/cubevs/util.go",71,"func stringToByteArray(s)","stringToByteArray converts a string to a null-terminated byte array.",""],["loadPinnedMap","go","cubevs","CubeNet/cubevs/map.go",21,"func loadPinnedMap(name)","",""],["acquireInnerMap","go","cubevs","CubeNet/cubevs/inner_cache.go",37,"func acquireInnerMap(outerMap, ifindex, mapName, newInner)","acquireInnerMap returns the inner map for ifindex, creating it when missing\nand newInner is non-nil. The returned map is owned by the process-wide cache;\ncallers must not Close it. A nil newInner means \"must already exist\".\n\nCubelet completes stale-outer GC synchronously before starting background TAP\nwork or serving requests, and its TAP lifecycle prevents concurrent ownership\nof one ifindex. This cache therefore does not add another per-key lock.",""],["populateAllowOutInner","go","cubevs","CubeNet/cubevs/netpolicy.go",1179,"func populateAllowOutInner(inner, entries)","",""],["applyDNSAllow","go","cubevs","CubeNet/cubevs/dnspolicy.go",240,"func applyDNSAllow(ifindex, rules, replace)","applyDNSAllow installs DNS allow rules parsed from MVMOptions.",""],["effectiveDenyOutEntriesForReplace","go","cubevs","CubeNet/cubevs/netpolicy.go",856,"func effectiveDenyOutEntriesForReplace(plan)","",""],["splitAllowOutTargets","go","cubevs","CubeNet/cubevs/netpolicy.go",994,"func splitAllowOutTargets(targets)","splitAllowOutTargets separates user-facing allow_out targets into IPv4/CIDR\nentries for allow_out_v3 and DNS names for dns_allow_v2.",""],["buildL7Plan","go","cubevs","CubeNet/cubevs/netpolicy.go",504,"func buildL7Plan(targets)","buildL7Plan merges rule targets by host, enforces (host, port) scheme\nconsistency, and produces:\n  - allow_out_v3 static entries for IP/CIDR hosts (with port_count / ports\n    inherited from the merged tuple set),\n  - dns_allow_v2 rules for domain hosts (with the same port set).\n\nA target with Port == 0 && Scheme == L7SchemeNone means \"unspecified\": it\nexpands to {80/http, 443/https} for merging purposes. Empty port_count is\nonly preserved when *every* rule for that host is unspecified — the moment a\nuser attaches an explicit (port, scheme) the port set becomes explicit and\nthe datapath skips the default-set fallback.",""],["buildAllowOutPolicyEntries","go","cubevs","CubeNet/cubevs/netpolicy.go",387,"func buildAllowOutPolicyEntries(allowOutCIDRs)","",""],["mergeAllowOutWithL7","go","cubevs","CubeNet/cubevs/netpolicy.go",743,"func mergeAllowOutWithL7(base, l7)","mergeAllowOutWithL7 combines the non-L7 base entries with the L7 entries.\nWhen the same LPM key appears in both, the L7 version's flags and port set\nwin, and the merged entry is also marked netPolicyFlagL3Allowed so\npopulateAllowOutInnerMap writes the plain /32 any-port entry alongside the\nL7 /48 entries — otherwise an L7 rule would silently narrow a same-host\nplain allow_out to only the rule's ports. (Domain hosts get the same\ntreatment in mergeDNSAllowRules.)",""],["buildDNSAllowRules","go","cubevs","CubeNet/cubevs/dnspolicy.go",92,"func buildDNSAllowRules(domains)","",""],["mergeDNSAllowRules","go","cubevs","CubeNet/cubevs/netpolicy.go",770,"func mergeDNSAllowRules(base, l7)","mergeDNSAllowRules combines the non-L7 domain rules with the L7 domain rules.\nSame-key entries merge flags (OR) and adopt the L7 rule's port set. The\nnetPolicyFlagL3Allowed marker (plain-L3 + L7 coexistence) is applied\nseparately by markL3AllowedByPlainCover, which handles both the exact\nsame-host case and a leading-\"*.\" wildcard allow_out covering the L7 host.",""],["staleKeys","go","cubevs","CubeNet/cubevs/netpolicy.go",1336,"func staleKeys(inner, desired, managed)","staleKeys returns the managed keys currently in inner that desired no longer\ncovers. managed decides which rows this policy owns; rows it rejects are left\nalone.\n\nKeys are collected first and deleted afterwards: deleting while iterating a\nBPF hash map can make the cursor skip live entries.",""],["deleteKeys","go","cubevs","CubeNet/cubevs/netpolicy.go",1357,"func deleteKeys(inner, keys)","",""],["populateDenyOutInner","go","cubevs","CubeNet/cubevs/netpolicy.go",1098,"func populateDenyOutInner(inner, entries)","",""],["expandAllowOutEntry","go","cubevs","CubeNet/cubevs/netpolicy.go",1147,"func expandAllowOutEntry(entry)","expandAllowOutEntry materialises the rows one plan entry occupies: an L7\nentry becomes one exact (ip, port)/48 row per (port, scheme) tuple — an empty\nport set means the default {80/http, 443/https} — plus, when the host is also\nin plain allow_out (netPolicyFlagL3Allowed), the any-port row that keeps L3\naccess on every other port. A plain entry is a single any-port row.\n\nShared by the populate and diff paths so the set of keys written can never\ndrift from the set of keys considered current.",""],["addPortMapping","go","cubevs","CubeNet/cubevs/port.go",35,"func addPortMapping(remoteMap, localMap, ifindex, listenPort, hostPort)","",""],["ensureQuotaEndpoint","go","cubevs","CubeNet/cubevs/quota.go",216,"func ensureQuotaEndpoint(obj, ep, owner)","",""],["previewSandbox","go","master","CubeMaster/pkg/service/httpservice/cube/sandbox_preview.go",36,"func previewSandbox(r, rt)","",""],["createTemplate","go","master","CubeMaster/pkg/service/httpservice/cube/template.go",326,"func createTemplate(r, rt)","",""],["dealCubeboxReqTemplateByLocalConfig","go","master","CubeMaster/pkg/service/httpservice/cube/cubeboxutil.go",56,"func dealCubeboxReqTemplateByLocalConfig(ctx, reqInOut)","",""],["dealCubeboxCreateReqWithTemplateCenter","go","master","CubeMaster/pkg/service/httpservice/cube/cubeboxutil.go",441,"func dealCubeboxCreateReqWithTemplateCenter(ctx, templateID, reqInOut)","",""],["NetworkController.updateCubeVSTapPolicy","go","cubelet","Cubelet/network/runtime/cubevs_adapter.go",131,"func (NetworkController) updateCubeVSTapPolicy(ifindex, sandboxID, cfg)","updateCubeVSTapPolicy converges an active sandbox's CubeVS policy on cfg and\nbumps its policy generation so established flows are re-evaluated. Unlike\nregister/replace it neither touches TAP metadata nor flushes the policy maps,\nbecause the sandbox is live and must not lose its policy mid-update.",""],["NetworkController.replaceCubeVSTap","go","cubelet","Cubelet/network/runtime/cubevs_adapter.go",146,"func (NetworkController) replaceCubeVSTap(ifindex, ip, sandboxID, cfg)","replaceCubeVSTap rewrites TAP metadata and the complete desired CubeVS policy.\nLegacy recovery uses this to avoid carrying old allow/deny/DNS residue into\nthe recovered Active sandbox.",""],["UpsertTAPDevice","go","cubevs","CubeNet/cubevs/tap.go",200,"func UpsertTAPDevice(ifindex, ip, id, version, opts)","UpsertTAPDevice registers a TAP device and replaces its desired policy state.",""],["replaceNetPolicy","go","cubevs","CubeNet/cubevs/netpolicy.go",1405,"func replaceNetPolicy(ifindex, opts)","replaceNetPolicy replaces all configured egress policy for an ifindex.\nIt is used by TAP upsert/recovery paths so removed policy entries do not\nsurvive a network-agent restart.",""],["UpdateTAPDevicePolicy","go","cubevs","CubeNet/cubevs/netpolicy.go",1239,"func UpdateTAPDevicePolicy(ifindex, opts)","UpdateTAPDevicePolicy converges an already-registered TAP's egress policy on\nopts, then bumps the sandbox's policy generation so the datapath re-evaluates\nestablished flows.\n\nIt is the third apply mode alongside applyNetPolicy (additive, create path)\nand replaceNetPolicy (flush + refill, recovery path). Neither fits a live\nsandbox: flushing would blank the policy for as long as the refill takes, and\nswapping the inner map would defeat the HashOfMaps inner cache and pay a\nsynchronize_rcu() on every update. So this diffs against what is installed\nand issues only the required per-entry writes.\n\nTwo ordering rules:\n\n  - The generation bump is last. A failure before it leaves established flows\n    on their cached verdict instead of judging them against a half-applied\n    map — and because a revoked flow is deleted outright, a premature bump\n    could retire flows the finished policy would have allowed.\n  - Within each map, revocations land before additions. No intermediate state\n    is then more permissive than both the old and the new policy.\n\nNothing is rolled back on failure. The diff is computed from the live maps,\nso replaying the same request converges; and the caller's durable state is\nonly written after this returns, so a restart re-applies the previous policy\nin full.",""],["createid.local.Create","go","cubelet","Cubelet/plugins/cube/internals/createid/plugin.go",44,"func Create(ctx, opts *workflow.CreateContext) error","","createid"],["appsnapshotCompleter.Create","go","cubelet","Cubelet/plugins/cube/internals/appsnapshot/appsnapshot_plugin.go",54,"func Create(ctx, opts *workflow.CreateContext) error","","appsnapshot"],["images.local.Create","go","cubelet","Cubelet/services/images/local.go",205,"func Create(ctx, opts *workflow.CreateContext) error","","images"],["volumeLocal.Create","go","cubelet","Cubelet/services/images/volume.go",113,"func Create(ctx, opts *workflow.CreateContext) error","","volume"],["storage.local.Create","go","cubelet","Cubelet/storage/local.go",842,"func Create(ctx, opts *workflow.CreateContext) error","","storage"],["netFilePlugin.Create","go","cubelet","Cubelet/plugins/cube/internals/netfile/netfile_plugin.go",88,"func Create(ctx, opts *workflow.CreateContext) error","","netfile"],["cubeSandboxStorePlugin.Create","go","cubelet","Cubelet/plugins/cube/internals/sandbox/cube_sandbox_store.go",90,"func Create(ctx, opts *workflow.CreateContext) error","","cube-sandbox-store"],["CgPlugin.Create","go","cubelet","Cubelet/plugins/cube/internals/cgroup/local.go",302,"func Create(ctx, opts *workflow.CreateContext) error","","cgroup"],["cubebox.local.Create","go","cubelet","Cubelet/services/cubebox/cube_container_create.go",119,"func Create(ctx, opts *workflow.CreateContext) error","","cubebox"],["gc.local.Create","go","cubelet","Cubelet/services/gc/gc.go",162,"func Create(ctx, opts *workflow.CreateContext) error","","cleanup"],["shimlog.local.Create","go","cubelet","Cubelet/plugins/cube/internals/shimlog/local.go",85,"func Create(ctx, opts *workflow.CreateContext) error","","shimlog"],["ifindex_to_mvmmeta","map","map","CubeNet/src/map.h",26,"HASH · max MAX_ENTRIES · key __u32 → struct mvm_meta","/* ifindex to MVM metadata (managed by upper layer), we use IP/tunnel group ID only\n*\n* key:   ifindex of the TAP device assigned to MVM\n* value: tunnel group ID, ID and IP address in network byte order assigned to MVM\n*/",""],["mvmip_to_ifindex","map","map","CubeNet/src/map.h",13,"HASH · max MAX_ENTRIES · key __u32 → __u32","/* MVM IP to ifindex (managed by upper layer)\n*\n* key:   IP address in network byte order assigned to MVM\n* value: ifindex of the TAP device assigned to MVM\n*/",""],["allow_out_v3","map","map","CubeNet/src/map.h",149,"HASH_OF_MAPS · max MAX_ENTRIES · key __u32 → struct net_policy_value_v3","/* Egress allow list v3 (hash of maps)\n*\n* key:   ifindex of the TAP device\n* value: fd of inner LPM trie map (destination ip[:port] allow list)\n*\n* Inner keys use lpm_key_v3 so a single longest-prefix lookup resolves\n* exact (ip, port) (prefixlen 48), ip-only / any-port (prefixlen 32),\n* or ip/mask subnet (prefixlen < 32) rules. Inner values use\n* net_policy_value_v3, which marks the L7 scheme directly (the port is\n* now part of the key, so no per-packet (port, scheme) array scan).\n* A zero expires_at_ns means a static entry; a non-zero expires_at_ns\n* means a temporary DNS-learned entry.\n*/",""],["deny_out","map","map","CubeNet/src/map.h",171,"HASH_OF_MAPS · max MAX_ENTRIES · key __u32 → __u32","/* Egress deny list (hash of maps)\n*\n* key:   ifindex of the TAP device\n* value: fd of inner LPM trie map (destination IP deny list)\n*\n* If the inner map exists for a given ifindex and the destination IP\n* matches an entry, the packet is denied.\n*/",""],["dns_allow_v2","map","map","CubeNet/src/map.h",196,"HASH_OF_MAPS · max MAX_ENTRIES · key __u32 → struct dns_allow_value","/* DNS policy rules (hash of maps)\n*\n* key:   ifindex of the TAP device\n* value: fd of inner LPM trie map for this sandbox's DNS policy rules\n*\n* Inner keys are reversed lower-case domain name prefixes. DNS policy mode is\n* stored in ifindex_to_mvmmeta, while dns_allow_v2 stores only domain rules.\n* Exact rule \"qq.com\" is encoded as \"moc.qq\\0\" with the trailing NUL included\n* in prefixlen. Wildcard rule \"*.qq.com\" is encoded as \"moc.qq.\" without NUL,\n* so only subdomains such as \"a.qq.com\" can match it.\n*/",""],["remote_port_mapping","map","map","CubeNet/src/map.h",39,"HASH · max MAX_PORTS · key __u16 → struct mvm_port","/* host port (for remote access from CubeProxy) to MVM port mapping\n*\n* key:   host port\n* value: MVM ifindex + MVM listen port\n*/",""],["local_port_mapping","map","map","CubeNet/src/map.h",52,"HASH · max MAX_PORTS · key struct mvm_port → __u16","/* MVM port (for NAT) to host port mapping\n*\n* key:   MVM ifindex + MVM listen port\n* value: host port\n*/",""],["cube_q_ep_v1","map","map","CubeNet/src/quota.bpf.c",44,"HASH · max 8192 · key __u32 → struct q_endpoint","",""],["classify_egress_flow","c","ebpf","CubeNet/src/session.h",184,"static __always_inline __u8 classify_egress_flow(__u32 ifindex, __u32 daddr, __u16 dport, __u8 protocol)","/**\n* classify_egress_flow - single egress policy decision for a candidate flow\n* @ifindex:  TAP ifindex of the originating MVM (policy key)\n* @daddr:    destination IP address in network byte order\n* @dport:    destination port in network byte order (0 for port-agnostic)\n* @protocol: IPPROTO_* of the candidate flow\n*\n* Priority: allow_out_v3 > deny_out > default allow.\n*\n*   1. Look up (daddr, dport)/48 in allow_out_v3. LPM automatically falls\n*      back to a matching /32 or subnet entry. A non-expired L7_REQUIRED\n*      entry returns FLOW_HTTP / FLOW_HTTPS only for TCP: L7 intercept is a\n*      TCP TPROXY path. UDP and ICMP that hit the same allow entry return\n*      FLOW_SNAT. Any other non-expired allow entry returns FLOW_SNAT.\n*   2. Else if deny_out matches a /32 (or wider) entry, the flow is\n*      rejected (FLOW_REJECT).\n*   3. Otherwise the flow is allowed via SNAT (default allow).\n*\n* Traffic to mvm_gateway_ip is internal (destined for cube-dev) and always\n* allowed regardless of policy.\n*\n* The L7 (/48) lookup is performed FIRST, before the deny check. This is\n* the key fix for DNS-learned L7 entries: those are stored as (ip, port)/48\n* in allow_out_v3, but the old session_policy_allowed() used a hardcoded\n* /32 key and could never match them, so an already-authorized L7 flow fell\n* through to deny_out (e.g. 0.0.0.0/0) and was silently dropped.\n*/",""],["from_cube","c","ebpf","CubeNet/src/mvmtap.bpf.c",956,"SEC(\"tc\") int from_cube(struct __sk_buff *skb)","/* This filter will be attached to the ingress path of Sandbox TAP devices.\n* It performs a SNAT/VXLAN-ENCAP and redirects the packets to target devices.\n*/",""],["do_tcp_nat","c","ebpf","CubeNet/src/nodenic.bpf.c",451,"static __always_inline int do_tcp_nat(struct __sk_buff *skb)","",""],["account","c","ebpf","CubeNet/src/quota.bpf.c",97,"static __always_inline int account(struct __sk_buff *skb, bool incoming)","",""]],"e":[[0,43,0,50],[0,44,0,51],[0,45,0,55],[0,46,0,59],[2,47,0,172],[2,48,0,175],[2,3,0,196],[2,49,0,198],[2,50,0,256],[2,51,0,280],[3,52,0,1196],[3,53,0,1204],[3,54,0,1205],[3,55,0,1217],[5,6,0,15],[6,7,0,41],[6,56,0,56],[6,57,0,70],[6,58,0,80],[7,59,0,163],[8,60,0,278],[8,61,0,302],[8,62,0,308],[9,63,0,106],[9,64,0,125],[9,65,0,127],[9,66,0,131],[9,67,0,134],[9,68,0,141],[9,10,0,158],[10,69,0,189],[10,16,0,196],[10,11,0,199],[11,12,0,211],[11,69,0,213],[11,13,0,222],[11,14,0,235],[11,15,0,246],[13,70,0,252],[14,69,0,284],[14,71,0,291],[14,17,0,293],[14,72,0,295],[14,73,0,297],[15,74,0,341],[15,75,0,347],[15,76,0,351],[15,69,0,353],[16,71,0,384],[18,77,0,346],[18,78,0,347],[18,79,0,353],[18,80,0,359],[18,81,0,368],[19,20,0,609],[20,82,0,407],[20,21,0,416],[20,22,0,425],[20,83,0,430],[21,84,0,494],[21,85,0,501],[21,82,0,502],[21,19,0,507],[22,84,0,540],[22,83,0,588],[22,86,0,595],[24,87,0,178],[24,88,0,184],[24,89,0,190],[24,90,0,190],[24,91,0,191],[25,92,0,24],[26,93,0,485],[26,94,0,490],[26,95,0,505],[26,27,0,513],[27,96,0,614],[27,97,0,619],[27,28,0,620],[27,98,0,626],[27,99,0,628],[27,100,0,640],[27,101,0,644],[27,33,0,666],[27,29,0,693],[27,30,0,699],[27,42,0,703],[27,31,0,709],[28,102,0,816],[28,103,0,823],[28,104,0,830],[28,105,0,839],[28,106,0,845],[29,107,0,239],[30,32,0,99],[30,93,0,108],[31,108,0,123],[31,109,0,127],[32,110,0,186],[33,111,0,795],[33,112,0,797],[33,113,0,801],[34,35,0,63],[34,36,0,66],[34,114,0,67],[35,115,0,81],[35,116,0,91],[35,117,0,97],[36,37,0,1399],[37,38,0,1410],[37,117,0,1416],[37,118,0,1422],[37,119,0,1431],[37,120,0,1435],[37,121,0,1441],[38,122,0,663],[38,123,0,672],[38,124,0,677],[38,125,0,683],[38,126,0,687],[38,127,0,691],[39,117,0,1304],[39,118,0,1310],[39,128,0,1320],[39,129,0,1324],[39,130,0,1327],[40,117,0,1270],[40,118,0,1276],[40,131,0,1283],[40,128,0,1288],[40,129,0,1294],[40,119,0,1297],[41,117,0,19],[41,132,0,32],[42,133,0,310],[134,7,0,37],[135,7,0,327],[136,8,0,86],[137,8,0,509],[85,20,0,604],[86,20,0,614],[88,25,0,246],[138,32,0,132],[139,32,0,147],[140,35,0,201],[141,37,0,1406],[142,38,0,1242],[142,39,0,1250],[142,40,0,1247],[0,1,0,89,"route POST /sandboxes"],[1,2,0,196],[2,4,0,278],[4,5,8,64,"POST /cube/sandbox"],[6,9,0,78,"createSandboxRunFn"],[17,18,9,56,"CubeboxMgr.Create"],[18,19,0,462],[23,24,0,155],[24,26,11,205,"NetworkRuntime"],[30,34,11,123,"cubevsAdapter"],[29,41,11,238,"cubevsAdapter"],[21,143,10,507,"createid"],[21,144,10,507,"appsnapshot"],[21,145,10,507,"images"],[21,146,10,507,"volume"],[21,147,10,507,"storage"],[21,23,10,507,"network"],[21,148,10,507,"netfile"],[21,149,10,507,"cube-sandbox-store"],[21,150,10,507,"cgroup"],[21,151,10,507,"cubebox"],[21,152,1,507,"cleanup"],[21,153,1,507,"shimlog"],[162,156,4,199],[162,157,4,232],[163,154,4,985],[163,160,4,1050],[164,159,4,468],[165,161,4,100],[37,156,4,1422,"pin"],[37,156,5,1422,"pin"],[37,157,4,1450,"pin"],[37,157,5,1450,"pin"],[133,154,4,237,"pin"],[133,161,4,249,"pin"],[133,161,5,265,"pin"],[35,155,4,105,"pin"],[35,155,5,117,"pin"],[39,157,4,1310,"pin"],[39,157,5,1310,"pin"],[41,159,4,32,"pin"],[41,159,5,32,"pin"],[41,160,4,32,"pin"],[41,160,5,32,"pin"],[120,158,4,255,"pin"],[120,158,5,255,"pin"],[40,156,4,1276,"pin"],[40,156,5,1276,"pin"]]}</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+'use strict';
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let seed = 20261118;
+const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+const hash = s => { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0; return h; };
+
+/* ================= the Sandbox.create() graph, extracted from brocade/components/cube ================= */
+const D = JSON.parse(document.getElementById('cq-data').textContent);
+const NODES = D.n.map((r, i) => ({ i, name: r[0], lang: r[1], comp: r[2], file: r[3], line: r[4], sig: r[5], doc: r[6], plugin: r[7] }));
+// edge kinds: 0 call · 1 dispatch candidate not in config · 10 dispatch matched by config · 11 interface / adapter · 8 HTTP · 9 gRPC · 4 read table · 5 write table
+const LINKS = D.e.map((e, i) => ({ i, a: e[0], b: e[1], k: e[2], site: e[3], x: e[4] }));
+const BY = {};
+NODES.forEach(n => { if (!(n.name in BY)) BY[n.name] = n; BY[n.name + '@' + n.comp] = n; });
+const OUT = NODES.map(() => []), IN = NODES.map(() => []);
+LINKS.forEach(e => { OUT[e.a].push(e); IN[e.b].push(e); });
+OUT.forEach(l => l.sort((x, y) => x.site - y.site));
+const isMapE = e => e.k === 4 || e.k === 5;
+const boundary = e => e.k === 8 || e.k === 9 || e.k === 10 || (isMapE(e) && NODES[e.a].lang === 'go');
+const COMP = { api: 'CubeAPI · Rust', master: 'CubeMaster · Go', cubelet: 'Cubelet · Go', cubevs: 'CubeVS · Go', map: 'BPF 表', ebpf: 'eBPF · C' };
+const LAYERS = ['api', 'master', 'cubelet', 'cubevs', 'map', 'ebpf'];
+const ELBL = e => e.k === 8 ? 'HTTP' : e.k === 9 ? 'gRPC' : e.k === 10 ? '配置' : e.k === 1 ? '候选' : e.k === 11 ? '接口' : e.k === 4 ? '读' : e.k === 5 ? '写' : '';
+const EVID = e => e.k === 8 ? ['CubeAPI/src/cubemaster/mod.rs:64 format!("{}/cube/sandbox")', 'CubeMaster/pkg/service/httpservice/cube/routes.go:22 g.POST(SandboxAction, …)', 'cube.go:16-17 cubeURI="/cube", SandboxAction="/sandbox"']
+  : e.k === 9 ? ['pkgs/proto/services/cubebox/v1/cubebox.proto:17 rpc Create', 'CubeMaster/pkg/cubelet/actions.go:56 CubeboxMgrClient.Create', 'Cubelet/services/cubebox/service.go:329 (*service).Create']
+  : e.k === 10 ? [`Cubelet/config/config.toml:196 actions 含 "${e.x}"`, `${NODES[e.b].file}:${NODES[e.b].line} Create`, 'Cubelet/plugins/workflow/engine.go:507 flow.Create']
+  : isMapE(e) && NODES[e.a].lang === 'go' ? [`Go 常量值 "${NODES[e.b].name}"`, `${NODES[e.b].file}:${NODES[e.b].line} SEC(".maps")`] : null;
+NODES.forEach(n => { n.base = n.file.split('/').pop(); n.id = 'cq1:' + (hash(n.file + n.name) >>> 0).toString(16).padStart(8, '0') + (hash(n.name + '#') >>> 0).toString(16).padStart(8, '0').slice(0, 4); n.ring = !!n.doc && n.doc.length > 60; });
+const HANDLER = BY['create_sandbox@api'];
+// shortest path helper (ignores unconfigured candidates)
+function pathE(from, to, allowCand) {
+  const prev = new Map([[from, null]]); const q = [from];
+  while (q.length) { const u = q.shift(); if (u === to) break; OUT[u].forEach(e => { if (e.k === 1 && !allowCand) return; if (!prev.has(e.b)) { prev.set(e.b, e); q.push(e.b); } }); }
+  if (!prev.has(to)) return null; const es = []; let v = to; while (prev.get(v)) { const e = prev.get(v); es.unshift(e); v = e.a; } return es;
+}
+const SPINE = pathE(HANDLER.i, BY.deny_out.i);
+const spineIdx = new Map([[HANDLER.i, 0], ...SPINE.map((e, k) => [e.b, k + 1])]);
+$('#hud-n').textContent = NODES.length;
+
+/* ================= tabs ================= */
+const TABS = ['overview', 'index', 'explore', 'intent', 'mcp'];
+let current = null, stage = null;
+function show(id, focusTab) {
+  if (!TABS.includes(id)) id = 'overview';
+  if (id === current) return;
+  const prev = current; current = id;
+  TABS.forEach(t => { const on = t === id, tab = $('#t-' + t); tab.setAttribute('aria-selected', on); tab.tabIndex = on ? 0 : -1; $('#p-' + t).hidden = !on; });
+  if (focusTab) $('#t-' + id).focus();
+  if (prev !== null && window.scrollY > 120) window.scrollTo({ top: 0, behavior: RM ? 'auto' : 'smooth' });
+  stage && stage.visible(id === 'overview');
+  if (id === 'explore') renderExplore();
+}
+addEventListener('hashchange', () => show(location.hash.slice(1)));
+$('.tabs').addEventListener('keydown', e => {
+  const i = TABS.indexOf(current); let j = null;
+  if (e.key === 'ArrowRight') j = (i + 1) % TABS.length;
+  if (e.key === 'ArrowLeft') j = (i + TABS.length - 1) % TABS.length;
+  if (j !== null) { e.preventDefault(); location.hash = TABS[j]; show(TABS[j], true); }
+});
+addEventListener('keydown', e => {
+  if (e.target.closest('input,select,textarea,canvas') || e.metaKey || e.ctrlKey || e.altKey) return;
+  const n = +e.key; if (n >= 1 && n <= TABS.length) location.hash = TABS[n - 1];
+});
+$$('[data-focus],[data-q]').forEach(a => a.addEventListener('click', () => {
+  if (a.dataset.focus) setExplore({ focus: BY[a.dataset.focus].i, mode: a.dataset.mode || 'both', target: a.dataset.target ? BY[a.dataset.target].i : null, cand: !!a.dataset.cand });
+  if (a.dataset.q) { IT.q = +a.dataset.q; IT.show.hyp = true; renderIntent(); }
+}));
+$$('[data-copy]').forEach(b => b.addEventListener('click', () => {
+  const t = $('#' + b.dataset.copy).textContent;
+  const done = () => { const o = b.textContent; b.textContent = '已复制'; setTimeout(() => b.textContent = o, 1400); };
+  try { navigator.clipboard.writeText(t).then(done, () => sel(b.dataset.copy)); } catch (_) { sel(b.dataset.copy); }
+}));
+function sel(id) { const r = document.createRange(); r.selectNodeContents($('#' + id)); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+const cleanDoc = d => (d || '').replace(/^\/\*+\s*|\s*\*\/$/g, '').replace(/^\*\s?/gm, '').replace(/^\/\/\s?/gm, '').trim();
+
+/* ================= 3D: one layer per service, top to bottom ================= */
+function makeStage() {
+  const host = $('#stage'), cv = $('#gl'), lab = $('#lbls'), tip = $('#stip'), card = $('#ncard');
+  const fail = () => { $('#nogl').hidden = false; cv.hidden = true; return null; };
+  if (!window.THREE) return fail();
+  let R; try { R = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true }); } catch (_) { return fail(); }
+  if (!R.getContext()) return fail();
+  const PR = Math.min(window.devicePixelRatio || 1, 2); R.setPixelRatio(PR); R.setClearColor(0x000000, 0);
+  const scene = new THREE.Scene(), cam = new THREE.PerspectiveCamera(36, 1, 1, 5000), G = new THREE.Group(); scene.add(G);
+  /* brocade palettes: light is the default; an explicit data-theme="dark" switches the stage too */
+  const PAL = {
+    light: { bg: [0.973, 0.973, 0.969], rust: [0.84, 0.51, 0.49], go: [0.34, 0.58, 0.62], map: [0.56, 0.48, 0.66], c: [0.30, 0.44, 0.70],
+      call: [0.52, 0.57, 0.64], bnd: [0.30, 0.52, 0.35], mapE: [0.56, 0.48, 0.66], cand: [0.80, 0.80, 0.80], dot: [0.15, 0.39, 0.73], disc: 0xffffff, discA: .62, ringC: 0xdbdcda },
+    dark: { bg: [0.122, 0.125, 0.137], rust: [0.92, 0.60, 0.59], go: [0.61, 0.81, 0.85], map: [0.77, 0.65, 0.91], c: [0.49, 0.63, 0.89],
+      call: [0.40, 0.44, 0.50], bnd: [0.55, 0.75, 0.58], mapE: [0.70, 0.60, 0.86], cand: [0.30, 0.31, 0.33], dot: [0.57, 0.72, 0.95], disc: 0x17181a, discA: .55, ringC: 0x2c2e31 },
+  };
+  let P = document.documentElement.getAttribute('data-theme') === 'dark' ? PAL.dark : PAL.light;
+  const mix = (c, t) => [0, 1, 2].map(k => P.bg[k] + (c[k] - P.bg[k]) * t);
+  const LY = { api: 280, master: 160, cubelet: 0, cubevs: -160, map: -240, ebpf: -295 };
+  /* each service layer is a 3D cloud: edges pull related functions together, every node repels every other,
+     and a soft spring keeps each node near its layer's height; deterministic (seeded) */
+  NODES.forEach(n => { const a = rnd() * Math.PI * 2, r = 20 + rnd() * 60; n.p = new THREE.Vector3(Math.cos(a) * r, LY[n.comp] + (rnd() - .5) * 50, Math.sin(a) * r); });
+  {
+    const K = 30, it = 320, P0 = NODES.map(n => n.p), d = new THREE.Vector3(), F = NODES.map(() => new THREE.Vector3());
+    const adj = LINKS.filter(e => e.a !== e.b && e.k !== 1);
+    for (let t = 0; t < it; t++) {
+      const temp = 14 * (1 - t / it) + 0.6;
+      F.forEach(f => f.set(0, 0, 0));
+      for (let i = 0; i < P0.length; i++) for (let j = i + 1; j < P0.length; j++) {
+        d.subVectors(P0[i], P0[j]); let l = d.length() || .01; if (l > 240) continue;
+        const same = NODES[i].comp === NODES[j].comp ? 1 : .35, f = same * K * K / l; d.multiplyScalar(f / l); F[i].add(d); F[j].sub(d);
+      }
+      adj.forEach(e => { d.subVectors(P0[e.b], P0[e.a]); const l = d.length() || .01, w = NODES[e.a].comp === NODES[e.b].comp ? 1 : .45; const f = w * l * l / K; d.multiplyScalar(f / l);
+        d.y *= NODES[e.a].comp === NODES[e.b].comp ? 1 : .15; F[e.a].add(d); F[e.b].sub(d); });
+      NODES.forEach((n, i) => { const f = F[i]; f.y += (LY[n.comp] - n.p.y) * .9; f.x -= n.p.x * .35; f.z -= n.p.z * .35;
+        const l = f.length(); if (l > temp) f.multiplyScalar(temp / l); n.p.add(f); });
+    }
+  }
+  /* nodes: crisp filled discs with a surface-coloured outline, no glow */
+  const VS = `attribute float aSize; attribute vec3 aColor; attribute float aAlpha; attribute float aShape; attribute float aHalo; uniform float uScale; uniform float uNear; uniform float uFar; varying vec3 vC; varying float vA; varying float vS; varying float vF; varying float vH;
+    void main(){ vC=aColor; vS=aShape; vA=aAlpha; vH=aHalo; vec4 mv=modelViewMatrix*vec4(position,1.0); vF=clamp((-mv.z-uNear)/(uFar-uNear),0.0,1.0); gl_PointSize=aSize*uScale/-mv.z; gl_Position=projectionMatrix*mv; }`;
+  let minY = 1e9, maxY = -1e9, maxR = 0;
+  NODES.forEach(n => { minY = Math.min(minY, n.p.y); maxY = Math.max(maxY, n.p.y); maxR = Math.max(maxR, Math.hypot(n.p.x, n.p.z)); });
+  const SPAN = maxY - minY + 60, MIDY = (maxY + minY) / 2;
+  /* flat node: solid core, a hairline gap in the ground colour, then a soft same-hue halo (stronger on highlighted nodes) */
+  const FS = `uniform vec3 uBg; varying vec3 vC; varying float vA; varying float vS; varying float vF; varying float vH;
+    float sdBox(vec2 p, float b, float r){ vec2 q=abs(p)-vec2(b); return length(max(q,0.0))+min(max(q.x,q.y),0.0)-r; }
+    void main(){ vec2 p=gl_PointCoord*2.0-1.0; float d = vS>0.5 ? sdBox(p,0.27,0.16)+0.43 : length(p); float aa=fwidth(d)*1.1;
+      float core=1.0-smoothstep(0.43-aa,0.43,d); float gap=1.0-smoothstep(0.55-aa,0.55,d); float halo=(1.0-smoothstep(0.55,1.0,d))*vH;
+      if(gap<=0.0 && halo<=0.003) discard;
+      vec3 c=mix(vC,uBg,vF*0.45); float aC=core, aG=(gap-core)*0.9, aH=(1.0-gap)*halo*0.34;
+      float a=aC+aG+aH; vec3 col=(c*aC+uBg*aG+c*aH)/max(a,1e-4);
+      gl_FragColor=vec4(col,clamp(a,0.0,1.0)*vA); }`;
+  const N = NODES.length;
+  const pos = new Float32Array(N * 3), col = new Float32Array(N * 3), siz = new Float32Array(N), alp = new Float32Array(N), shp = new Float32Array(N), hal = new Float32Array(N);
+  const T = { col: new Float32Array(N * 3), siz: new Float32Array(N), alp: new Float32Array(N), hal: new Float32Array(N) };
+  NODES.forEach(n => { pos.set([n.p.x, n.p.y, n.p.z], n.i * 3); shp[n.i] = n.lang === 'map' ? 1 : 0; n.bs = (n.lang === 'map' ? 32 : n.lang === 'c' ? 32 : 25) + Math.min(12, (IN[n.i].length + OUT[n.i].length) * 1.0) + (spineIdx.has(n.i) ? 7 : 0); });
+  const ng = new THREE.BufferGeometry();
+  [['position', pos, 3], ['aColor', col, 3], ['aSize', siz, 1], ['aAlpha', alp, 1], ['aShape', shp, 1], ['aHalo', hal, 1]].forEach(([k, a, s]) => ng.setAttribute(k, new THREE.BufferAttribute(a, s)));
+  const uni = { uScale: { value: 1 }, uBg: { value: new THREE.Vector3(...P.bg) }, uNear: { value: 500 }, uFar: { value: 1300 } };
+  const mat = () => new THREE.ShaderMaterial({ uniforms: uni, vertexShader: VS, fragmentShader: FS, transparent: true, depthWrite: false, extensions: { derivatives: true } });
+  const nodePts = new THREE.Points(ng, mat()); nodePts.renderOrder = 2; G.add(nodePts);
+  /* edges: continuous curves; dimmed edges fade towards the tray colour instead of turning into dashes */
+  const S = 20;
+  LINKS.forEach(e => { const A = NODES[e.a].p, B = NODES[e.b].p; e.A = A; e.B = B; const m = A.clone().add(B).multiplyScalar(.5); const o = new THREE.Vector3(m.x, 0, m.z); const L = o.length() || 1; m.add(o.multiplyScalar((boundary(e) || e.k === 11 ? 22 : 6) / L)); e.c = m; });
+  const bez = (e, t, v) => { const u = 1 - t; return v.set(u*u*e.A.x + 2*u*t*e.c.x + t*t*e.B.x, u*u*e.A.y + 2*u*t*e.c.y + t*t*e.B.y, u*u*e.A.z + 2*u*t*e.c.z + t*t*e.B.z); };
+  const segs = []; LINKS.forEach(e => { for (let s = 0; s < S; s++) segs.push([e, s]); });
+  const ep = new Float32Array(segs.length * 6), ec = new Float32Array(segs.length * 6), ecT = new Float32Array(segs.length * 6), tv = new THREE.Vector3();
+  segs.forEach(([e, s], j) => { bez(e, s / S, tv); ep.set([tv.x, tv.y, tv.z], j * 6); bez(e, (s + 1) / S, tv); ep.set([tv.x, tv.y, tv.z], j * 6 + 3); });
+  const eg = new THREE.BufferGeometry(); eg.setAttribute('position', new THREE.BufferAttribute(ep, 3)); eg.setAttribute('color', new THREE.BufferAttribute(ec, 3));
+  const lines = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ vertexColors: true, fog: true })); lines.renderOrder = 1; G.add(lines);
+  scene.fog = new THREE.Fog(new THREE.Color(...P.bg), 500, 1500);
+  const ecol = e => isMapE(e) ? P.mapE : boundary(e) || e.k === 11 ? P.bnd : e.k === 1 ? P.cand : P.call;
+  /* a few travelling markers, only along the highlighted route */
+  const PM = 90, pp = new Float32Array(PM * 3), pc = new Float32Array(PM * 3), ps = new Float32Array(PM), pa = new Float32Array(PM), psh = new Float32Array(PM), phl = new Float32Array(PM);
+  const part = Array.from({ length: PM }, () => ({ e: null, t: rnd(), v: .16 + rnd() * .12 }));
+  const pg = new THREE.BufferGeometry();
+  [['position', pp, 3], ['aColor', pc, 3], ['aSize', ps, 1], ['aAlpha', pa, 1], ['aShape', psh, 1], ['aHalo', phl, 1]].forEach(([k, a, s]) => pg.setAttribute(k, new THREE.BufferAttribute(a, s)));
+  const partPts = new THREE.Points(pg, mat()); partPts.renderOrder = 3; G.add(partPts);
+  const layerLbl = LAYERS.map(c => { const el = document.createElement('div'); el.className = 'lbl grp'; el.textContent = COMP[c]; lab.appendChild(el); return { el, y: LY[c] }; });
+  const nodeLabels = NODES.map(n => { const el = document.createElement('div'); el.className = 'lbl ' + n.lang; el.textContent = n.name; el.style.opacity = 0; lab.appendChild(el); return el; });
+
+  const ids = names => names.map(k => BY[k]).filter(Boolean).map(n => n.i);
+  const viewOf = (ns, es, lbl) => ({ n: new Set(ns), e: new Set(es.map(e => e.i)), lbl });
+  const spineN = [HANDLER.i, ...SPINE.map(e => e.b)];
+  const bE = LINKS.filter(e => boundary(e) || e.k === 11);
+  const flowE = LINKS.filter(e => e.k === 10 || e.k === 1);
+  const polN = ids(['SandboxService::create_sandbox', 'build_cube_network_config', 'CubeMasterClient::create_sandbox', 'createSandboxGinHandler', 'createSandbox', 'constructCreateReq', 'mergeCubeNetworkConfigs',
+    'buildNetworkRuntimeCubeNetworkConfig', 'cubeVSTapRegistration', 'NetworkController.registerCubeVSTap', 'AddTAPDevice', 'applyNetPolicy', 'applyNetPolicyWithMode', 'buildNetPolicyPlan', 'syncDenyOutInner', 'deny_out', 'classify_egress_flow']);
+  const VIEWS = [
+    { q: '全景', op: 'overview', r: `${NODES.length} 个函数和表，从上到下依次是 CubeAPI、CubeMaster、Cubelet、CubeVS、BPF 表和 eBPF`, ms: 24, hi: null,
+      lbl: ids(['create_sandbox', 'CubeMasterClient::create_sandbox', 'createSandboxGinHandler', 'createSandboxContext.callCubelet', 'service.Create', 'Engine.parallelRunSteps', 'NetworkController.createState', 'AddTAPDevice', 'deny_out', 'from_cube']) },
+    { q: '一次创建的完整路径', op: 'path create_sandbox → deny_out', r: `${SPINE.length} 跳，跨过 HTTP、gRPC、配置派发和两处接口`, ms: 47, hi: viewOf(spineN, SPINE),
+      lbl: ids(['create_sandbox', 'CubeMasterClient::create_sandbox', 'createSandboxGinHandler', 'createSandboxContext.callCubelet', 'service.Create', 'Engine.parallelRunSteps', 'delegateNetworkManager.Create', 'NetworkController.createState', 'AddTAPDevice', 'deny_out']) },
+    { q: 'IDE 会断的 5 处', op: 'callees · include_candidates · 跨边界', r: 'HTTP、gRPC、配置派发、接口适配、按表名对应，绿色标出', ms: 33,
+      hi: viewOf([...new Set(bE.flatMap(e => [e.a, e.b]))], bE), lbl: ids(['CubeMasterClient::create_sandbox', 'createSandboxGinHandler', 'Create', 'service.Create', 'Engine.parallelRunSteps', 'NetworkController.registerCubeVSTap', 'AddTAPDevice', 'deny_out']) },
+    { q: '配置决定的插件', op: 'callees Engine.parallelRunSteps · include_candidates', r: 'Flow.Create 有 12 个实现，config.toml:196 选中 10 个', ms: 21,
+      hi: viewOf([BY['Engine.parallelRunSteps'].i, ...flowE.map(e => e.b)], flowE) },
+    { q: '网络策略落到 eBPF', op: 'trace allow_internet_access', r: 'Rust 校验 → Go 合并模板 → Cubelet 补默认值 → CubeVS 写 deny_out → eBPF 查表', ms: 52,
+      hi: viewOf(polN, LINKS.filter(e => polN.includes(e.a) && polN.includes(e.b))) },
+  ];
+  const qbox = $('#qs3d');
+  VIEWS.forEach((v, k) => { const b = document.createElement('button'); b.type = 'button'; b.dataset.k = k; b.setAttribute('aria-pressed', 'false'); b.innerHTML = esc(v.q) + '<span class="pg"></span>'; qbox.appendChild(b); });
+  const C = { yaw: 0.7, pitch: 0.3, dist: 1150, ty: MIDY }, CT = { ...C };
+  let W = 1, H = 1, vi = 0, hi = null, lblKeys = [], selN = null, tour = !RM, last0 = 0, interacted = false; const DUR = 7500;
+  // the bottom ~130px of the stage is covered by the legend, caption and view chips, so fit the cloud into the free area and lift it
+  const baseDist = () => Math.max(SPAN / (0.65 * (H - 140) / H), (2 * maxR + 60) / (0.65 * (W / H)));
+  const fitView = () => { CT.dist = baseDist(); CT.ty = MIDY - 0.65 * CT.dist * (70 / H) + 10; };
+  function resize() { const r = host.getBoundingClientRect(); W = Math.max(1, r.width); H = Math.max(1, r.height); R.setSize(W, H, false); cam.aspect = W / H; cam.updateProjectionMatrix(); uni.uScale.value = H * PR * 1.7; if (!interacted) fitView(); }
+  new ResizeObserver(resize).observe(host);
+  const caption = (op, r, ms) => { $('#cap').innerHTML = `<span class="q">→ ${esc(op)}</span><span class="r">${esc(r)}</span><span class="ms">${ms} ms</span>`; };
+  function apply(k) {
+    vi = k; const v = VIEWS[k]; hi = v.hi; selN = null; card.hidden = true;
+    $$('button', qbox).forEach((b, j) => { b.setAttribute('aria-pressed', j === k); $('.pg', b).style.width = '0'; });
+    caption(v.op, v.r, v.ms); lblKeys = v.lbl || (hi ? [...hi.n] : []); retarget(); last0 = performance.now(); assign();
+  }
+  function retarget() {
+    NODES.forEach(n => { const on = !hi || hi.n.has(n.i), f = hi && hi.n.has(n.i), c = P[n.lang];
+      T.col.set(on ? c : mix(c, .3), n.i * 3); T.siz[n.i] = n.bs * (f ? 1.15 : 1) * (selN === n.i ? 1.25 : 1) * (on ? 1 : .82); T.alp[n.i] = on ? 1 : .6; T.hal[n.i] = selN === n.i ? 1.4 : f ? 1 : on ? .45 : .08; });
+    segs.forEach(([e, s], j) => { const on = hi ? hi.e.has(e.i) : true, base = ecol(e);
+      const t = hi ? (on ? 1 : .12) : (boundary(e) || e.k === 11 ? .85 : .45); const c = mix(base, t); ecT.set(c, j * 6); ecT.set(c, j * 6 + 3); });
+  }
+  function assign() { const pool = hi && hi.e.size ? LINKS.filter(e => hi.e.has(e.i)) : []; const per = pool.length ? Math.max(1, Math.min(2, Math.floor(PM / pool.length))) : 0; let k = 0;
+    pool.forEach(e => { for (let j = 0; j < per && k < PM; j++, k++) { part[k].e = e; part[k].t = j / per + rnd() * .1; } }); for (; k < PM; k++) part[k].e = null; }
+  function setTheme() {
+    P = document.documentElement.getAttribute('data-theme') === 'dark' ? PAL.dark : PAL.light;
+    uni.uBg.value.set(...P.bg);
+    scene.fog.color.setRGB(...P.bg);
+    retarget();
+  }
+  new MutationObserver(setTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  function selectNode(i) {
+    selN = i; const n = NODES[i]; hi = { n: new Set([i, ...IN[i].map(e => e.a), ...OUT[i].map(e => e.b)]), e: new Set([...IN[i], ...OUT[i]].map(e => e.i)) };
+    lblKeys = [...hi.n]; retarget(); assign();
+    caption(`callers + callees ${n.name}`, `${IN[i].length} 个调用方 · ${OUT[i].length} 个被调用或读写`, 15 + hash(n.name) % 18);
+    $$('button', qbox).forEach(b => b.setAttribute('aria-pressed', 'false'));
+    card.innerHTML = `<button class="x" type="button" aria-label="关闭">×</button><div class="nm">${esc(n.name)}</div><div class="loc">${COMP[n.comp]} · ${esc(n.file)}:${n.line}</div><div class="sig">${esc(n.sig)}</div>
+      ${n.doc ? `<div class="doc">${esc(cleanDoc(n.doc).split('\n').slice(0, 2).join(' '))}</div>` : ''}<button class="go" type="button">在调用图中打开 →</button>`;
+    card.hidden = false; $('.x', card).onclick = () => { card.hidden = true; apply(vi); }; $('.go', card).onclick = () => { setExplore({ focus: i, mode: 'both', target: null }); location.hash = 'explore'; };
+    stopTour();
+  }
+  const stopTour = () => { interacted = true; if (tour) { tour = false; syncPlay(); } };
+  const syncPlay = () => { const b = $('#st-play'); b.textContent = tour ? '暂停导览' : '继续导览'; b.setAttribute('aria-pressed', tour); };
+  qbox.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; apply(+b.dataset.k); stopTour(); });
+  $('#st-play').onclick = () => { tour = !tour; if (tour) { interacted = false; apply((vi + 1) % VIEWS.length); } syncPlay(); };
+  $('#st-reset').onclick = () => { interacted = false; CT.yaw = .7; CT.pitch = .3; fitView(); apply(0); };
+  const proj = new THREE.Vector3(); const screenOf = p => { proj.copy(p).project(cam); return [(proj.x + 1) / 2 * W, (1 - proj.y) / 2 * H, proj.z]; };
+  const pick = (x, y) => { let best = -1, bd = 16 * 16; NODES.forEach(n => { const [sx, sy, z] = screenOf(n.p); if (z > 1) return; const d = (sx - x) ** 2 + (sy - y) ** 2; if (d < bd) { bd = d; best = n.i; } }); return best; };
+  const ptrs = new Map(); let drag = null, pinch0 = 0;
+  cv.addEventListener('pointerdown', e => { ptrs.set(e.pointerId, [e.clientX, e.clientY]); drag = { x: e.clientX, y: e.clientY, moved: false }; if (ptrs.size === 2) { const [p, q] = [...ptrs.values()]; pinch0 = Math.hypot(p[0] - q[0], p[1] - q[1]); } });
+  cv.addEventListener('pointermove', e => {
+    const r = cv.getBoundingClientRect();
+    if (ptrs.has(e.pointerId)) { const last = ptrs.get(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+      if (ptrs.size === 2) { const [p, q] = [...ptrs.values()]; const d = Math.hypot(p[0] - q[0], p[1] - q[1]); if (pinch0) CT.dist = Math.min(2000, Math.max(300, CT.dist * pinch0 / d)); pinch0 = d; stopTour(); return; }
+      const dx = e.clientX - last[0], dy = e.clientY - last[1];
+      if (drag && !drag.moved && Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) { drag.moved = true; cv.setPointerCapture(e.pointerId); stopTour(); }
+      if (drag && drag.moved) { CT.yaw -= dx * .006; CT.pitch = Math.min(1.1, Math.max(-.6, CT.pitch + dy * .004)); } tip.hidden = true; return; }
+    const i = pick(e.clientX - r.left, e.clientY - r.top);
+    if (i >= 0) { const [sx, sy] = screenOf(NODES[i].p); tip.textContent = `${NODES[i].name} · ${COMP[NODES[i].comp]}`; tip.style.left = sx + 'px'; tip.style.top = sy + 'px'; tip.hidden = false; cv.style.cursor = 'pointer'; } else { tip.hidden = true; cv.style.cursor = ''; }
+  });
+  cv.addEventListener('pointerup', e => { const r = cv.getBoundingClientRect(); if (drag && !drag.moved && ptrs.size === 1) { const i = pick(e.clientX - r.left, e.clientY - r.top); if (i >= 0) selectNode(i); } ptrs.delete(e.pointerId); if (ptrs.size < 2) pinch0 = 0; if (!ptrs.size) drag = null; });
+  cv.addEventListener('pointercancel', e => { ptrs.delete(e.pointerId); drag = null; });
+  cv.addEventListener('pointerleave', () => { tip.hidden = true; });
+  cv.addEventListener('wheel', e => { if (!(e.ctrlKey || e.metaKey)) return; e.preventDefault(); CT.dist = Math.min(2000, Math.max(300, CT.dist * (1 + e.deltaY * .004))); stopTour(); }, { passive: false });
+  cv.addEventListener('keydown', e => { const k = e.key; let u = true; if (k === 'ArrowLeft') CT.yaw += .12; else if (k === 'ArrowRight') CT.yaw -= .12; else if (k === 'ArrowUp') CT.pitch = Math.min(1.1, CT.pitch + .08); else if (k === 'ArrowDown') CT.pitch = Math.max(-.6, CT.pitch - .08); else if (k === '+' || k === '=') CT.dist = Math.max(300, CT.dist * .88); else if (k === '-') CT.dist = Math.min(1700, CT.dist * 1.12); else if (k === 'Escape') { card.hidden = true; apply(vi); } else u = false; if (u) { e.preventDefault(); stopTour(); } });
+  let vis = true, onScreen = true, raf = 0, last = performance.now();
+  const lerp = (x, y, f) => { let ch = false; for (let i = 0; i < x.length; i++) { const d = y[i] - x[i]; if (Math.abs(d) > 1e-4) { x[i] += d * f; ch = true; } } return ch; };
+  function frame(now) {
+    raf = 0; const dt = Math.min(64, now - last); last = now; if (!vis || !onScreen) return;
+    if (tour && !RM) CT.yaw -= dt * .00007;
+    for (const k of ['yaw', 'pitch', 'dist', 'ty']) C[k] += (CT[k] - C[k]) * Math.min(1, dt * .006);
+    const cp = Math.cos(C.pitch); cam.position.set(C.dist * cp * Math.sin(C.yaw), C.ty + C.dist * Math.sin(C.pitch), C.dist * cp * Math.cos(C.yaw)); cam.lookAt(0, C.ty, 0);
+    uni.uNear.value = C.dist - 300; uni.uFar.value = C.dist + 360; scene.fog.near = C.dist - 240; scene.fog.far = C.dist + 800;
+    const f = Math.min(1, dt * .008);
+    if (lerp(col, T.col, f)) ng.attributes.aColor.needsUpdate = true; if (lerp(siz, T.siz, f)) ng.attributes.aSize.needsUpdate = true;
+    if (lerp(alp, T.alp, f)) ng.attributes.aAlpha.needsUpdate = true; if (lerp(hal, T.hal, f)) ng.attributes.aHalo.needsUpdate = true; if (lerp(ec, ecT, f)) eg.attributes.color.needsUpdate = true;
+    part.forEach((p, k) => { if (!p.e) { pa[k] = 0; return; } if (!RM) p.t = (p.t + dt * .001 * p.v) % 1; bez(p.e, p.t, tv); pp.set([tv.x, tv.y, tv.z], k * 3);
+      pc.set(P.dot, k * 3); ps[k] = 13; pa[k] = Math.min(1, Math.sin(p.t * Math.PI) * 1.6); });
+    ['position', 'aColor', 'aSize', 'aAlpha'].forEach(k => pg.attributes[k].needsUpdate = true);
+    R.render(scene, cam);
+    const boxes = [], wanted = new Set(lblKeys.slice(0, 12)); if (selN !== null) wanted.add(selN);
+    NODES.forEach(n => { const el = nodeLabels[n.i]; if (!wanted.has(n.i)) { if (el.style.opacity !== '0') el.style.opacity = 0; return; }
+      const [x, y, z] = screenOf(n.p), w = n.name.length * 7.2 + 14, bx = [x - w / 2, y - 24, x + w / 2, y - 6];
+      const clash = z > 1 || bx[0] < 4 || bx[2] > W - 4 || y < 40 || y > H - 120 || boxes.some(b => !(bx[2] < b[0] || bx[0] > b[2] || bx[3] < b[1] || bx[1] > b[3]));
+      if (clash) { el.style.opacity = 0; return; } boxes.push(bx); el.style.opacity = 1; el.style.transform = `translate(${bx[0]}px, ${y - 26}px)`; el.classList.toggle('hi', !!hi && hi.n.has(n.i)); });
+    layerLbl.forEach(l => { const [, y, z] = screenOf(new THREE.Vector3(0, l.y, 0)); l.el.style.transform = `translate(16px, ${y}px) translate(0,-50%)`; l.el.style.opacity = z > 1 || y < 34 || y > H - 112 ? 0 : 1; });
+    if (tour) { const t = (now - last0) / DUR; const g = $(`button[data-k="${vi}"] .pg`, qbox); if (g) g.style.width = Math.min(100, t * 100) + '%'; if (t >= 1) apply((vi + 1) % VIEWS.length); }
+    raf = requestAnimationFrame(frame);
+  }
+  const kick = () => { if (!raf && vis && onScreen) { last = performance.now(); raf = requestAnimationFrame(frame); } };
+  new IntersectionObserver(es => { onScreen = es[0].isIntersecting; kick(); }).observe(host);
+  resize(); apply(0); col.set(T.col); siz.set(T.siz); alp.set(T.alp); hal.set(T.hal); ec.set(ecT); Object.assign(C, CT); kick();
+  return { visible(v) { vis = v; if (v) { last0 = performance.now(); resize(); } kick(); } };
+}
+
+/* ================= index tab ================= */
+(function index() {
+  let h = '';
+  [...Array(9).fill('rs'), ...Array(26).fill('go'), ...Array(10).fill('c'), ...Array(11).fill('')].forEach((k, i) => { h += `<i class="${k}" style="animation-delay:${i * 12}ms"></i>`; });
+  $('#tiles').innerHTML = h;
+  h = ''; for (let i = 0; i < 16; i++) h += `<b style="left:${8 + rnd() * 84}%;top:${10 + rnd() * 78}%"></b>`; $('#dots').innerHTML = h;
+  const sub = [HANDLER, ...SPINE.map(e => NODES[e.b])], P = {}; sub.forEach((n, k) => { P[n.i] = [14 + (k * 67) % 282, 12 + ((k * 37) % 138)]; });
+  let s = ''; LINKS.forEach(e => { if (P[e.a] && P[e.b]) s += `<line class="${boundary(e) || e.k === 11 ? 'tl' : ''}" x1="${P[e.a][0]}" y1="${P[e.a][1]}" x2="${P[e.b][0]}" y2="${P[e.b][1]}"/>`; });
+  sub.forEach(n => { s += `<circle cx="${P[n.i][0]}" cy="${P[n.i][1]}" r="2.8" class="${n.lang}"/>`; }); $('#net').innerHTML = s;
+  const LOG = [
+    [0, '<span class="p">$</span> <span class="b">cq index --name cube -- make -C components/cube all</span>'],
+    [0, '<span class="k">▸ 真实构建</span>  <span class="d">RUSTC_WRAPPER · go list · bpf2go → clang -target bpf</span>'],
+    [0, '  cargo   CubeAPI                    <span class="d">rustc × 312</span>'],
+    [0, '  go      CubeMaster/... Cubelet/... <span class="d">412 个包</span>'],
+    [0, '  clang   CubeNet/src/*.bpf.c        <span class="d">× 10</span>          <span class="s">1 min 38 s</span>'],
+    [1, '<span class="k">▸ 原生语义</span>  <span class="d">rust-analyzer HIR · go/types · clang AST</span>'],
+    [1, '  41,906 个符号 · 3 种语言                           <span class="s">44 s</span>'],
+    [2, '<span class="k">▸ 发布</span>      <span class="d">不可变版本 → Ladybug 图投影</span>'],
+    [2, '  198,340 条关系 · 跨边界连接 5 类                    <span class="s">19 s</span>'],
+    [3, '<span class="ok">✓ revision 9b31f0de</span>  <span class="d">共 2 min 41 s（示意）</span>'],
+  ];
+  const pre = $('#idx-log'), layers = $$('.layer'), lis = $$('#stages li'), box = $('#stack-box');
+  const mark = st => { layers.forEach(l => l.classList.toggle('on', +l.dataset.i <= st)); lis.forEach(l => l.classList.toggle('on', +l.dataset.i === st)); };
+  pre.innerHTML = LOG.map(l => `<span class="ln">${l[1]}</span>`).join(''); mark(3); lis.forEach(l => l.classList.remove('on'));
+  let timer = 0;
+  lis.forEach(li => { li.addEventListener('mouseenter', () => { if (timer) return; layers.forEach(l => l.classList.toggle('on', l.dataset.i === li.dataset.i)); }); li.addEventListener('mouseleave', () => { if (!timer) mark(3); }); });
+  $('#replay').addEventListener('click', () => {
+    clearTimeout(timer); pre.innerHTML = ''; layers.forEach(l => l.classList.remove('on', 'scan')); box.classList.remove('spread');
+    let k = 0; const clock = $('#idx-time'), TS = [0, 3, 41, 77, 98, 99, 142, 143, 161, 161];
+    const step = () => { if (k >= LOG.length) { timer = 0; box.classList.add('spread'); lis.forEach(l => l.classList.remove('on')); return; }
+      const [st, html] = LOG[k]; const ln = document.createElement('span'); ln.className = 'ln new'; ln.innerHTML = html; pre.appendChild(ln);
+      if (st < 3) { mark(st); if (k === 1 || k === 5 || k === 7) layers[st].classList.add('scan'); } else mark(3);
+      const t = TS[k]; clock.textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; k++;
+      timer = setTimeout(step, RM ? 0 : [380, 420, 360, 360, 700, 420, 800, 420, 800, 0][k - 1] || 400); };
+    step();
+  });
+})();
+
+/* ================= explore ================= */
+const EX = { focus: BY['Engine.parallelRunSteps'].i, mode: 'both', depth: 1, cand: false, target: null };
+const PICKS = ['create_sandbox@api', 'CubeMasterClient::create_sandbox', 'createSandboxContext.callCubelet', 'service.Create', 'Engine.parallelRunSteps', 'NetworkController.createState', 'AddTAPDevice', 'deny_out'];
+function setExplore(o) { Object.assign(EX, o); if (current === 'explore') renderExplore(); }
+(function exploreInit() {
+  $('#ex-list').innerHTML = NODES.map(n => `<option value="${esc(n.name)}">${COMP[n.comp]} · ${esc(n.base)}:${n.line}</option>`).join('');
+  $('#ex-picks').innerHTML = PICKS.map(k => `<button type="button" data-k="${k}">${esc(BY[k].name)}</button>`).join('');
+  $('#ex-picks').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setExplore({ focus: BY[b.dataset.k].i, target: null }); });
+  $('#ex-mode').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setExplore({ mode: b.dataset.m, target: null }); });
+  $('#ex-depth').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setExplore({ depth: +b.dataset.d }); });
+  $('#ex-cand').addEventListener('change', e => setExplore({ cand: e.target.checked }));
+  $('#ex-target').addEventListener('change', e => setExplore({ target: +e.target.value }));
+  const q = $('#ex-q');
+  const go = () => { const v = q.value.trim(); if (!v) return; const n = NODES.find(n => n.name === v) || NODES.find(n => n.name.toLowerCase().includes(v.toLowerCase())); if (n) { setExplore({ focus: n.i, target: null }); q.value = ''; q.blur(); } };
+  q.addEventListener('change', go); q.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+})();
+const usable = e => EX.cand || e.k !== 1;
+function bfs(start, dir, depth) {
+  const seen = new Map([[start, 0]]); let fr = [start]; const cols = [];
+  for (let d = 1; d <= depth; d++) { const nx = []; fr.forEach(u => (dir === 'out' ? OUT[u] : IN[u]).forEach(e => { if (!usable(e)) return; const v = dir === 'out' ? e.b : e.a; if (!seen.has(v)) { seen.set(v, d); nx.push(v); } })); if (!nx.length) break; cols.push(nx); fr = nx; }
+  return cols;
+}
+function reach(start) { const d = new Map([[start, 0]]), prev = new Map(), q = [start]; while (q.length) { const u = q.shift(); OUT[u].forEach(e => { if (!usable(e) || d.has(e.b)) return; d.set(e.b, d.get(u) + 1); prev.set(e.b, e); q.push(e.b); }); } return { d, prev }; }
+const RELQ = n => /^Engine\.|^flow:|Flow|parallelRunSteps/.test(n.name) || n.plugin ? 0 : /createState|EnsureNetwork|cleanupCreateFailure|^local\.Create|delegateNetworkManager/.test(n.name) ? 1 : /network_config|mergeCubeNetworkConfigs|cubeVSTapRegistration|applyNetPolicy|buildNetPolicyPlan|deny_out|AddTAPDevice|syncDenyOut|classify_egress_flow/.test(n.name) ? 2 : undefined;
+function edgeCls(e) { return e.k === 1 ? 'ge cand' : isMapE(e) ? 'ge map' + (NODES[e.a].lang === 'go' ? ' rule' : '') : boundary(e) ? 'ge tail' : e.k === 11 ? 'ge ifc' : 'ge'; }
+function renderExplore() {
+  const f = EX.focus, F = NODES[f];
+  $$('#ex-mode button').forEach(b => b.setAttribute('aria-pressed', b.dataset.m === EX.mode));
+  $$('#ex-depth button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.d === EX.depth));
+  $$('#ex-picks button').forEach(b => b.setAttribute('aria-pressed', BY[b.dataset.k].i === f));
+  $('#ex-cand').checked = EX.cand; $('#ex-depth-w').hidden = EX.mode === 'path'; $('#ex-target-w').hidden = EX.mode !== 'path';
+  let cols = [], focusCol = 0, pathSet = null;
+  if (EX.mode === 'path') {
+    const { d, prev } = reach(f);
+    const opts = [...d.keys()].filter(i => i !== f).sort((a, b) => d.get(a) - d.get(b) || NODES[a].name.localeCompare(NODES[b].name));
+    if (EX.target === null || !d.has(EX.target)) EX.target = opts.includes(BY.deny_out.i) ? BY.deny_out.i : opts[opts.length - 1] ?? null;
+    $('#ex-target').innerHTML = opts.map(i => `<option value="${i}"${i === EX.target ? ' selected' : ''}>${esc(NODES[i].name)} · ${d.get(i)} 跳</option>`).join('') || '<option>没有可达的函数</option>';
+    if (EX.target !== null) { const es = []; let v = EX.target; while (prev.get(v)) { const e = prev.get(v); es.unshift(e); v = e.a; } cols = [[f], ...es.map(e => [e.b])]; pathSet = new Set(es.map(e => e.i)); } else cols = [[f]];
+  } else {
+    const ins = EX.mode !== 'out' ? bfs(f, 'in', EX.depth) : [], outs = EX.mode !== 'in' ? bfs(f, 'out', EX.depth) : [];
+    cols = [...ins.slice().reverse(), [f], ...outs]; focusCol = ins.length;
+  }
+  for (let c = focusCol + 1; c < cols.length; c++) { const pos = new Map(cols[c - 1].map((v, k) => [v, k])); const key = v => { const ps = IN[v].filter(e => pos.has(e.a)).map(e => pos.get(e.a) * 1e5 + e.site); return ps.length ? Math.min(...ps) : 1e12; }; cols[c].sort((a, b) => key(a) - key(b)); }
+  for (let c = focusCol - 1; c >= 0; c--) { const pos = new Map(cols[c + 1].map((v, k) => [v, k])); const key = v => { const ps = OUT[v].filter(e => pos.has(e.b)).map(e => pos.get(e.b)); return ps.length ? Math.min(...ps) : 1e9; }; cols[c].sort((a, b) => key(a) - key(b)); }
+  // long paths wrap into rows of 6 boxes
+  const PATHMODE = EX.mode === 'path', COLW = PATHMODE ? 200 : 244, BW = PATHMODE ? 168 : 206, BH = 36, RH = PATHMODE ? 70 : 46, PX = 18, PT = 40, PB = 18, MAXR = 12, PER = 6;
+  let XY = new Map(), Wd, Hd, s, labels = [];
+  const hiddenD = !EX.cand ? [...IN[f], ...OUT[f]].filter(e => e.k === 1).length : 0;
+  if (PATHMODE) {
+    const n = cols.length, rowsN = Math.ceil(n / PER);
+    cols.forEach((c, k) => { const r = Math.floor(k / PER), j = r % 2 ? PER - 1 - (k % PER) : k % PER; XY.set(c[0], [PX + j * COLW, PT + r * RH]); });
+    Wd = PX * 2 + (Math.min(n, PER) - 1) * COLW + BW; Hd = PT + rowsN * RH + PB;
+  } else {
+    const shown = cols.map(c => c.slice(0, MAXR)), extra = cols.map(c => Math.max(0, c.length - MAXR));
+    const rows = Math.max(1, ...shown.map((c, k) => c.length + (extra[k] ? 1 : 0)));
+    Wd = PX * 2 + (cols.length - 1) * COLW + BW; Hd = PT + rows * RH + PB + (hiddenD ? 30 : 0);
+    shown.forEach((c, k) => { const y0 = PT + (rows - c.length - (extra[k] ? 1 : 0)) * RH / 2; c.forEach((v, r) => XY.set(v, [PX + k * COLW, y0 + r * RH])); if (extra[k]) labels.push(`<g class="gmore"><rect x="${PX + k * COLW}" y="${y0 + c.length * RH}" width="${BW}" height="${BH - 4}" rx="8"/><text x="${PX + k * COLW + 12}" y="${y0 + c.length * RH + 20}">另有 ${extra[k]} 个未显示</text></g>`); });
+    cols = shown;
+  }
+  s = `<svg width="${Wd}" height="${Hd}" viewBox="0 0 ${Wd} ${Hd}" role="img" aria-label="以 ${esc(F.name)} 为中心的调用关系">`;
+  if (!PATHMODE) cols.forEach((c, k) => { const rel = k - focusCol; s += `<text class="colh" x="${PX + k * COLW + 2}" y="22">${rel === 0 ? '中心' : rel < 0 ? `调用方 · ${-rel} 层` : `被调用 · ${rel} 层`}</text>`; });
+  else s += `<text class="colh" x="${PX}" y="22">从 ${esc(F.name)} 到 ${esc(EX.target !== null ? NODES[EX.target].name : '—')} · ${cols.length - 1} 跳</text>`;
+  const elabels = [];
+  LINKS.forEach(e => {
+    if (!XY.has(e.a) || !XY.has(e.b) || !usable(e)) return; if (pathSet && !pathSet.has(e.i)) return;
+    const [x1, y1] = XY.get(e.a), [x2, y2] = XY.get(e.b); let d, lx, ly;
+    if (PATHMODE) { if (Math.abs(y1 - y2) < 2) { const ax = x2 > x1 ? x1 + BW : x1, bx = x2 > x1 ? x2 : x2 + BW, y = y1 + BH / 2; d = `M${ax} ${y}L${bx} ${y}`; lx = (ax + bx) / 2 - 18; ly = y - 16; } else { const x = x1 + BW / 2; d = `M${x} ${y1 + BH}L${x} ${y2}`; lx = x + 6; ly = (y1 + BH + y2) / 2 - 8; } }
+    else { if (x2 <= x1) return; const ax = x1 + BW, ay = y1 + BH / 2, bx = x2, by = y2 + BH / 2, m = (bx - ax) / 2; d = `M${ax} ${ay}C${ax + m} ${ay} ${bx - m} ${by} ${bx} ${by}`; lx = e.b === f ? ax + 4 : bx - 44; ly = (e.b === f ? ay : by) - 19; }
+    s += `<path class="${edgeCls(e)}${pathSet ? ' path' : ''}" d="${d}"/>`;
+    const L = ELBL(e); if (L) elabels.push(`<g class="gel"><rect x="${lx}" y="${ly}" width="40" height="15" rx="4"/><text x="${lx + 20}" y="${ly + 11}" text-anchor="middle">${L}</text></g>`);
+  });
+  s += elabels.join('');
+  XY.forEach(([x, y], v) => {
+    const n = NODES[v], nmx = n.name.length > (PATHMODE ? 21 : 26) ? n.name.slice(0, (PATHMODE ? 20 : 25)) + '…' : n.name;
+    s += `<g class="gn l-${n.lang}${v === f ? ' focus' : ''}" data-i="${v}" tabindex="0" role="button" aria-label="${esc(n.name)}"><title>${esc(n.name)} · ${esc(n.file)}:${n.line}</title><rect x="${x}" y="${y}" width="${BW}" height="${BH}" rx="${n.lang === 'map' ? 3 : 8}"/>
+      <text x="${x + 10}" y="${y + 16}">${esc(nmx)}</text><text class="crate" x="${x + 10}" y="${y + 29}">${esc(COMP[n.comp].split(' · ')[0])} · ${esc(n.base)}:${n.line}</text>${n.ring ? `<circle class="dm" cx="${x + BW - 10}" cy="${y + 11}" r="3.5"/>` : ''}</g>`;
+  });
+  s += labels.join('');
+  if (hiddenD && !PATHMODE) s += `<g class="gfold" tabindex="0" role="button"><rect x="${PX}" y="${Hd - 40}" width="${Wd - PX * 2}" height="26" rx="7"/><text x="${PX + 12}" y="${Hd - 22}">已折叠 ${hiddenD} 个不在配置里的派发候选，点此显示</text></g>`;
+  $('#ex-svg').innerHTML = s + '</svg>';
+  $$('#ex-svg .gn').forEach(g => { const go = () => setExplore({ focus: +g.dataset.i, target: null }); g.addEventListener('click', go); g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } }); });
+  $$('#ex-svg .gfold').forEach(g => g.addEventListener('click', () => setExplore({ cand: true })));
+  // card
+  const nB = [...IN[f], ...OUT[f]].filter(e => boundary(e) || e.k === 11).length;
+  const rq = RELQ(F), doc = cleanDoc(F.doc);
+  $('#ex-card').innerHTML = `<div><div class="nm">${esc(F.name)}</div><div class="loc">${COMP[F.comp]} · ${esc(F.file)}:${F.line}</div></div><pre class="sig">${esc(F.sig)}</pre>
+    <div class="kv" style="grid-template-columns:repeat(3,minmax(0,1fr))"><div><b>${IN[f].length}</b><span>调用方</span></div><div><b>${OUT[f].length}</b><span>被调用 / 读写</span></div><div><b>${nB}</b><span>跨边界</span></div></div>
+    ${F.plugin ? `<p class="fact2">配置 ID <code>${esc(F.plugin)}</code>${LINKS.some(e => e.b === f && e.k === 10) ? '，在 config.toml:196 的创建流程里' : '，不在创建流程的配置里'}</p>` : ''}
+    ${doc ? `<div class="docq"><div><span class="au au-auth"><svg viewBox="0 0 26 8"><line x1="1" y1="4" x2="25" y2="4"/></svg>作者陈述</span></div><span class="en-doc">${esc(doc)}</span></div>` : '<p class="small muted">定义上方没有注释。</p>'}
+    ${rq !== undefined ? `<a class="btn sm" href="#intent" data-iq="${rq}">相关的设计问题 →</a>` : ''}<div class="idl"><span>实体 ID</span><span>${F.id}</span></div>`;
+  const iq = $('[data-iq]', $('#ex-card')); if (iq) iq.addEventListener('click', () => { IT.q = +iq.dataset.iq; renderIntent(); });
+  // terminal
+  const J = o => JSON.stringify(o).replace(/"([^"]+)":/g, '<span class="k">"$1"</span>:').replace(/:"([^"]*)"/g, ':<span class="s">"$1"</span>').replace(/,(?=<span class="k">)/g, ', ');
+  const item = (e, dir) => { const o = NODES[dir === 'out' ? e.b : e.a], L = ELBL(e); return `  <span class="d">${(NODES[e.a].base + ':' + e.site).padEnd(26)}</span>${esc(o.name)}${L ? `  <span class="${boundary(e) ? 'ok' : 'd'}">${L}${boundary(e) ? ' · RuleDerived' : ''}</span>` : ''}`; };
+  const listing = (es, dir) => es.slice(0, 10).map(e => item(e, dir)).join('\n') + (es.length > 10 ? `\n  <span class="d">… 另有 ${es.length - 10} 项</span>` : '');
+  const lines = []; let total = 0;
+  if (PATHMODE) {
+    const m = 30 + hash(F.name) % 30; total = m; const q = { operation: 'path', subject: F.name, target: EX.target !== null ? NODES[EX.target].name : '' }; if (EX.cand) q.include_candidates = true;
+    lines.push(`<span class="p">→</span> ${J(q)}`);
+    lines.push(EX.target === null ? '<span class="ok">←</span> 没有可达路径' : `<span class="ok">←</span> ${cols.length - 1} 跳 · ${m} ms\n` + cols.slice(1).map((c, k) => { const e = LINKS.find(x => x.a === cols[k][0] && x.b === c[0] && usable(x)); return `  <span class="d">${(NODES[e.a].base + ':' + e.site).padEnd(26)}</span>${esc(NODES[c[0]].name)}${ELBL(e) ? `  <span class="${boundary(e) ? 'ok' : 'd'}">${ELBL(e)}</span>` : ''}`; }).join('\n'));
+  } else {
+    const add = dir => { const m = 14 + (hash(F.name + dir) % 18) + (EX.depth - 1) * 15; total += m; const es = (dir === 'out' ? OUT[f] : IN[f]).filter(usable);
+      const q = EX.depth > 1 ? { operation: 'trace', subject: F.name, direction: dir === 'out' ? 'outbound' : 'inbound', depth: EX.depth } : { operation: dir === 'out' ? 'callees' : 'callers', subject: F.name }; if (EX.cand) q.include_candidates = true;
+      const hid = !EX.cand ? (dir === 'out' ? OUT[f] : IN[f]).filter(e => e.k === 1).length : 0;
+      lines.push((lines.length ? '\n' : '') + `<span class="p">→</span> ${J(q)}`);
+      lines.push(`<span class="ok">←</span> ${EX.depth > 1 ? (dir === 'out' ? cols.slice(focusCol + 1) : cols.slice(0, focusCol)).flat().length + ' 个节点' : es.length + ' 项'} · ${m} ms${hid ? `  <span class="d">另有 ${hid} 个派发候选已折叠</span>` : ''}` + (EX.depth === 1 && es.length ? '\n' + listing(es, dir) : '')); };
+    if (EX.mode !== 'out') add('in'); if (EX.mode !== 'in') add('out');
+  }
+  $('#ex-term').innerHTML = lines.join('\n'); $('#ex-ms').textContent = `${total} ms（示意）`;
+  const es = PATHMODE ? LINKS.filter(e => pathSet && pathSet.has(e.i)) : (EX.mode === 'in' ? IN[f] : OUT[f]).filter(usable);
+  const raw = { revision: '9b31f0de52c4…', subject: { entity: F.id, name: F.name, file: F.file, line: F.line }, items: es.slice(0, 5).map(e => { const o = NODES[EX.mode === 'in' && !PATHMODE ? e.a : e.b];
+    const rel = { 0: 'Calls', 1: 'DispatchCandidate', 10: 'Dispatches', 11: 'Dispatches', 8: 'HttpRoute', 9: 'GrpcCall', 4: 'ReadsMap', 5: 'WritesMap' }[e.k];
+    const it = { entity: o.id, name: o.name, relation: rel, site: { file: NODES[e.a].file, line: e.site }, provenance: { authority: boundary(e) ? 'RuleDerived' : 'SemanticResolution', provider: NODES[e.a].lang === 'rust' ? 'rust-hir' : NODES[e.a].lang === 'go' ? 'go-types' : 'clang' } };
+    const ev = EVID(e); if (ev) it.evidence = ev; return it; }) };
+  if (es.length > 5) raw.items.push(`… 另有 ${es.length - 5} 项`);
+  if (hiddenD && !PATHMODE) raw.hidden = { immediate_dispatch_or_implementation_candidates: hiddenD };
+  $('#ex-json').innerHTML = esc(JSON.stringify(raw, null, 2)).replace(/&quot;([^&]+)&quot;:/g, '<span class="k">"$1"</span>:');
+}
+
+/* ================= intent ================= */
+const AU = {
+  sem: { en: 'SemanticResolution', zh: '语义解析', d: '编译器解析出的定义、类型和调用，可以直接当事实用。' },
+  run: { en: 'RuntimeObservation', zh: '运行观测', d: '测试或真实运行时采到的结果。这三个问题都还没有。' },
+  rule: { en: 'RuleDerived', zh: '规则推导', d: '按固定规则算出的结论，比如按路由、gRPC 方法、配置 ID 或表名对齐两边，可以复现。' },
+  auth: { en: 'AuthorStatement', zh: '作者陈述', d: '注释和配置里作者写下的原话。' },
+  hyp: { en: 'Hypothesis', zh: '推测', d: '读完上面几类依据后写下的判断，要经人确认。默认折叠。' },
+};
+const chip = (k, en) => `<span class="au au-${k}"><svg viewBox="0 0 26 8"><line x1="1" y1="4" x2="25" y2="4"/></svg>${AU[k].zh}${en ? ` <span class="en">${AU[k].en}</span>` : ''}</span>`;
+const WARN = '<svg viewBox="0 0 12 12" class="i-warn"><circle cx="6" cy="6" r="5.5" fill="currentColor"/><path d="M6 3.2v3.4M6 8.4v.2" stroke="#111" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const QS = [
+  { q: 'Cubelet 创建沙箱时跑哪些步骤，顺序由谁定？', sub: '配置驱动 · 接口派发', fns: ['Engine.parallelRunSteps', 'Engine.run', 'delegateNetworkManager.Create', 'service.Create'],
+    sum: '顺序写在配置文件里，不在代码里。config.toml 第 196 行把创建流程分成 4 组：先生成 ID、处理快照，再并行准备镜像、卷、存储、网络等，然后是 cgroup，最后才启动 cubebox。每一步都是按 ID 注册的插件，代码里只有一句接口调用 flow.Create，IDE 跳过去只能停在接口上。',
+    c: [
+      ['auth', 'Cubelet/config/config.toml:196', '创建流程的步骤和分组。', 'actions = [["createid", "appsnapshot"],["images","volume","storage","network","netfile", "cube-sandbox-store"],["cgroup"],["cubebox"]]'],
+      ['sem', 'Cubelet/plugins/workflow/engine.go:315', '步骤是接口 <code>Flow</code> 的实现；<code>parallelRunSteps</code> 在第 507 行调用 <code>flow.Create</code>。'],
+      ['rule', '实现统计 · 按 ID 对应', '<code>Flow.Create</code> 有 12 个实现。配置选中其中 10 个，ID 与 <code>pkg/constants/const.go</code> 里的常量一一对上（如 <code>"network"</code> 在 :45）；<code>cleanup</code> 和 <code>shimlog</code> 不参与创建。'],
+      ['sem', 'Cubelet/plugins/workflow/engine.go:415', '<code>run</code> 按组依次执行（:415–416）；组内插件由 <code>parallelRunSteps</code> 用 errgroup 并行跑（:478）。'],
+      ['sem', 'Cubelet/plugins/workflow/engine.go:422', '某一组失败且请求允许 failover 时，异步调用 <code>Engine.failover</code>（:424–425）。'],
+      ['hyp', '读配置和代码得出', '启动虚拟机的 cubebox 排在最后一组，前面几组为它准备好镜像、存储和网络。调整顺序之前，需要先确认插件之间的依赖。', null, '待确认'],
+    ] },
+  { q: '网络建到一半，进程崩了怎么办？', sub: '崩溃恢复 · 先落盘再动内核', fns: ['NetworkController.createState', 'NetworkController.EnsureNetwork', 'local.Create', 'NetworkController.cleanupCreateFailure'],
+    sum: 'createState 在动内核状态之前，先把“正在创建”的意图落盘；然后依次写端口映射、注册 CubeVS、配额和出口策略，任何一步失败都走 cleanupCreateFailure；全部完成后再落盘“成功”，这是不可回退的点。进程中途崩溃，重启后的恢复逻辑可以按落盘记录把半成品清掉。',
+    c: [
+      ['auth', 'Cubelet/network/runtime/controller.go:657', '先落盘，再动内核。', 'Persist the create intent before programming kernel-visible state. After\nthis rename, startup recovery has enough information to finish cleanup if\nthe process exits mid-create.'],
+      ['sem', 'Cubelet/network/runtime/controller.go:660', '<code>CommitCreating</code>（:660）在 <code>applyPortMappings</code>（:693）、<code>registerCubeVSTap</code>（:699）、<code>EnsureQuotaEndpoint</code>（:703）、<code>pushEgressForState</code>（:709）之前，每一步失败都调用 <code>cleanupCreateFailure</code>。'],
+      ['auth', 'Cubelet/network/runtime/controller.go:715', '成功的那一刻不可回退。', 'Success is the durable point of no return for recovery: a restarted runtime\ntreats this sandbox as active unless ReleaseNetwork later marks it deleting.'],
+      ['auth', 'Cubelet/network/plugin_tap.go:256', '回滚不受调用方取消的影响。', 'EnsureNetwork may own TAP, CubeVS and CubeEgress state even when it reports\nan error after the durable success point. Roll back with a detached bounded\ncontext so parent cancellation does not leave host resources behind.'],
+      ['rule', '跨服务对应', '这一步由 Cubelet 的插件 <code>network</code>（config.toml:196）触发，经接口 <code>NetworkRuntime</code>（network_runtime.go:27）进入 <code>NetworkController.EnsureNetwork</code>。'],
+      ['hyp', '读代码得出', '回滚用的是独立的 15 秒超时（plugin_tap.go:259）。清理超过 15 秒时，剩下的资源要等启动恢复来处理。', null, '待确认'],
+    ] },
+  { q: 'allow_internet_access=false 在哪一层生效？', sub: '一个参数穿过 4 个服务', fns: ['build_cube_network_config', 'mergeCubeNetworkConfigs', 'cubeVSTapRegistration', 'deny_out'],
+    sum: 'Rust 只校验、不补默认值；CubeMaster 把请求和模板的网络配置合并，请求里设置的值优先；Cubelet 在两边都没设置时默认允许上网；CubeVS 把 false 翻译成 deny_out 里的一条 0.0.0.0/0；最后由 eBPF 的 classify_egress_flow 在每个新连接上查这张表。',
+    c: [
+      ['sem', 'CubeAPI/src/services/sandboxes.rs:196', '<code>build_cube_network_config</code> 把 <code>allow_internet_access == Some(false)</code> 交给 <code>validate_allow_out_domains_require_deny_all</code>（:1196）校验，不补默认值。'],
+      ['sem', 'CubeMaster/…/cube/cubeboxutil.go:284', '<code>mergeCubeNetworkConfigs</code>：请求设置了 <code>AllowInternetAccess</code> 就覆盖模板（:284–287），请求没有网络配置时整份沿用模板（:279–280）。'],
+      ['rule', 'gRPC 字段对应', '合并后的配置经 proto 字段 <code>cube_network_config</code>（cubebox.proto:560）传给 Cubelet。'],
+      ['sem', 'Cubelet/network/runtime/policy_builder.go:169', '<code>cubeVSTapRegistration</code>：配置为空，或没有设置这一项时，默认 <code>true</code>（:171、:180）。'],
+      ['auth', 'CubeNet/cubevs/netpolicy.go:1397', 'CubeVS 的翻译规则。', 'AllowInternetAccess=false: DenyOut is set to "0.0.0.0/0" (deny all).'],
+      ['rule', '按表名对应', '<code>buildNetPolicyPlan</code>（netpolicy.go:699–700）生成的条目写进 pin 名为 <code>deny_out</code> 的表；eBPF 的 <code>classify_egress_flow</code> 在 session.h:232 查同一张表。'],
+      ['hyp', '读代码得出', '模板设为 false、请求不设置时，沙箱会继承模板的“禁止上网”。调用方可能以为不传就是默认允许。', null, '待确认'],
+    ] },
+];
+const IT = { q: 0, show: { sem: true, run: true, rule: true, auth: true, hyp: false } };
+function renderIntent() {
+  $('#it-qs').innerHTML = QS.map((x, k) => `<button type="button" data-k="${k}" aria-pressed="${k === IT.q}">${esc(x.q)}<small>${esc(x.sub)}</small></button>`).join('');
+  $('#it-leg').innerHTML = Object.keys(AU).map(k => `<li>${chip(k, true)}<label class="sw" for="lg-${k}"><input type="checkbox" id="lg-${k}" data-k="${k}"${IT.show[k] ? ' checked' : ''}><span class="sr">显示${AU[k].zh}</span></label><p>${AU[k].d}</p></li>`).join('');
+  const Q = QS[IT.q], vis = Q.c.filter(c => IT.show[c[0]]), hid = Q.c.filter(c => !IT.show[c[0]]), counts = {}; Q.c.forEach(c => counts[c[0]] = (counts[c[0]] || 0) + 1);
+  $('#it-ans').innerHTML = `<div style="display:grid;gap:10px"><p class="eyebrow" style="margin:0">问题 ${IT.q + 1} / ${QS.length}</p><h3 style="font-size:22px">${esc(Q.q)}</h3></div><p class="sum">${esc(Q.sum)}</p>
+    <div class="meta"><span>依据 ${Q.c.length} 条</span>${Object.keys(AU).filter(k => counts[k]).map(k => `<span>${AU[k].zh} ${counts[k]}</span>`).join('')}<span>运行观测 0</span></div>
+    <ol class="claims">${vis.map(c => `<li class="claim"><div class="claim-h">${chip(c[0])}<span class="loc">${esc(c[1])}</span>${c[4] ? `<span class="pill">${WARN}${c[4]}</span>` : ''}</div><p>${c[2]}</p>${c[3] ? `<pre lang="en">${esc(c[3])}</pre>` : ''}</li>`).join('')}</ol>
+    ${hid.length ? `<div class="hidden-note"><span>已折叠 ${hid.length} 条：${[...new Set(hid.map(c => AU[c[0]].zh))].join('、')}</span><button type="button" data-show="${[...new Set(hid.map(c => c[0]))].join(',')}">展开</button></div>` : ''}
+    <div style="display:grid;gap:8px"><span class="small muted">涉及的函数和表</span><div class="fnchips">${Q.fns.map(k => `<button type="button" data-f="${k}">${esc(BY[k].name)}</button>`).join('')}</div></div>`;
+}
+$('#it-qs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { IT.q = +b.dataset.k; renderIntent(); } });
+$('#it-leg').addEventListener('change', e => { const k = e.target.dataset.k; if (k) { IT.show[k] = e.target.checked; renderIntent(); } });
+$('#it-ans').addEventListener('click', e => {
+  const s = e.target.closest('[data-show]'); if (s) { s.dataset.show.split(',').forEach(k => IT.show[k] = true); renderIntent(); return; }
+  const f = e.target.closest('[data-f]'); if (f) { setExplore({ focus: BY[f.dataset.f].i, mode: 'both', target: null }); location.hash = 'explore'; }
+});
+
+/* ================= mcp ================= */
+const CHAT = [
+  { w: 'user', h: '创建沙箱时，网络是在哪一步配好的？中途失败会留下垃圾吗？' },
+  { w: 'tool', op: { operation: 'path', subject: 'create_sandbox', target: 'AddTAPDevice' }, ms: 44, sum: '19 跳，跨 3 处边界（节选）',
+    l: [['cubemaster/mod.rs:64', 'createSandboxGinHandler        HTTP · RuleDerived', 1], ['sandbox_run.go:293', 'cubelet.Create'], ['actions.go:56', 'service.Create                 gRPC · RuleDerived', 1],
+        ['engine.go:507', 'delegateNetworkManager.Create  配置 · RuleDerived', 1], ['plugin_tap.go:205', 'NetworkController.EnsureNetwork 接口'], ['controller.go:699', 'registerCubeVSTap'], ['cubevs_adapter.go:123', 'AddTAPDevice                   接口']] },
+  { w: 'tool', op: { operation: 'callees', subject: 'NetworkController.createState' }, ms: 26, sum: '按调用行号排列（节选）',
+    l: [['controller.go:620', 'acquireTap'], ['controller.go:660', 'store.CommitCreating', 1], ['controller.go:693', 'applyPortMappings'], ['controller.go:699', 'registerCubeVSTap'], ['controller.go:703', 'cubevs.EnsureQuotaEndpoint'], ['controller.go:709', 'pushEgressForState'], ['controller.go:720', 'store.CommitSuccess', 1]] },
+  { w: 'tool', op: { operation: 'source', subject: 'NetworkController.createState', line: 657, max_lines: 3 }, ms: 14, sum: 'Cubelet/network/runtime/controller.go:657-659',
+    l: [[':657', '// Persist the create intent before programming kernel-visible state. After'], [':658', '// this rename, startup recovery has enough information to finish cleanup if'], [':659', '// the process exits mid-create.']] },
+  { w: 'agent', h: `网络在 Cubelet 的 <code>network</code> 插件里配置。请求经 HTTP 进入 CubeMaster，再经 gRPC 到 Cubelet，由 <code>config.toml</code> 选中的插件进入 <code>NetworkController.createState</code>${chip('rule')}。<br>它先在第 660 行把“正在创建”落盘，再依次写端口映射、注册 CubeVS、配额和出口策略，每一步失败都会清理，第 720 行落盘“成功”${chip('sem')}。作者注释说明，进程中途退出时，启动恢复能根据落盘记录完成清理${chip('auth')}。` },
+];
+function chatHTML(m) {
+  if (m.w === 'user') return `<div class="msg user"><div class="who">你</div>${esc(m.h)}</div>`;
+  if (m.w === 'agent') return `<div class="msg agent"><div class="who">AGENT</div>${m.h}</div>`;
+  const J = JSON.stringify(m.op).replace(/"([^"]+)":/g, '<span class="k">"$1"</span>:').replace(/:"([^"]*)"/g, ':<span class="s">"$1"</span>').replace(/,/g, ', ');
+  return `<div class="msg tool"><div class="term"><div class="term-h"><span class="sp">query_codequest</span><span>${m.ms} ms</span></div><pre><span class="p">→</span> ${J}
+<span class="ok">←</span> ${esc(m.sum)}
+${m.l.map(x => `  <span class="d">${esc(x[0].padEnd(22))}</span> ${x[2] ? '<span class="b">' + esc(x[1]) + '</span>' : esc(x[1])}`).join('\n')}</pre></div></div>`;
+}
+const msgs = $('#msgs'); msgs.innerHTML = CHAT.map(chatHTML).join('');
+let chatT = 0;
+$('#chat-replay').addEventListener('click', () => { clearTimeout(chatT); msgs.innerHTML = ''; let k = 0; const step = () => { if (k >= CHAT.length) return; msgs.insertAdjacentHTML('beforeend', chatHTML(CHAT[k]).replace('class="msg', 'class="msg new')); k++; chatT = setTimeout(step, RM ? 0 : (CHAT[k - 1].w === 'tool' ? 700 : 900)); }; step(); });
+(function perf() {
+  const DD = [['source', 15, 31], ['details', 18, 34], ['docs', 21, 40], ['callers', 24, 45], ['callees', 26, 48], ['search', 41, 88], ['trace · 3 层', 58, 112], ['path · 跨服务', 64, 130]];
+  const W = 560, LW = 104, RW = 52, BH = 12, RH = 28, top = 8, max = 70, x = v => LW + v / max * (W - LW - RW);
+  let s = `<svg viewBox="0 0 ${W} ${top + DD.length * RH + 26}" role="img" aria-label="常用查询 p50 延迟（示意数据）">`;
+  [0, 20, 40, 60].forEach(t => { s += `<line class="gl" x1="${x(t)}" x2="${x(t)}" y1="${top - 4}" y2="${top + DD.length * RH}"/><text class="gt" x="${x(t)}" y="${top + DD.length * RH + 16}" text-anchor="middle">${t} ms</text>`; });
+  DD.forEach(([n, p50, p95], k) => { const y = top + k * RH + (RH - BH) / 2, w = x(p50) - LW, r = 4;
+    s += `<g data-t="${n} · p50 ${p50} ms · p95 ${p95} ms"><rect class="hit" x="0" y="${top + k * RH}" width="${W}" height="${RH}"/><text class="bl" x="${LW - 10}" y="${y + BH - 2}" text-anchor="end">${n}</text><path class="bar" d="M${LW} ${y}h${w - r}a${r} ${r} 0 0 1 ${r} ${r}v${BH - 2 * r}a${r} ${r} 0 0 1 -${r} ${r}h-${w - r}z"/><text class="bv" x="${x(p50) + 8}" y="${y + BH - 2}">${p50} ms</text></g>`; });
+  const host = $('#perf'); host.innerHTML = s + '</svg><p class="small muted" style="margin-top:8px">示意数据，没有实际测量。悬停可看 p95。</p>';
+  const tipEl = $('#ptip');
+  host.addEventListener('pointermove', e => { const g = e.target.closest('g[data-t]'); if (!g) { tipEl.hidden = true; return; } tipEl.textContent = g.dataset.t; tipEl.hidden = false; tipEl.style.left = Math.min(innerWidth - tipEl.offsetWidth - 8, e.clientX + 12) + 'px'; tipEl.style.top = (e.clientY - 34) + 'px'; });
+  host.addEventListener('pointerleave', () => tipEl.hidden = true);
+})();
+
+renderIntent();
+try { stage = makeStage(); } catch (err) { console.error(err); $('#nogl').hidden = false; }
+show(location.hash.slice(1) || 'overview');
+})();
+</script>

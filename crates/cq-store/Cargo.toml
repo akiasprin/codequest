@@ -1,0 +1,16 @@
+[package]
+name = "cq-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+csv = "1"
+tempfile.workspace = true
+cq-core.workspace = true
+cq-capture-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+lbug.workspace = true
+libc.workspace = true
+sha2.workspace = true
+[dev-dependencies]

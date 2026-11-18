@@ -1,0 +1,13 @@
+[package]
+name = "cq-rustc-recorder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+cq-capture-protocol.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+[dev-dependencies]
+cq-core.workspace = true
+cq-store.workspace = true
+tempfile.workspace = true

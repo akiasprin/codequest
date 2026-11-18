@@ -1,0 +1,414 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "1bf9486b6afda13b6a78d309fef910cffaab1f9d",
+  "scope": [
+    "test_rust_hir_snapshot_adapter_fences_generations.ts",
+    "test_rust_hir_client_restores_retries_and_fails_closed.ts",
+    "test_cpp_clang_snapshot_adapter_and_client_are_atomic.ts",
+    "test_semantic_identity_edge_cases_stay_covered.ts"
+  ],
+  "notice": "只有明确列出的标签有核对记录；其余逐断言保留 pending。contract_verified 是转换后的共同契约，不是原始 native producer 对等。每项仍须匹配本轮 gate 中的实际通过测试。",
+  "rows": [
+    {
+      "label": "a full HIR response becomes one validated graph generation",
+      "state": "contract_verified",
+      "tests": [
+        "full_noop_delta_reload_and_isolated_checkpoint_have_separate_contracts"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a producer delta carries a complete reconstruction for isolated validation",
+      "state": "contract_verified",
+      "tests": [
+        "full_noop_delta_reload_and_isolated_checkpoint_have_separate_contracts"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a producer delta advances only from its exact raw base",
+      "state": "contract_verified",
+      "tests": [
+        "full_noop_delta_reload_and_isolated_checkpoint_have_separate_contracts"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a full response in another universe is a reload",
+      "state": "contract_verified",
+      "tests": [
+        "full_noop_delta_reload_and_isolated_checkpoint_have_separate_contracts"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a producer no-op preserves the exact published object",
+      "state": "native_verified",
+      "tests": [
+        "CheckpointLifecycle.test_native_noop_delta_delete_and_corrupt_restart_recovery"
+      ],
+      "boundary": "公开 refresh 保留完全相同的 revision；进程 restart 后先重验本地工具与冻结输入。"
+    },
+    {
+      "label": "the resident Rust client publishes and reuses one validated generation",
+      "state": "native_verified",
+      "tests": [
+        "CheckpointLifecycle.test_native_noop_delta_delete_and_corrupt_restart_recovery"
+      ],
+      "boundary": "公开 refresh 保留完全相同的 revision；进程 restart 后先重验本地工具与冻结输入。"
+    },
+    {
+      "label": "producer delta frames cannot validate against an empty store",
+      "state": "contract_verified",
+      "tests": [
+        "full_noop_delta_reload_and_isolated_checkpoint_have_separate_contracts"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "an unknown producer protocol is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_unknown_protocol"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "an unsupported native protocol is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_unknown_protocol"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a malformed generation envelope is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_zero_sequence"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a malformed native envelope is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_zero_sequence"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a malformed universe is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_malformed_universe"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a stale producer base is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_stale_base"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a Clang delta must name the exact resident base",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_stale_base"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a generation cannot lose its base",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_unchanged_generation_without_base"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a non-canonical manifest is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_duplicate_manifest"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a non-canonical native manifest is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_duplicate_manifest"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a non-canonical delete list is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_duplicate_delete"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a missing delete is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_missing_delete"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a Clang delta cannot delete an absent shard",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_missing_delete"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a shard delta cannot collide with a delete",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_upsert_delete_collision"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "one delta cannot delete and upsert the same shard",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_upsert_delete_collision"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a Clang delta cannot delete and replace one shard",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_upsert_delete_collision"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a raw manifest mismatch is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_mismatched_shard_digest"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a raw generation mismatch is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_mismatched_generation_digest"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a mismatched native generation is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_mismatched_generation_digest"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a raw shard key must match target and source",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_source_key_mismatch"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a malformed native shard is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_source_key_mismatch"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "an empty raw shard key is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_empty_shard_key"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a mismatched native shard digest is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_mismatched_shard_digest"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "native shards must exactly match their manifest",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_mismatched_shard_digest"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "an edge endpoint absent from every raw shard is refused",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_dangling_edge_after_resigning"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a delta that loses an entity its survivors name asks for a whole generation",
+      "state": "contract_verified",
+      "tests": [
+        "cross_shard_deletion_cannot_leave_an_edge_target_dangling"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "one native node identity cannot describe two declarations",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_same_id_conflicting_declarations_after_resigning"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "duplicate semantic ids are rejected in memory",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_duplicate_semantic_entities_after_resigning"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a strict duplicate node remains a provider defect",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_duplicate_semantic_entities_after_resigning"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "an absent semantic edge source fails closed",
+      "state": "contract_verified",
+      "tests": [
+        "rejects_dangling_edge_source_after_resigning"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "malformed raw node flags are refused",
+      "state": "contract_verified",
+      "tests": [
+        "semantic::provider_contract::tests::rejects_non_boolean_symbol_flags",
+        "semantic::provider_contract::tests::rejects_non_boolean_exported_flag"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "malformed raw exported flags are refused",
+      "state": "contract_verified",
+      "tests": [
+        "semantic::provider_contract::tests::rejects_non_boolean_symbol_flags",
+        "semantic::provider_contract::tests::rejects_non_boolean_exported_flag"
+      ],
+      "boundary": "对应共同语义契约；不声称采用相同 wire 格式或缓存机制。"
+    },
+    {
+      "label": "a source URI that cannot canonicalize fails the common protocol closed",
+      "state": "different",
+      "tests": [],
+      "boundary": "尚无相同 URI 协议；CodeQuest 以 NativeValue 原始路径承载，不把现有范围测试算作 URI 等价。"
+    },
+    {
+      "label": "an unsupported source URI cannot impersonate a project-local file",
+      "state": "different",
+      "tests": [],
+      "boundary": "尚无相同 URI 协议；CodeQuest 以 NativeValue 原始路径承载，不把现有范围测试算作 URI 等价。"
+    },
+    {
+      "label": "an unknown raw node kind is refused",
+      "state": "different",
+      "tests": [
+        "semantic::provider_contract::tests::accepts_native_zero_ids_external_symbols_and_unknown_kinds"
+      ],
+      "boundary": "CodeQuest 保留未知种类为 opaque 并披露能力缺口；与 CKG 严格拒绝策略不同。"
+    },
+    {
+      "label": "the Rust LSP process closes through its handshake",
+      "state": "different",
+      "tests": [],
+      "boundary": "CodeQuest 使用自有 JSONL 会话而非 LSP；取消或超时终止独占进程组，EOF 结束正常会话。"
+    },
+    {
+      "label": "the Rust client forwards initialization options and answers configuration requests without items",
+      "state": "different",
+      "tests": [],
+      "boundary": "CodeQuest 使用自有 JSONL 会话而非 LSP；取消或超时终止独占进程组，EOF 结束正常会话。"
+    },
+    {
+      "label": "consumer rejection is atomic",
+      "state": "contract_verified",
+      "tests": [
+        "analyst::rust::session::tests::malformed_stale_wrong_version_and_failed_replies_fail_closed",
+        "conflicting_relation_identity_survives_sealing_and_prevents_publication"
+      ],
+      "boundary": "非法回复不重试语义请求；校验失败不推进 HEAD。"
+    },
+    {
+      "label": "a rejected producer response leaves no resident graph",
+      "state": "contract_verified",
+      "tests": [
+        "analyst::rust::session::tests::malformed_stale_wrong_version_and_failed_replies_fail_closed",
+        "conflicting_relation_identity_survives_sealing_and_prevents_publication"
+      ],
+      "boundary": "非法回复不重试语义请求；校验失败不推进 HEAD。"
+    },
+    {
+      "label": "a generation-scoped identity without a generation key is refused",
+      "state": "pending",
+      "tests": [],
+      "boundary": "本系统使用不同的 cqg1 句柄编码，尚无针对伪造/空代内句柄的独立负例。"
+    },
+    {
+      "label": "a same-universe native delta retains unchanged graph shards",
+      "state": "native_verified",
+      "tests": [
+        "StableHandles.test_cpp_handle_survives_body_edit_and_native_unit_cache_reuse",
+        "RustResidentLifecycle.test_hir_database_reuses_body_changes_and_reloads_added_deleted_files"
+      ],
+      "boundary": "实际编译后，公开 generation 只替换改变的源码分片。"
+    },
+    {
+      "label": "a saved Rust checkpoint skips invalid coordinates, empty files, and malformed commit frames",
+      "state": "pending",
+      "tests": [],
+      "boundary": "只验证了损坏 checkpoint 后从不可变主快照取得请求并完整重建；未实现多代缓存挑选策略。"
+    },
+    {
+      "label": "conflicting generic facts become distinct generation-scoped identities",
+      "state": "contract_verified",
+      "tests": [
+        "conflicting_monikers_are_fenced_but_identical_observations_keep_their_handle"
+      ],
+      "boundary": "同一原生键下声明事实冲突时保留分离的代内身份；不按名称或哈希顺序合并。"
+    },
+    {
+      "label": "same-coordinate conflicting facts receive distinct generation identities",
+      "state": "contract_verified",
+      "tests": [
+        "conflicting_monikers_are_fenced_but_identical_observations_keep_their_handle"
+      ],
+      "boundary": "同一原生键下声明事实冲突时保留分离的代内身份；不按名称或哈希顺序合并。"
+    }
+  ]
+}

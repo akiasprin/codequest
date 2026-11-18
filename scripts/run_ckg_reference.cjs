@@ -1,0 +1,18 @@
+// Run unchanged pinned upstream assertions with explicit optional audit dependencies.
+// Usage: node run_ckg_reference.cjs CKG_CHECKOUT NODE_MODULES OUTPUT_JSON WORK_DIR
+const fs=require('fs'),path=require('path'),cp=require('child_process');
+if(process.argv.length!==6)throw Error('CKG_CHECKOUT NODE_MODULES OUTPUT_JSON WORK_DIR required');
+const ts=require(path.resolve(process.argv[3],'typescript'));
+if(ts.version!=='5.9.3')throw Error('audit runner requires TypeScript 5.9.3');
+const src=path.resolve(process.argv[2]), dest=path.resolve(process.argv[5]);fs.mkdirSync(dest,{recursive:true});
+const git=(...x)=>cp.execFileSync('git',['-C',src,...x],{maxBuffer:32*1024*1024});
+if(git('rev-parse','HEAD').toString().trim()!=='1bf9486b6afda13b6a78d309fef910cffaab1f9d')throw Error('unexpected upstream revision');
+fs.writeFileSync(path.join(dest,'pnpm-workspace.yaml'),'packages: []\n');fs.writeFileSync(path.join(dest,'package.json'),'{"type":"module"}');
+fs.mkdirSync(path.join(dest,'packages'),{recursive:true});for(const p of ['graph','graph-sitter']){const target=path.join(dest,'packages',p);if(!fs.existsSync(target))fs.symlinkSync(path.join(src,'packages',p),target);}
+fs.mkdirSync(path.join(dest,'node_modules','@samchon'),{recursive:true});for(const p of ['graph','graph-sitter']){const target=path.join(dest,'node_modules','@samchon',p);if(!fs.existsSync(target))fs.symlinkSync(path.join(src,'packages',p),target);}
+const names=['test_rust_lsp_preserves_impl_ownership_and_visibility','test_cpp_templates_operators_and_qualified_namespaces','test_cpp_explicit_final_and_out_of_line_types','test_cpp_clang_snapshot_adapter_and_client_are_atomic','test_rust_hir_snapshot_adapter_fences_generations','test_trace_dispatches_to_the_implementation','test_compilation_database_lifecycle_tracks_project_units','test_build_graph_preserves_its_consumed_source_snapshot','test_graph_dump_parser_closes_every_public_trust_boundary'];
+fs.mkdirSync(path.join(dest,'node_modules','@nestia'),{recursive:true});const e2e=path.join(dest,'node_modules','@nestia','e2e');if(!fs.existsSync(e2e))fs.symlinkSync(path.resolve(process.argv[3],'@nestia/e2e'),e2e);
+const extra='tests/experiment/src/compilation-database-lifecycle.mjs';fs.mkdirSync(path.dirname(path.join(dest,extra)),{recursive:true});fs.writeFileSync(path.join(dest,extra),git('show','HEAD:'+extra));
+const files=git('ls-tree','-r','--name-only','HEAD','tests/test-graph/src').toString().trim().split('\n');
+for(const f of files){if(!f.includes('/internal/')&&!names.some(n=>f.endsWith(n+'.ts')))continue;const out=path.join(dest,f.replace(/\.ts$/,'.js'));fs.mkdirSync(path.dirname(out),{recursive:true});let body=git('show','HEAD:'+f).toString();if(f.endsWith('.ts'))body=body.replace(/(from\s+["'])(\.[^"']+)(["'])/g,(m,a,b,c)=>path.extname(b)?m:a+b+'.js'+c);if(f.endsWith('.ts'))body=ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;fs.writeFileSync(out,body);}
+(async()=>{const results=[];for(const name of names){try{const m=await import('file://'+path.join(dest,'tests/test-graph/src/features',name+'.js'));await m[name]();results.push({name,state:'passed'});}catch(e){results.push({name,state:'failed',error:String(e.stack)});}console.log(name,results.at(-1).state);}fs.writeFileSync(process.argv[4],JSON.stringify({upstream_commit:'1bf9486b6afda13b6a78d309fef910cffaab1f9d',typescript:ts.version,notice:'Original upstream assertions transpiled with TypeScript 5.9.3 against pinned built upstream package; simulated fixtures are not native end-to-end evidence.',results},null,2));process.exitCode=results.some(x=>x.state==='failed')?1:0;})();

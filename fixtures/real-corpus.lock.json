@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "repositories": [
+    {
+      "name": "ripgrep",
+      "url": "https://github.com/BurntSushi/ripgrep.git",
+      "commit": "e89fff89ac9af12e8d4ce9d5fd07beb408ca730f",
+      "license": "MIT OR Unlicense",
+      "language": "rust",
+      "build_args": ["check", "-p", "grep-printer", "--lib", "--offline"],
+      "scope": "Real grep-printer build and its compiled dependencies; not all ripgrep targets"
+    },
+    {
+      "name": "gin",
+      "url": "https://github.com/samchon/graph-benchmark-gin.git",
+      "commit": "34dac209ffb6ef85cc78c5d217bbb7ad001d68fd",
+      "license": "MIT",
+      "language": "go",
+      "build_args": ["build", "-a", "./..."],
+      "scope": "Real packages selected by Go build; excludes test-only declarations",
+      "pin_source": "compiler-graph 1bf9486 tests/benchmark/graph/corpus.mjs"
+    },
+    {
+      "name": "leveldb",
+      "url": "https://github.com/samchon/graph-benchmark-leveldb.git",
+      "commit": "7ee830d02b623e8ffe0b95d59a74db1e58da04c5",
+      "license": "BSD-3-Clause",
+      "language": "cpp",
+      "translation_units": ["db/db_impl.cc", "db/version_set.cc", "table/table_builder.cc", "util/status.cc", "util/comparator.cc", "db/c.cc"],
+      "cmake_options": ["-DLEVELDB_BUILD_TESTS=OFF", "-DLEVELDB_BUILD_BENCHMARKS=OFF"],
+      "scope": "Six actual CMake translation units, with project headers and native dependencies; not the full database build",
+      "pin_source": "compiler-graph 1bf9486 tests/benchmark/graph/corpus.mjs"
+    },
+    {
+      "name": "cjson",
+      "url": "https://github.com/DaveGamble/cJSON.git",
+      "commit": "c859b25da02955fef659d658b8f324b5cde87be3",
+      "license": "MIT",
+      "language": "c",
+      "translation_units": ["cJSON.c", "cJSON_Utils.c"],
+      "cmake_options": ["-DENABLE_CJSON_TEST=OFF", "-DENABLE_CJSON_UTILS=ON"],
+      "scope": "Two actual CMake translation units, including parser, linked structure and JSON utility callbacks",
+      "pin_source": "Official v1.7.19 tag, verified by git ls-remote"
+    }
+  ]
+}

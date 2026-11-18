@@ -1,0 +1,8 @@
+[package]
+name = "shared-right"
+version = "0.1.0"
+edition = "2024"
+[lib]
+path = "../shared.rs"
+[features]
+left = []

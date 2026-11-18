@@ -1,0 +1,17 @@
+[package]
+name = "cq-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[[bin]]
+name = "cq"
+path = "src/main.rs"
+[dependencies]
+cq-capture-protocol.workspace = true
+cq-core.workspace = true
+cq-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+[dev-dependencies]
+tempfile.workspace = true

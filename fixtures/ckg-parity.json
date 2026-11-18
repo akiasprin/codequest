@@ -1,0 +1,761 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/samchon/compiler-knowledge-graph",
+    "commit": "1bf9486b6afda13b6a78d309fef910cffaab1f9d",
+    "rust_producer_commit": "2850ecba80311bebd4cdaa9fedc5321533b5b1e7",
+    "cpp_producer_commit": "e33d8f51552a523b5696691738f1ef95f8e3a730"
+  },
+  "notice": "Scenario correspondence is not assertion-by-assertion equivalence or branch coverage. A passed mapped case proves only its explicit positive and negative oracles. Unmapped assertions remain visible in the inventory.",
+  "groups": [
+    {
+      "id": "build",
+      "title": "真实构建、工具链与配置边界",
+      "state": "partial",
+      "patterns": [
+        "compile_database_names",
+        "toolchain_probes",
+        "provider_commands",
+        "provider_registry",
+        "provider_support",
+        "standard_providers",
+        "requested_languages",
+        "language_registry",
+        "cpp_heap_trace"
+      ],
+      "upstream": [
+        "packages/graph/src/provider/rust/rustGraphProvider.ts",
+        "packages/graph/src/provider/cpp/cppGraphProvider.ts",
+        "sidecars/go/modules.go"
+      ],
+      "ours": [
+        "crates/cq-core/src/analyst/rust/",
+        "crates/cq-core/src/analyst/go/mod.rs",
+        "crates/cq-core/src/analyst/cpp/mod.rs"
+      ],
+      "branches": [
+        "实际 compiler invocation 与仅有元数据不同",
+        "Cargo feature/cfg 改变声明集合",
+        "compdb 只覆盖选中 TU",
+        "构建失败不发布成功图"
+      ],
+      "tests": [
+        "RustStructures.test_same_source_has_different_structural_results_under_cfg",
+        "RustStructures.test_cfg_and_string_content_are_not_declarations",
+        "Ripgrep.test_structural_outline_does_not_index_uncompiled_cli"
+      ],
+      "difference": "我们额外记录真实构建事件；CKG 不同 producer 的编译权威不同。原生 HIR 是重放配置后的语义分析，不等于逐事件读取 rustc 内部推导。跨平台工具选择分支未完整对齐。 CKG 的 opt-in heap trace 遥测未实现；本次记录端到端时间与图规模，不等同于 heap trace。"
+    },
+    {
+      "id": "go-workspace",
+      "title": "Go 工作区、方法集、初始化和空标识符",
+      "state": "verified_cases",
+      "patterns": [
+        "tour_go_receivers"
+      ],
+      "upstream": [
+        "sidecars/go/main_test.go",
+        "sidecars/go/analyze.go"
+      ],
+      "ours": [
+        "providers/go-types/main.go",
+        "crates/cq-core/src/analyst/go/mod.rs",
+        "fixtures/upstream/compiler-graph-go-work/"
+      ],
+      "branches": [
+        "go.work 根目录不是 module",
+        "跨 module 的具名类型签名",
+        "提升方法证明接口实现",
+        "两个 init 不合并",
+        "两个 _ 断言不生成可引用声明"
+      ],
+      "tests": [
+        "UpstreamGoWorkspace.test_workspace_modules_and_cross_module_named_signatures",
+        "UpstreamGoWorkspace.test_blank_assertions_are_absent_and_init_functions_remain_distinct",
+        "UpstreamGoWorkspace.test_same_named_calls_and_fields_stay_in_their_modules"
+      ],
+      "difference": "上游夹具源码原样保留 MIT 许可和 commit，断言独立编写；default build 与 Tests:true 的差别另列。"
+    },
+    {
+      "id": "go-tests",
+      "title": "Go 测试变体、可运行 example 与测试边",
+      "state": "verified_cases",
+      "patterns": [],
+      "upstream": [
+        "sidecars/go/main_test.go",
+        "sidecars/go/analyze.go"
+      ],
+      "ours": [
+        "crates/cq-core/src/analyst/go/selection.rs",
+        "providers/go-types/main.go",
+        "providers/go-types/main_test.go",
+        "scripts/test_foundations.py"
+      ],
+      "branches": [
+        "真实 go test 选择：生产包、内部测试包、外部测试包分离",
+        "ImportMap 使外部测试绑定实际测试变体",
+        "同文件字节可在多个编译 unit 中分别拥有引用",
+        "Test/TestMain/Benchmark/Fuzz 参数、Unicode 名字、泛型及 receiver 限制",
+        "Example 只对 Output/EmptyOutput 产生 Tests 边",
+        "按编译器规范包名和精确 .go 文件集合绑定 job",
+        "没有独立编译的生产包保留未知，不误绑内部测试 job"
+      ],
+      "tests": [
+        "GoTestVariants.",
+        "TestRunnableTestSignaturesMatchCompilerGraph"
+      ],
+      "difference": "已验列明的真实编译变体与 22 个 go/types 签名分支。默认仍采集实际 go build，只有显式 go test 选择才包含测试；不伪称所有工作区始终包含测试。Cgo 生成源与跨语言调用仍需进一步核对。 go test 可能只编译带测试的包实例；未单独编译的生产实例明确保留 UnattributedArtifact/Partial。"
+    },
+    {
+      "id": "go-testdata",
+      "title": "显式 import 的 testdata 依赖",
+      "state": "different",
+      "patterns": [],
+      "upstream": [
+        "sidecars/go/main_test.go",
+        "sidecars/go/scip.go"
+      ],
+      "ours": [
+        "providers/go-types/main.go"
+      ],
+      "branches": [
+        "包模式看不到、依赖编译却读到的 testdata",
+        "引用不随文件排除而消失"
+      ],
+      "tests": [
+        "UpstreamGoWorkspace.test_imported_testdata_is_captured_because_it_actually_compiled"
+      ],
+      "difference": "CKG 因 SCIP 佐证边界将 testdata 当 external；我们采集到它实际编译的输入并保留 project source。属于明确的构建范围差异。"
+    },
+    {
+      "id": "rust-ownership",
+      "title": "Rust 声明容器、类型成员和词法嵌套",
+      "state": "different",
+      "patterns": [
+        "rust_lsp_preserves",
+        "class_member",
+        "module_scope"
+      ],
+      "upstream": [
+        "tests/test-graph/src/features/test_rust_lsp_preserves_impl_ownership_and_visibility.ts",
+        "crates/rust-analyzer/src/graph_snapshot.rs (Rust producer)"
+      ],
+      "ours": [
+        "providers/rust-hir/src/codequest_export.rs",
+        "scripts/setup_rust_hir.py",
+        "crates/cq-core/src/semantic/normalize.rs"
+      ],
+      "branches": [
+        "多个 impl 的方法",
+        "associated function 与 receiver method",
+        "同名 nominal type 不串组",
+        "nested fn 不冒充 module sibling"
+      ],
+      "tests": [
+        "RustStructures.test_native_nominal_projection_exists_before_normalization",
+        "RustStructures.test_nominal_members_span_multiple_impl_blocks",
+        "RustStructures.test_nested_function_does_not_become_module_sibling"
+      ],
+      "difference": "实际运行 CKG HIR 后确认它的 contains 按源码范围/impl 容器形成；fake-LSP 测试不是该原生路径。我们保留 declaring_scope，并增加 HIR self_ty 支撑的 HasMember、AST 支撑的 LexicallyContains；两种关系不覆盖声明身份。"
+    },
+    {
+      "id": "language-structure",
+      "title": "类型种类、别名、泛型、字段、重载和命名空间",
+      "state": "partial",
+      "patterns": [
+        "cpp_templates",
+        "cpp_explicit",
+        "cpp_unary",
+        "c_lsp_linkage",
+        "c_static_linkage",
+        "cpp_static",
+        "semantic_identity_keeps_overload"
+      ],
+      "upstream": [
+        "tests/test-graph/src/features/test_cpp_templates_operators_and_qualified_namespaces.ts",
+        "sidecars/go/main_test.go"
+      ],
+      "ours": [
+        "crates/cq-clang/src/main.rs",
+        "providers/go-types/main.go",
+        "crates/cq-core/src/semantic/normalize.rs"
+      ],
+      "branches": [
+        "Enum variant/Union/Alias 保留原生种类",
+        "Go 泛型实例回到 Origin",
+        "同名字段保留声明 owner",
+        "C++ overload/operator/ctor 保留 USR 与 owner",
+        "头文件到 out-of-line 实现"
+      ],
+      "tests": [
+        "RustStructures.test_enum_union_alias_and_associated_type_have_real_kinds",
+        "GoStructures.test_alias_and_generic_method_retain_structure",
+        "GoStructures.test_same_named_fields_do_not_cross_receiver_types",
+        "CppStructures.test_out_of_line_overloads_have_distinct_native_identities",
+        "CppStructures.test_operators_and_constructors_keep_their_class_owner",
+        "LevelDB.test_nominal_class_members_cross_header_and_implementation"
+      ],
+      "difference": "语言结构不是一个总开关；模板特化、using/export surface、匿名/局部类型及细分修饰符尚未逐分支证明对齐。"
+    },
+    {
+      "id": "calls",
+      "title": "调用、函数值、泛型表达式与类型转换",
+      "state": "verified_cases",
+      "patterns": [
+        "static_calls",
+        "static_dependencies",
+        "static_dependency",
+        "lsp_mode_classifies",
+        "lsp_mode_dual",
+        "lsp_mode_advances",
+        "scan_reference"
+      ],
+      "upstream": [
+        "sidecars/go/analyze.go",
+        "tests/test-graph/src/features/test_static_calls_keep_distinct_expression_evidence.ts"
+      ],
+      "ours": [
+        "providers/go-types/main.go",
+        "crates/cq-clang/src/main.rs",
+        "crates/cq-core/src/semantic/normalize.rs"
+      ],
+      "branches": [
+        "跨包/别名调用指向精确声明",
+        "函数值/方法值只是 reference",
+        "括号、IndexExpr、IndexListExpr 识别真实 callee",
+        "Go 类型转换不是 function call",
+        "closure/async 的调用不归入即时父函数"
+      ],
+      "tests": [
+        "RustStructures.test_alias_and_receivers_bind_to_correct_declarations",
+        "RustStructures.test_function_value_is_a_reference_not_a_call",
+        "RustStructures.test_deferred_bodies_are_not_immediate_parent_calls",
+        "GoStructures.test_wrapped_and_generic_call_expressions_keep_exact_targets",
+        "GoStructures.test_method_value_does_not_become_call",
+        "CppStructures.test_function_values_and_fake_text_are_not_calls"
+      ],
+      "difference": "这组验证的是列明的反例，不等于任意表达式、所有回调或完整数据流。"
+    },
+    {
+      "id": "dispatch",
+      "title": "接口/虚调用和可能实现的继续探索",
+      "state": "partial",
+      "patterns": [
+        "trace_dispatches",
+        "trace_reports_dispatch",
+        "tour_preserves_polymorphic"
+      ],
+      "upstream": [
+        "packages/graph/src/operations/runTrace.ts",
+        "sidecars/go/analyze.go",
+        "tests/test-graph/src/features/test_trace_dispatches_to_the_implementation.ts"
+      ],
+      "ours": [
+        "crates/cq-core/src/semantic/normalize.rs",
+        "crates/cq-core/src/analyst/cpp/mod.rs",
+        "crates/cq-core/src/query/engine.rs"
+      ],
+      "branches": [
+        "声明已绑定不等于 executable 已知",
+        "由 native method set/override 找可能实现",
+        "C++ 跨 TU 只给候选，不宣称链接已选定",
+        "default 收起时留下数量与入口",
+        "types focus 不沿 execution/dispatch 走"
+      ],
+      "tests": [
+        "RustStructures.test_trait_trace_continues_to_native_override_body_as_candidate",
+        "GoStructures.test_interface_trace_reaches_only_native_method_set_candidates",
+        "CppStructures.test_virtual_trace_reaches_cross_unit_override_without_claiming_direct_execution",
+        "types_focus_never_follows_execution_or_dispatch_candidates"
+      ],
+      "difference": "CKG 默认 trace 生成 dispatch hop，并在 12 路 hub 截止；我们默认收起候选、显式请求后按预算继续，RuleDerived MayCall 不升级为直接 Calls。我们用实际 Body 判断实现存在，CKG 的 hasExecutionBody 以 outgoing execution edge 近似。"
+    },
+    {
+      "id": "walk-budget",
+      "title": "图追踪的预算、局部披露和续查",
+      "state": "verified_cases",
+      "patterns": [
+        "trace_expands",
+        "trace_names",
+        "trace_reports_only",
+        "graph_handle_limits",
+        "tour_preserves_ranked"
+      ],
+      "upstream": [
+        "packages/graph/src/operations/runTrace.ts",
+        "tests/test-graph/src/features/test_trace_reports_only_actual_omissions.ts"
+      ],
+      "ours": [
+        "crates/cq-core/src/query/engine.rs",
+        "crates/cq-store/tests/semantic_queries.rs"
+      ],
+      "branches": [
+        "高扇出每条边也计费",
+        "扫描到一半保存 edge_offset",
+        "父节点不重复返回",
+        "1500 邻居分多页查全",
+        "path 深度与无路径语义",
+        "types focus 不混执行边"
+      ],
+      "tests": [
+        "high_fanout_charges_edges_before_expanding_and_resumes_without_loss",
+        "paginated_walk_retains_frontier_after_rows_are_split",
+        "deep_paths_are_not_cut_off_at_a_hidden_fixed_limit",
+        "cursor_pins_revision_and_rejects_different_query"
+      ],
+      "difference": "我们保留可继续的精确 frontier，不照搬 CKG 的固定 hub 截断。高 fanout 测试不证明无限规模查询内存恒定。"
+    },
+    {
+      "id": "query-filter",
+      "title": "符号身份与结果筛选、引用发生位置",
+      "state": "verified_cases",
+      "patterns": [
+        "details_hands",
+        "graph_handles",
+        "details_consume",
+        "source_files_export"
+      ],
+      "upstream": [
+        "tests/test-graph/src/features/test_graph_handles_rank_ambiguous_qualified_and_file_callable_forms.ts",
+        "tests/test-graph/src/features/test_details_consume_snapshot_identity_facts.ts"
+      ],
+      "ours": [
+        "crates/cq-core/src/query/engine.rs",
+        "crates/cq-store/tests/structure_query_contract.rs"
+      ],
+      "branches": [
+        "成员 kind 不能过滤掉容器",
+        "file 筛选按 use site",
+        "头文件声明与实现文件不混淆",
+        "同名符号返回 ambiguity",
+        "同字节跨 context 不串实例"
+      ],
+      "tests": [
+        "member_filters_apply_to_results_not_container_identity",
+        "member_source_filter_can_cross_declaration_and_definition_files",
+        "reference_file_scope_uses_use_site_instead_of_definition_file",
+        "identical_use_site_bytes_in_distinct_units_remain_context_scoped",
+        "RustStructures.test_same_names_are_distinct_and_ambiguous"
+      ],
+      "difference": "CKG 支持的历史句柄、签名装饰形式和完整 ranking 规则没有逐一复刻。"
+    },
+    {
+      "id": "cpp-source",
+      "title": "C/C++ 宏与多种源码位置",
+      "state": "verified_cases",
+      "patterns": [
+        "cpp_clang_snapshot"
+      ],
+      "upstream": [
+        "clang-tools-extra/clangd/index/SymbolCollector.cpp (LLVM producer)",
+        "packages/graph/src/provider/cpp/CppGraphSnapshotAdapter.ts"
+      ],
+      "ours": [
+        "crates/cq-clang/src/main.rs",
+        "crates/cq-core/src/semantic/normalize.rs"
+      ],
+      "branches": [
+        "宏返回类型前缀不能混成跨文件范围",
+        "一个展开位置中的多个调用参数不能合并",
+        "原生调用索引绑定 reference 与 arguments",
+        "名字宽度来自 native name range",
+        "declaration/definition 独立保留",
+        "occurrence spelling/expansion 独立保留",
+        "嵌套宏的 header spelling 与 caller expansion",
+        "宏实参保留自己的 spelling，不能错归宏定义",
+        "同一展开位置、不同 spelling 的多次读取具有不同 occurrence ID"
+      ],
+      "tests": [
+        "CppStructures.test_raw_clang_ranges_do_not_mix_macro_header_with_body_file",
+        "CppStructures.test_macro_declaration_prefix_does_not_erase_function_body",
+        "CppStructures.test_multiple_calls_in_one_macro_expansion_keep_separate_arguments",
+        "CJSON.test_static_parser_helper_resolves_within_its_translation_unit",
+        "CppLocations."
+      ],
+      "difference": "四种位置已进入通用模型、冻结来源与公开查询，4 个真实 libclang 坐标反例通过。include 文件会参与失效检查；完整 include/macro role 查询及 CKG 定制 clangd 的原生差分仍未完成。"
+    },
+    {
+      "id": "identity",
+      "title": "编译实例、符号身份和跨 TU 聚合",
+      "state": "partial",
+      "patterns": [
+        "semantic_identity",
+        "legacy_semantic",
+        "ordinal_ordering",
+        "over_encoded",
+        "wire_and_the_module"
+      ],
+      "upstream": [
+        "packages/graph/src/provider/semanticIdentity.ts",
+        "packages/graph/src/provider/cpp/CppGraphSnapshotAdapter.ts"
+      ],
+      "ours": [
+        "crates/cq-core/src/analyst/native.rs",
+        "crates/cq-core/src/semantic/normalize.rs",
+        "crates/cq-core/src/model/semantic.rs",
+        "crates/cq-core/src/semantic/identity.rs"
+      ],
+      "branches": [
+        "同文件不同配置保留实例",
+        "native USR 候选定义",
+        "相同静态函数名不跨 TU",
+        "稳定逻辑身份与运行实例身份分开审视",
+        "稳定 cq1 声明句柄与每次编译实体 ID 分离",
+        "Go/Rust/C++ 函数体与偏移变化后可用旧句柄查询",
+        "局部变量/参数/body 使用 cqg1 代内句柄",
+        "匿名 native 占位键和函数内声明不承诺跨代身份",
+        "同一 native 键存在冲突声明时降为各自 cqg1，并披露缺口"
+      ],
+      "tests": [
+        "CppStructures.test_static_callees_remain_translation_unit_local",
+        "CppStructures.test_cross_translation_unit_definition_navigation",
+        "CJSON.test_same_symbol_in_two_translation_units_stays_scoped",
+        "RustStructures.test_same_source_has_different_structural_results_under_cfg",
+        "StableHandles.",
+        "strips_only_the_native_crate_context_coordinate",
+        "callable_scoped_items_and_anonymous_builtins_never_claim_persistent_identity",
+        "conflicting_monikers_are_fenced_but_identical_observations_keep_their_handle"
+      ],
+      "difference": "3 个真实语言跨代测试通过；句柄保存到 Ladybug、无内存注册表也可查询。C++ 仍按 TU/config 隔离，区别于 CKG 的跨 TU 合并；历史语法兼容、所有重载/局部结构稳定性尚未逐项证明。"
+    },
+    {
+      "id": "native-contract",
+      "title": "原生输入完整性与未知种类",
+      "state": "partial",
+      "patterns": [
+        "graph_dump_parser",
+        "conformance_harness",
+        "merge_graph_slices",
+        "sidecar_session",
+        "scip_ingestion",
+        "defensive_boundaries",
+        "contract_fixture",
+        "coverage_edge"
+      ],
+      "upstream": [
+        "packages/graph/src/provider/assertGraphSnapshotContract.ts",
+        "packages/graph/src/provider/assertGraphSnapshotPayload.ts",
+        "sidecars/go/main_test.go"
+      ],
+      "ours": [
+        "crates/cq-core/src/semantic/provider_contract.rs",
+        "crates/cq-core/src/semantic/validate.rs"
+      ],
+      "branches": [
+        "协议/版本/必需数组",
+        "重复 file ID/path/token",
+        "悬空 reference/parent/membership",
+        "parent cycle/conflict",
+        "范围缺字段/倒置/越界/UTF-8 切断",
+        "unknown symbol 保留并披露；unknown relation 不伪装 Extends"
+      ],
+      "tests": [
+        "semantic::provider_contract::tests::"
+      ],
+      "difference": "39 项 native transport 契约及通用快照校验；生成/源文件校验另见 incremental。保持未知 symbol 为 opaque 并披露，与 CKG 拒绝未知 kind 的策略不同，不能冒充逐字段完全等价。"
+    },
+    {
+      "id": "snapshot",
+      "title": "冻结源码、原子发布和失败恢复",
+      "state": "partial",
+      "patterns": [
+        "build_graph_preserves",
+        "source_reader",
+        "project_input_generation",
+        "resident_commits",
+        "resident_repository",
+        "repository_context",
+        "resident_graph_source",
+        "resident_lsp_document",
+        "batch_graph_session",
+        "application_retries"
+      ],
+      "upstream": [
+        "tests/test-graph/src/features/test_build_graph_preserves_its_consumed_source_snapshot.ts",
+        "packages/graph/src/provider/GraphSnapshotProtocol.ts"
+      ],
+      "ours": [
+        "crates/cq-store/src/graph.rs",
+        "crates/cq-store/tests/durability.rs",
+        "crates/cq-store/tests/recovery.rs"
+      ],
+      "branches": [
+        "冻结字节不被 live source 替换",
+        "HEAD 比较发布",
+        "journal seal/断帧/超限/篡改",
+        "构建取消不发布",
+        "失败后可重试",
+        "每个分析任务独立编译输入预算",
+        "派生图单独累计预算，读取前校验分片与总量限额"
+      ],
+      "tests": [
+        "missing_content_is_not_replaced_by_live_source",
+        "native_ladybug_queries_and_publish_conflicts_are_enforced",
+        "a24_seal_recovery_and_tamper_detection",
+        "content::tests::derived_output_has_separate_accounting_without_relaxing_input_limits",
+        "indexing_jobs_have_independent_input_reservations_over_shared_blobs",
+        "checkpoint_output_limits_are_checked_before_reading_payloads"
+      ],
+      "difference": "canonical snapshot / delta / checkpoint 各自校验，HEAD CAS 发布。冲突关系不会在 seal 时被静默去重。旧版没有 snapshot publication checksum 的存储需要重新 index。与 CKG 原生 shard 的传输机制不同，列明的共同原子性规则有独立断言。"
+    },
+    {
+      "id": "incremental",
+      "title": "常驻 producer、delta、checkpoint 与重载",
+      "state": "partial",
+      "patterns": [
+        "rust_hir_client",
+        "rust_hir_snapshot",
+        "resident_bulk",
+        "refresh_language",
+        "resident_close",
+        "graph_snapshot_protocol",
+        "compilation_database_lifecycle"
+      ],
+      "upstream": [
+        "packages/graph/src/provider/rust/RustGraphClient.ts",
+        "packages/graph/src/provider/rust/RustGraphCache.ts",
+        "packages/graph/src/provider/cpp/CppGraphClient.ts"
+      ],
+      "ours": [
+        "crates/cq-core/src/semantic/generation.rs",
+        "crates/cq-core/src/analyst/rust/session.rs",
+        "providers/rust-hir/src/codequest_export.rs",
+        "crates/cq-core/src/analyst/cpp/mod.rs",
+        "crates/cq-store/src/checkpoint.rs",
+        "crates/cq-app/src/phase1/checkpoint.rs"
+      ],
+      "branches": [
+        "full/no-op/delta",
+        "base generation 不匹配",
+        "checkpoint restore/retry",
+        "删除/新增 TU 和 source",
+        "stale child output",
+        "refresh 中 cancel/close"
+      ],
+      "tests": [
+        "CheckpointLifecycle.",
+        "RustResidentLifecycle.",
+        "CppCacheInvalidation.",
+        "full_noop_delta_reload_and_isolated_checkpoint_have_separate_contracts",
+        "checkpoint_cache_corruption_is_not_a_valid_generation",
+        "cross_shard_deletion_cannot_leave_an_edge_target_dangling",
+        "semantic_deltas_exclude_unreferenced_build_evidence_without_using_extensions",
+        "published_snapshot_and_delta_corruption_are_independently_detected",
+        "conflicting_relation_identity_survives_sealing_and_prevents_publication",
+        "analyst::rust::session::tests::",
+        "rejects_unknown_protocol",
+        "rejects_empty_generation",
+        "rejects_malformed_universe",
+        "rejects_zero_sequence",
+        "rejects_stale_sequence",
+        "rejects_foreign_project",
+        "rejects_foreign_root",
+        "rejects_stale_base",
+        "rejects_delta_in_another_universe",
+        "rejects_unchanged_generation_without_base",
+        "rejects_noncanonical_manifest",
+        "rejects_duplicate_manifest",
+        "rejects_mismatched_shard_digest",
+        "rejects_mismatched_generation_digest",
+        "rejects_missing_delete",
+        "rejects_duplicate_delete",
+        "rejects_noncanonical_delete_order",
+        "rejects_empty_semantic_identity_after_resigning",
+        "rejects_upsert_delete_collision",
+        "rejects_duplicate_upsert",
+        "rejects_source_key_mismatch",
+        "rejects_empty_shard_key",
+        "rejects_invalid_source_bounds_after_resigning",
+        "rejects_dangling_parent_after_resigning",
+        "rejects_dangling_provenance_after_resigning",
+        "rejects_dangling_edge_after_resigning",
+        "rejects_dangling_edge_source_after_resigning",
+        "rejects_duplicate_semantic_entities_after_resigning",
+        "rejects_same_id_conflicting_declarations_after_resigning",
+        "rejects_source_digest_corruption_after_resigning",
+        "full_noop_delta_reload_and_isolated_checkpoint_have_separate_contracts",
+        "checkpoint_cache_corruption_is_not_a_valid_generation",
+        "semantic_deltas_exclude_unreferenced_build_evidence_without_using_extensions",
+        "cross_shard_deletion_cannot_leave_an_edge_target_dangling",
+        "published_snapshot_and_delta_corruption_are_independently_detected",
+        "conflicting_relation_identity_survives_sealing_and_prevents_publication",
+        "sourceless_facts_keep_compilation_context_partitions_in_checkpoints",
+        "publishing_another_root_cannot_replace_an_existing_project_namespace",
+        "checkpoint_output_limits_are_checked_before_reading_payloads"
+      ],
+      "difference": "typed full/no-op/delta + CAS checkpoint；恢复前重验工具、环境、工作树和冻结输入。Rust 常驻 HIR/Salsa 处理文本变化，文件集或 crate graph 改变时重载。C++ 实际重跑编译，只复用未变化 TU 的原生语义结果；Go 语义仍整包重建。图分片 delta 不等于只重算该分片，原生 JSON 与 Ladybug 投影仍完整生成。未复刻 CKG 的 LSP 方法、原生分页及全部 readiness/cache-retention 策略。 checkpoint 的派生图预算与每次分析的编译输入预算分离；无源码位置元数据按编译单元拆分。"
+    },
+    {
+      "id": "fallback",
+      "title": "低权威 fallback 与其他索引协议",
+      "state": "different",
+      "patterns": [
+        "auto_mode",
+        "lsp_",
+        "graph_sitter",
+        "static_fallback",
+        "static_graph",
+        "static_indexes",
+        "static_masking",
+        "scan_",
+        "rust_scip",
+        "scip_session",
+        "scip_enrichment",
+        "ensure_compile",
+        "ensure_pub"
+      ],
+      "upstream": [
+        "packages/graph/src/provider/selectGraphProviders.ts",
+        "packages/graph-sitter/src/"
+      ],
+      "ours": [
+        "crates/cq-app/src/phase1/index.rs"
+      ],
+      "branches": [
+        "缺 producer 明确失败",
+        "不让关键词图伪装编译事实",
+        "没有 generic LSP/SCIP/static 自动降级"
+      ],
+      "tests": [],
+      "difference": "这是当前取舍，不是 CKG fallback 完整复刻。其表达式/owner 测试中的通用语义反例仍转成 native 测试；传输与解析器内部路径不要求字面对应。"
+    },
+    {
+      "id": "operations",
+      "title": "查询路由、架构分析与 ranking",
+      "state": "partial",
+      "patterns": [
+        "application_",
+        "ported_operation",
+        "the_engines",
+        "the_ported",
+        "operations_preserve",
+        "tour_",
+        "the_tour",
+        "result_audits",
+        "export_surface",
+        "file_scope",
+        "generated_code",
+        "source_discovery",
+        "mcp_",
+        "override_edges",
+        "the_dump",
+        "build_graph_returns",
+        "escape_",
+        "real_codebase"
+      ],
+      "upstream": [
+        "packages/graph/src/operations/",
+        "tests/test-graph/src/features/test_application_exercises_every_request_branch.ts"
+      ],
+      "ours": [
+        "crates/cq-core/src/query/",
+        "crates/cq-app/src/phase1/mcp.rs"
+      ],
+      "branches": [
+        "lookup/details/tour/trace/path/impact",
+        "引用/实现/类型导航",
+        "entrypoints/hotspots/cycles/clusters",
+        "未知操作/预算/游标错配",
+        "coverage/uncertainty 贯穿输出"
+      ],
+      "tests": [
+        "bounded_search_resumes_until_ranking_is_complete"
+      ],
+      "difference": "基础路由由端到端 acceptance 执行；不能把 139 个含轮询的检查当成 139 项独立语义能力。CKG 的所有 ranking、tour family、junction 和 rich operation 分支尚未一对一断言。"
+    },
+    {
+      "id": "cli",
+      "title": "CLI/MCP/REPL 的参数和生命周期",
+      "state": "partial",
+      "patterns": [
+        "cli_",
+        "graph_argument",
+        "language_display"
+      ],
+      "upstream": [
+        "tests/test-graph/src/features/test_graph_argument_parser_covers_every_cli_form.ts"
+      ],
+      "ours": [
+        "crates/cq-app/src/",
+        "crates/cq-app/tests/cli.rs",
+        "scripts/acceptance_native.py"
+      ],
+      "branches": [
+        "missing/invalid argument",
+        "REPL expand/collapse/next",
+        "MCP query aliases",
+        "后台作业查询/取消"
+      ],
+      "tests": [],
+      "difference": "接口命名/参数并非字面对等；Windows cmd shim、所有启动失败和 shutdown 分支未在本机证明。"
+    },
+    {
+      "id": "corpus",
+      "title": "真实仓库与固定数据来源",
+      "state": "verified_cases",
+      "patterns": [
+        "experiment_corpora",
+        "shipped_source"
+      ],
+      "upstream": [
+        "tests/benchmark/src/corpus.mjs",
+        "sidecars/go/testdata/work/"
+      ],
+      "ours": [
+        "fixtures/real-corpus.lock.json",
+        "scripts/prepare_test_corpus.py",
+        "scripts/test_real_corpus.py"
+      ],
+      "branches": [
+        "精确 commit",
+        "脏源/错误版本拒绝",
+        "构建依赖与本机缓存显式区分",
+        "真实 CMake 命令而非伪造 flags",
+        "只声明选中 targets/TU"
+      ],
+      "tests": [
+        "Ripgrep.",
+        "Gin.",
+        "LevelDB.",
+        "CJSON."
+      ],
+      "difference": "4 个真实仓库共 17 项明确语义断言；Rust 是 grep-printer lib，LevelDB 是 6 个选中 TU，不冒充全仓库完整覆盖。"
+    },
+    {
+      "id": "outside",
+      "title": "其他语言、Web、发布与基准展示",
+      "state": "outside_scope",
+      "patterns": [
+        "ttsc",
+        "java",
+        "javac",
+        "csharp",
+        "kotlin",
+        "scala",
+        "swift",
+        "zig",
+        "ruby",
+        "php",
+        "python",
+        "lua",
+        "dart",
+        "pub_deps",
+        "view_command",
+        "viewer_",
+        "benchmark_viewer",
+        "release_preflight",
+        "workflows_",
+        "readme_"
+      ],
+      "upstream": [],
+      "ours": [],
+      "branches": [
+        "Rust/Go/C/C++ 之外的语言适配器",
+        "Web viewer",
+        "NPM/release/README 同步流程"
+      ],
+      "tests": [],
+      "difference": "清单中保留条目并标记阶段范围；通用协议和查询原则仍在相关组检查，不能借语言范围排除共同的身份/原子性问题。"
+    }
+  ]
+}

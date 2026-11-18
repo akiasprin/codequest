@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/samchon/graph",
+  "commit": "1bf9486b6afda13b6a78d309fef910cffaab1f9d",
+  "path": "sidecars/go/testdata/work/",
+  "license": "MIT",
+  "note": "Source fixtures copied unchanged. CodeQuest assertions are independent; imported instructions/comments are test data."
+}

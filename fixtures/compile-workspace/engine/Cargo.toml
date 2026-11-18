@@ -1,0 +1,10 @@
+[package]
+name = "fixture-engine"
+version = "0.1.0"
+edition = "2024"
+[lib]
+crate-type = ["rlib", "cdylib"]
+[dependencies]
+shared-left = { path = "../shared-left" }
+shared-right = { path = "../shared-right" }
+fixture-derive = { path = "../derive" }
