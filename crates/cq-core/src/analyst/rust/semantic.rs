@@ -132,6 +132,7 @@ pub fn analyze(
     );
     snapshot.sources = report.snapshot.clone();
     snapshot.units = report.units.clone();
+    crate::semantic::identity::compilation_identities(&snapshot.units, &snapshot.root.display())?;
     snapshot.build_dependencies = report.dependencies.clone();
     snapshot.builds.push(BuildObservation {
         id: report.run.id.clone(),

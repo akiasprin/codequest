@@ -1,6 +1,8 @@
 //! Persistent declaration handles are distinct from compilation/run instances.
 use crate::{Result, model::*};
 use std::collections::{HashMap, HashSet};
+const OBSERVATION_SCOPED: &str =
+    "repeated compiler observations share a configuration; context identity is observation-scoped";
 
 /// A nonpersistent declaration remains addressable in its immutable semantic
 /// instance. Deriving this alias at read time preserves reusable payload bytes;
@@ -126,6 +128,72 @@ pub fn unit_key(unit: &BuildUnit, root: &str) -> Result<String> {
         configuration,
     ))?))
 }
+pub struct CompilationIdentities {
+    pub units: HashMap<String, String>,
+    pub observation_scoped: HashSet<String>,
+}
+impl CompilationIdentities {
+    pub(super) fn report(&self, snapshot: &mut SemanticSnapshot) {
+        if !self.observation_scoped.is_empty()
+            && !snapshot
+                .gaps
+                .iter()
+                .any(|g| g.code == "ObservationScopedCompilationIdentity")
+        {
+            snapshot.gaps.push(Gap::new("ObservationScopedCompilationIdentity", "compilation contexts", format!("{} repeated compiler observations retained as separate observation-scoped contexts; cross-revision identity is not claimed for these instances", self.observation_scoped.len())));
+        }
+    }
+    pub(super) fn mark(&self, entity: &mut Entity) {
+        if self.observation_scoped.contains(&entity.unit) {
+            entity.stable_handle = None;
+            entity
+                .attributes
+                .insert("identity_scope_reason".into(), OBSERVATION_SCOPED.into());
+        }
+    }
+}
+/// Configuration identity and execution observation are distinct. Repeated
+/// observations (such as build-script probes) must neither collapse nor abort
+/// the entire repository. Keep ambiguous instances generation-scoped.
+pub fn compilation_identities(units: &[BuildUnit], root: &str) -> Result<CompilationIdentities> {
+    let mut result = CompilationIdentities {
+        units: HashMap::new(),
+        observation_scoped: HashSet::new(),
+    };
+    let mut groups = HashMap::<String, Vec<&str>>::new();
+    for unit in units {
+        let key = unit_key(unit, root)?;
+        if result.units.insert(unit.id.clone(), key.clone()).is_some() {
+            return Err(crate::Error::new(
+                "DuplicateCompilationObservation",
+                &unit.id,
+            ));
+        }
+        groups.entry(key).or_default().push(&unit.id);
+    }
+    for (key, observations) in groups.into_iter().filter(|(_, ids)| ids.len() > 1) {
+        for id in observations {
+            let observation = id
+                .strip_prefix("cqo1:")
+                .and_then(|rest| rest.split_once(':'))
+                .filter(|(config, observed)| {
+                    config.len() == 64
+                        && observed.len() == 64
+                        && config
+                            .bytes()
+                            .chain(observed.bytes())
+                            .all(|b| b.is_ascii_hexdigit())
+                })
+                .map(|(_, observed)| observed.to_owned())
+                .unwrap_or_else(|| digest(id.as_bytes()));
+            result
+                .units
+                .insert(id.into(), format!("cqo1:{key}:{observation}"));
+            result.observation_scoped.insert(id.into());
+        }
+    }
+    Ok(result)
+}
 fn rust_options(options: &[NativeValue], root: &str) -> Vec<String> {
     let options = strings(options, root);
     let mut out = vec![];
@@ -163,11 +231,9 @@ pub(super) fn rust_symbol(key: &str) -> String {
 }
 pub fn assign(snapshot: &mut SemanticSnapshot) -> Result<()> {
     let root = snapshot.root.display();
-    let units: HashMap<_, _> = snapshot
-        .units
-        .iter()
-        .map(|u| Ok((u.id.clone(), unit_key(u, &root)?)))
-        .collect::<Result<_>>()?;
+    let contexts = compilation_identities(&snapshot.units, &root)?;
+    contexts.report(snapshot);
+    let units = &contexts.units;
     let files: HashMap<_, _> = snapshot
         .sources
         .files
@@ -176,8 +242,9 @@ pub fn assign(snapshot: &mut SemanticSnapshot) -> Result<()> {
         .collect();
     let locals = local_items(snapshot);
     for entity in &mut snapshot.entities {
+        contexts.mark(entity);
         let local = locals.contains(&entity.id);
-        assign_one(entity, &root, &units, &files, local)?;
+        assign_one(entity, &root, units, &files, local)?;
     }
     // Native monikers can omit lexical owners or use anonymous placeholders.
     // Conflicting observations cannot acquire a persistent declaration handle.
@@ -226,6 +293,7 @@ pub(super) fn assign_one(
     local: bool,
 ) -> Result<()> {
     let persistent = !entity.name.is_empty()
+        && !entity.attributes.contains_key("identity_scope_reason")
         && !entity.name.starts_with('<')
         && !local
         && !entity.attributes.contains_key("native_local")
@@ -280,17 +348,14 @@ pub(super) fn assign_one(
 
 /// Only declaration handles, fingerprints and body intervals are retained.
 pub(super) struct Handles {
-    values: HashMap<String, (String, bool)>,
+    values: HashMap<String, (String, Option<&'static str>)>,
 }
 impl Handles {
     pub fn new(header: &SemanticSnapshot, source: &dyn super::records::Source) -> Result<Self> {
         use super::records::Record;
         let root = header.root.display();
-        let units = header
-            .units
-            .iter()
-            .map(|u| Ok((u.id.clone(), unit_key(u, &root)?)))
-            .collect::<Result<HashMap<_, _>>>()?;
+        let contexts = compilation_identities(&header.units, &root)?;
+        let units = &contexts.units;
         let files = header
             .sources
             .files
@@ -310,10 +375,20 @@ impl Handles {
         let mut groups = HashMap::<String, Vec<(String, String)>>::new();
         source.visit_family("entity", &mut |r| {
             if let Record::Entity(mut e) = r {
+                contexts.mark(&mut e);
                 let local = ranges.local(&e);
-                assign_one(&mut e, &root, &units, &files, local)?;
+                assign_one(&mut e, &root, units, &files, local)?;
                 let handle = e.stable_handle.clone().unwrap();
-                values.insert(e.id.clone(), (handle.clone(), false));
+                values.insert(
+                    e.id.clone(),
+                    (
+                        handle.clone(),
+                        contexts
+                            .observation_scoped
+                            .contains(&e.unit)
+                            .then_some(OBSERVATION_SCOPED),
+                    ),
+                );
                 if handle.starts_with("cq1:") {
                     let id = e.id.clone();
                     e.id.clear();
@@ -334,7 +409,7 @@ impl Handles {
                         id.clone(),
                         (
                             format!("cqg1:{}", digest(&serde_json::to_vec(&(&handle, &id))?)),
-                            true,
+                            Some("conflicting native declaration observations"),
                         ),
                     );
                 }
@@ -343,13 +418,11 @@ impl Handles {
         Ok(Self { values })
     }
     pub fn apply(&self, e: &mut Entity) {
-        if let Some((h, conflict)) = self.values.get(&e.id) {
+        if let Some((h, reason)) = self.values.get(&e.id) {
             e.stable_handle = Some(h.clone());
-            if *conflict {
-                e.attributes.insert(
-                    "identity_scope_reason".into(),
-                    "conflicting native declaration observations".into(),
-                );
+            if let Some(reason) = reason {
+                e.attributes
+                    .insert("identity_scope_reason".into(), (*reason).into());
             }
         }
     }
@@ -357,6 +430,71 @@ impl Handles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn repeated_units() -> Vec<BuildUnit> {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/native/repeated-rust-observations.json"
+        ))
+        .unwrap();
+        serde_json::from_value(raw["units"].clone()).unwrap()
+    }
+    #[test]
+    fn real_repeated_probes_keep_six_distinct_observation_scoped_contexts() {
+        let units = repeated_units();
+        let keys = compilation_identities(&units, "/repo").unwrap();
+        assert_eq!(keys.units.len(), 6);
+        assert_eq!(keys.observation_scoped.len(), 6);
+        assert_eq!(keys.units.values().collect::<HashSet<_>>().len(), 6);
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| unit_key(u, "/repo").unwrap())
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        let mut reversed = units.clone();
+        reversed.reverse();
+        assert_eq!(
+            keys.units,
+            compilation_identities(&reversed, "/repo").unwrap().units
+        );
+        let mut canonical = units.clone();
+        for u in &mut canonical {
+            u.id = keys.units[&u.id].clone();
+        }
+        let again = compilation_identities(&canonical, "/repo").unwrap();
+        assert!(canonical.iter().all(|u| again.units[&u.id] == u.id));
+        let mut duplicate = units.clone();
+        duplicate.push(units[0].clone());
+        assert_eq!(
+            compilation_identities(&duplicate, "/repo")
+                .err()
+                .unwrap()
+                .code(),
+            "DuplicateCompilationObservation"
+        );
+    }
+    #[test]
+    fn ambiguous_context_handles_are_scoped_and_unambiguous_handles_stay_stable() {
+        let units = repeated_units();
+        let mut second = units.clone();
+        for u in &mut second {
+            u.id.push_str("-next-observation");
+        }
+        let a = compilation_identities(&units, "/repo").unwrap();
+        let b = compilation_identities(&second, "/repo").unwrap();
+        assert!(
+            a.units
+                .values()
+                .all(|key| !b.units.values().any(|v| v == key))
+        );
+        let single = compilation_identities(&units[..1], "/repo").unwrap();
+        assert!(single.observation_scoped.is_empty());
+        assert_eq!(
+            single.units[&units[0].id],
+            unit_key(&units[0], "/repo").unwrap()
+        );
+    }
     #[test]
     fn strips_only_the_native_crate_context_coordinate() {
         let key = format!(

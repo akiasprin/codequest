@@ -1,0 +1,930 @@
+{
+  "source": "Six real proc_macro2 build-probe observations from Brocade workspace/all-targets capture on 2026-11-18; three debug/release pairs; NativeValue paths made host-independent.",
+  "root": "/repo",
+  "units": [
+    {
+      "id": "d1a9a52a20fb130c3dcab3b588b7b0c7ee3d83b322f4334cd0e9d0b657eb2581",
+      "language": "Rust",
+      "name": {
+        "state": "value",
+        "value": "proc_macro2"
+      },
+      "root": {
+        "state": "value",
+        "value": {
+          "encoding": "unix-bytes",
+          "hex": "2f636172676f2f72656769737472792f7372632f696e6465782e6372617465732e696f2d313934396366386336623562353537662f70726f632d6d6163726f322d312e302e3130372f7372632f70726f62652f70726f635f6d6163726f5f7370616e2e7273",
+          "display": "/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-1.0.107/src/probe/proc_macro_span.rs"
+        }
+      },
+      "output_kinds": [
+        "lib"
+      ],
+      "role": "Library",
+      "host": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "target": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "configuration": {
+        "language": "rust",
+        "observations": {
+          "explicit_cfg": [
+            "procmacro2_build_probe"
+          ],
+          "expected_cfg": [],
+          "compiler_cfg": {
+            "state": "value",
+            "value": [
+              "debug_assertions",
+              "panic=\"unwind\"",
+              "procmacro2_build_probe",
+              "target_abi=\"\"",
+              "target_arch=\"x86_64\"",
+              "target_endian=\"little\"",
+              "target_env=\"gnu\"",
+              "target_family=\"unix\"",
+              "target_feature=\"fxsr\"",
+              "target_feature=\"sse\"",
+              "target_feature=\"sse2\"",
+              "target_has_atomic=\"16\"",
+              "target_has_atomic=\"32\"",
+              "target_has_atomic=\"64\"",
+              "target_has_atomic=\"8\"",
+              "target_has_atomic=\"ptr\"",
+              "target_os=\"linux\"",
+              "target_pointer_width=\"64\"",
+              "target_vendor=\"unknown\"",
+              "unix"
+            ]
+          },
+          "compiler_cfg_evidence": {
+            "run_id": "9d97e550ab6e0c9de235611888c8259a",
+            "source": "report.probes",
+            "index": 188
+          },
+          "test": false,
+          "edition": {
+            "state": "value",
+            "value": "2021"
+          },
+          "options": [
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6366673d70726f636d6163726f325f6275696c645f70726f6265",
+              "display": "--cfg=procmacro2_build_probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d65646974696f6e3d32303231",
+              "display": "--edition=2021"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d6e616d653d70726f635f6d6163726f32",
+              "display": "--crate-name=proc_macro2"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d747970653d6c6962",
+              "display": "--crate-type=lib"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6361702d6c696e74733d616c6c6f77",
+              "display": "--cap-lints=allow"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d656d69743d6465702d696e666f2c6d65746164617461",
+              "display": "--emit=dep-info,metadata"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6f75742d646972",
+              "display": "--out-dir"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2f636170747572652d73746f72652f746172676574732f39643937653535306162366530633964653233353631313838386338323539612f72656c656173652f6275696c642f70726f632d6d6163726f322d386563626237393663663861346538332f6f75742f70726f6265",
+              "display": "/capture-store/targets/9d97e550ab6e0c9de235611888c8259a/release/build/proc-macro2-8ecbb796cf8a4e83/out/probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7372632f70726f62652f70726f635f6d6163726f5f7370616e2e7273",
+              "display": "src/probe/proc_macro_span.rs"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d746172676574",
+              "display": "--target"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7838365f36342d756e6b6e6f776e2d6c696e75782d676e75",
+              "display": "x86_64-unknown-linux-gnu"
+            }
+          ],
+          "coverage": "ExplicitAndCompilerCfg",
+          "gaps": []
+        }
+      },
+      "invocation": {
+        "state": "value",
+        "value": "34bbcb40467c9476ec460d1d84eeb646"
+      },
+      "artifacts": [],
+      "binding": "ObservedInvocation",
+      "evidence": [
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 1961
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 1965
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 1975
+        }
+      ]
+    },
+    {
+      "id": "96ae90d9795ef0d6eb6a01ec8f1606d6664391fa785e9bbb5227b04efa7bff3a",
+      "language": "Rust",
+      "name": {
+        "state": "value",
+        "value": "proc_macro2"
+      },
+      "root": {
+        "state": "value",
+        "value": {
+          "encoding": "unix-bytes",
+          "hex": "2f636172676f2f72656769737472792f7372632f696e6465782e6372617465732e696f2d313934396366386336623562353537662f70726f632d6d6163726f322d312e302e3130372f7372632f70726f62652f70726f635f6d6163726f5f7370616e5f66696c652e7273",
+          "display": "/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-1.0.107/src/probe/proc_macro_span_file.rs"
+        }
+      },
+      "output_kinds": [
+        "lib"
+      ],
+      "role": "Library",
+      "host": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "target": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "configuration": {
+        "language": "rust",
+        "observations": {
+          "explicit_cfg": [
+            "procmacro2_build_probe"
+          ],
+          "expected_cfg": [],
+          "compiler_cfg": {
+            "state": "value",
+            "value": [
+              "debug_assertions",
+              "panic=\"unwind\"",
+              "procmacro2_build_probe",
+              "target_abi=\"\"",
+              "target_arch=\"x86_64\"",
+              "target_endian=\"little\"",
+              "target_env=\"gnu\"",
+              "target_family=\"unix\"",
+              "target_feature=\"fxsr\"",
+              "target_feature=\"sse\"",
+              "target_feature=\"sse2\"",
+              "target_has_atomic=\"16\"",
+              "target_has_atomic=\"32\"",
+              "target_has_atomic=\"64\"",
+              "target_has_atomic=\"8\"",
+              "target_has_atomic=\"ptr\"",
+              "target_os=\"linux\"",
+              "target_pointer_width=\"64\"",
+              "target_vendor=\"unknown\"",
+              "unix"
+            ]
+          },
+          "compiler_cfg_evidence": {
+            "run_id": "9d97e550ab6e0c9de235611888c8259a",
+            "source": "report.probes",
+            "index": 188
+          },
+          "test": false,
+          "edition": {
+            "state": "value",
+            "value": "2021"
+          },
+          "options": [
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6366673d70726f636d6163726f325f6275696c645f70726f6265",
+              "display": "--cfg=procmacro2_build_probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d65646974696f6e3d32303231",
+              "display": "--edition=2021"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d6e616d653d70726f635f6d6163726f32",
+              "display": "--crate-name=proc_macro2"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d747970653d6c6962",
+              "display": "--crate-type=lib"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6361702d6c696e74733d616c6c6f77",
+              "display": "--cap-lints=allow"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d656d69743d6465702d696e666f2c6d65746164617461",
+              "display": "--emit=dep-info,metadata"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6f75742d646972",
+              "display": "--out-dir"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2f636170747572652d73746f72652f746172676574732f39643937653535306162366530633964653233353631313838386338323539612f64656275672f6275696c642f70726f632d6d6163726f322d613663386663373930346138393365342f6f75742f70726f6265",
+              "display": "/capture-store/targets/9d97e550ab6e0c9de235611888c8259a/debug/build/proc-macro2-a6c8fc7904a893e4/out/probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7372632f70726f62652f70726f635f6d6163726f5f7370616e5f66696c652e7273",
+              "display": "src/probe/proc_macro_span_file.rs"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d746172676574",
+              "display": "--target"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7838365f36342d756e6b6e6f776e2d6c696e75782d676e75",
+              "display": "x86_64-unknown-linux-gnu"
+            }
+          ],
+          "coverage": "ExplicitAndCompilerCfg",
+          "gaps": []
+        }
+      },
+      "invocation": {
+        "state": "value",
+        "value": "438ff45be2cd8b12b253237ace6c1e3e"
+      },
+      "artifacts": [],
+      "binding": "ObservedInvocation",
+      "evidence": [
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 121
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 123
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 132
+        }
+      ]
+    },
+    {
+      "id": "deb859eae701ee053da51d7d9c59bd90e77c18ce94955d0c3e71e4fcc17520e6",
+      "language": "Rust",
+      "name": {
+        "state": "value",
+        "value": "proc_macro2"
+      },
+      "root": {
+        "state": "value",
+        "value": {
+          "encoding": "unix-bytes",
+          "hex": "2f636172676f2f72656769737472792f7372632f696e6465782e6372617465732e696f2d313934396366386336623562353537662f70726f632d6d6163726f322d312e302e3130372f7372632f70726f62652f70726f635f6d6163726f5f7370616e5f6c6f636174696f6e2e7273",
+          "display": "/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-1.0.107/src/probe/proc_macro_span_location.rs"
+        }
+      },
+      "output_kinds": [
+        "lib"
+      ],
+      "role": "Library",
+      "host": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "target": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "configuration": {
+        "language": "rust",
+        "observations": {
+          "explicit_cfg": [
+            "procmacro2_build_probe"
+          ],
+          "expected_cfg": [],
+          "compiler_cfg": {
+            "state": "value",
+            "value": [
+              "debug_assertions",
+              "panic=\"unwind\"",
+              "procmacro2_build_probe",
+              "target_abi=\"\"",
+              "target_arch=\"x86_64\"",
+              "target_endian=\"little\"",
+              "target_env=\"gnu\"",
+              "target_family=\"unix\"",
+              "target_feature=\"fxsr\"",
+              "target_feature=\"sse\"",
+              "target_feature=\"sse2\"",
+              "target_has_atomic=\"16\"",
+              "target_has_atomic=\"32\"",
+              "target_has_atomic=\"64\"",
+              "target_has_atomic=\"8\"",
+              "target_has_atomic=\"ptr\"",
+              "target_os=\"linux\"",
+              "target_pointer_width=\"64\"",
+              "target_vendor=\"unknown\"",
+              "unix"
+            ]
+          },
+          "compiler_cfg_evidence": {
+            "run_id": "9d97e550ab6e0c9de235611888c8259a",
+            "source": "report.probes",
+            "index": 188
+          },
+          "test": false,
+          "edition": {
+            "state": "value",
+            "value": "2021"
+          },
+          "options": [
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6366673d70726f636d6163726f325f6275696c645f70726f6265",
+              "display": "--cfg=procmacro2_build_probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d65646974696f6e3d32303231",
+              "display": "--edition=2021"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d6e616d653d70726f635f6d6163726f32",
+              "display": "--crate-name=proc_macro2"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d747970653d6c6962",
+              "display": "--crate-type=lib"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6361702d6c696e74733d616c6c6f77",
+              "display": "--cap-lints=allow"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d656d69743d6465702d696e666f2c6d65746164617461",
+              "display": "--emit=dep-info,metadata"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6f75742d646972",
+              "display": "--out-dir"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2f636170747572652d73746f72652f746172676574732f39643937653535306162366530633964653233353631313838386338323539612f64656275672f6275696c642f70726f632d6d6163726f322d613663386663373930346138393365342f6f75742f70726f6265",
+              "display": "/capture-store/targets/9d97e550ab6e0c9de235611888c8259a/debug/build/proc-macro2-a6c8fc7904a893e4/out/probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7372632f70726f62652f70726f635f6d6163726f5f7370616e5f6c6f636174696f6e2e7273",
+              "display": "src/probe/proc_macro_span_location.rs"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d746172676574",
+              "display": "--target"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7838365f36342d756e6b6e6f776e2d6c696e75782d676e75",
+              "display": "x86_64-unknown-linux-gnu"
+            }
+          ],
+          "coverage": "ExplicitAndCompilerCfg",
+          "gaps": []
+        }
+      },
+      "invocation": {
+        "state": "value",
+        "value": "5ef4d0fb68c59e450520cd8ace38fb78"
+      },
+      "artifacts": [],
+      "binding": "ObservedInvocation",
+      "evidence": [
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 111
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 112
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 118
+        }
+      ]
+    },
+    {
+      "id": "e95248fde912fc8540bd392bf0dc23bdd9af41494956d2440dc63a190a7ab9ba",
+      "language": "Rust",
+      "name": {
+        "state": "value",
+        "value": "proc_macro2"
+      },
+      "root": {
+        "state": "value",
+        "value": {
+          "encoding": "unix-bytes",
+          "hex": "2f636172676f2f72656769737472792f7372632f696e6465782e6372617465732e696f2d313934396366386336623562353537662f70726f632d6d6163726f322d312e302e3130372f7372632f70726f62652f70726f635f6d6163726f5f7370616e2e7273",
+          "display": "/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-1.0.107/src/probe/proc_macro_span.rs"
+        }
+      },
+      "output_kinds": [
+        "lib"
+      ],
+      "role": "Library",
+      "host": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "target": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "configuration": {
+        "language": "rust",
+        "observations": {
+          "explicit_cfg": [
+            "procmacro2_build_probe"
+          ],
+          "expected_cfg": [],
+          "compiler_cfg": {
+            "state": "value",
+            "value": [
+              "debug_assertions",
+              "panic=\"unwind\"",
+              "procmacro2_build_probe",
+              "target_abi=\"\"",
+              "target_arch=\"x86_64\"",
+              "target_endian=\"little\"",
+              "target_env=\"gnu\"",
+              "target_family=\"unix\"",
+              "target_feature=\"fxsr\"",
+              "target_feature=\"sse\"",
+              "target_feature=\"sse2\"",
+              "target_has_atomic=\"16\"",
+              "target_has_atomic=\"32\"",
+              "target_has_atomic=\"64\"",
+              "target_has_atomic=\"8\"",
+              "target_has_atomic=\"ptr\"",
+              "target_os=\"linux\"",
+              "target_pointer_width=\"64\"",
+              "target_vendor=\"unknown\"",
+              "unix"
+            ]
+          },
+          "compiler_cfg_evidence": {
+            "run_id": "9d97e550ab6e0c9de235611888c8259a",
+            "source": "report.probes",
+            "index": 188
+          },
+          "test": false,
+          "edition": {
+            "state": "value",
+            "value": "2021"
+          },
+          "options": [
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6366673d70726f636d6163726f325f6275696c645f70726f6265",
+              "display": "--cfg=procmacro2_build_probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d65646974696f6e3d32303231",
+              "display": "--edition=2021"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d6e616d653d70726f635f6d6163726f32",
+              "display": "--crate-name=proc_macro2"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d747970653d6c6962",
+              "display": "--crate-type=lib"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6361702d6c696e74733d616c6c6f77",
+              "display": "--cap-lints=allow"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d656d69743d6465702d696e666f2c6d65746164617461",
+              "display": "--emit=dep-info,metadata"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6f75742d646972",
+              "display": "--out-dir"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2f636170747572652d73746f72652f746172676574732f39643937653535306162366530633964653233353631313838386338323539612f64656275672f6275696c642f70726f632d6d6163726f322d613663386663373930346138393365342f6f75742f70726f6265",
+              "display": "/capture-store/targets/9d97e550ab6e0c9de235611888c8259a/debug/build/proc-macro2-a6c8fc7904a893e4/out/probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7372632f70726f62652f70726f635f6d6163726f5f7370616e2e7273",
+              "display": "src/probe/proc_macro_span.rs"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d746172676574",
+              "display": "--target"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7838365f36342d756e6b6e6f776e2d6c696e75782d676e75",
+              "display": "x86_64-unknown-linux-gnu"
+            }
+          ],
+          "coverage": "ExplicitAndCompilerCfg",
+          "gaps": []
+        }
+      },
+      "invocation": {
+        "state": "value",
+        "value": "62581fddc8104d4f2b7199520b624792"
+      },
+      "artifacts": [],
+      "binding": "ObservedInvocation",
+      "evidence": [
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 98
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 99
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 110
+        }
+      ]
+    },
+    {
+      "id": "4ba1e7c507d3c3923b0fb42d514cfefa542bcae39b38f87a14b70adf54dc2c4f",
+      "language": "Rust",
+      "name": {
+        "state": "value",
+        "value": "proc_macro2"
+      },
+      "root": {
+        "state": "value",
+        "value": {
+          "encoding": "unix-bytes",
+          "hex": "2f636172676f2f72656769737472792f7372632f696e6465782e6372617465732e696f2d313934396366386336623562353537662f70726f632d6d6163726f322d312e302e3130372f7372632f70726f62652f70726f635f6d6163726f5f7370616e5f6c6f636174696f6e2e7273",
+          "display": "/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-1.0.107/src/probe/proc_macro_span_location.rs"
+        }
+      },
+      "output_kinds": [
+        "lib"
+      ],
+      "role": "Library",
+      "host": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "target": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "configuration": {
+        "language": "rust",
+        "observations": {
+          "explicit_cfg": [
+            "procmacro2_build_probe"
+          ],
+          "expected_cfg": [],
+          "compiler_cfg": {
+            "state": "value",
+            "value": [
+              "debug_assertions",
+              "panic=\"unwind\"",
+              "procmacro2_build_probe",
+              "target_abi=\"\"",
+              "target_arch=\"x86_64\"",
+              "target_endian=\"little\"",
+              "target_env=\"gnu\"",
+              "target_family=\"unix\"",
+              "target_feature=\"fxsr\"",
+              "target_feature=\"sse\"",
+              "target_feature=\"sse2\"",
+              "target_has_atomic=\"16\"",
+              "target_has_atomic=\"32\"",
+              "target_has_atomic=\"64\"",
+              "target_has_atomic=\"8\"",
+              "target_has_atomic=\"ptr\"",
+              "target_os=\"linux\"",
+              "target_pointer_width=\"64\"",
+              "target_vendor=\"unknown\"",
+              "unix"
+            ]
+          },
+          "compiler_cfg_evidence": {
+            "run_id": "9d97e550ab6e0c9de235611888c8259a",
+            "source": "report.probes",
+            "index": 188
+          },
+          "test": false,
+          "edition": {
+            "state": "value",
+            "value": "2021"
+          },
+          "options": [
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6366673d70726f636d6163726f325f6275696c645f70726f6265",
+              "display": "--cfg=procmacro2_build_probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d65646974696f6e3d32303231",
+              "display": "--edition=2021"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d6e616d653d70726f635f6d6163726f32",
+              "display": "--crate-name=proc_macro2"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d747970653d6c6962",
+              "display": "--crate-type=lib"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6361702d6c696e74733d616c6c6f77",
+              "display": "--cap-lints=allow"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d656d69743d6465702d696e666f2c6d65746164617461",
+              "display": "--emit=dep-info,metadata"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6f75742d646972",
+              "display": "--out-dir"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2f636170747572652d73746f72652f746172676574732f39643937653535306162366530633964653233353631313838386338323539612f72656c656173652f6275696c642f70726f632d6d6163726f322d386563626237393663663861346538332f6f75742f70726f6265",
+              "display": "/capture-store/targets/9d97e550ab6e0c9de235611888c8259a/release/build/proc-macro2-8ecbb796cf8a4e83/out/probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7372632f70726f62652f70726f635f6d6163726f5f7370616e5f6c6f636174696f6e2e7273",
+              "display": "src/probe/proc_macro_span_location.rs"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d746172676574",
+              "display": "--target"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7838365f36342d756e6b6e6f776e2d6c696e75782d676e75",
+              "display": "x86_64-unknown-linux-gnu"
+            }
+          ],
+          "coverage": "ExplicitAndCompilerCfg",
+          "gaps": []
+        }
+      },
+      "invocation": {
+        "state": "value",
+        "value": "71edd6780d0db4217dc09491ac7fb2da"
+      },
+      "artifacts": [],
+      "binding": "ObservedInvocation",
+      "evidence": [
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 1978
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 1980
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 1997
+        }
+      ]
+    },
+    {
+      "id": "db721ddca634c2ed3d6490981c77ea614b6f1a750908937c3ab4ed84f36c02b5",
+      "language": "Rust",
+      "name": {
+        "state": "value",
+        "value": "proc_macro2"
+      },
+      "root": {
+        "state": "value",
+        "value": {
+          "encoding": "unix-bytes",
+          "hex": "2f636172676f2f72656769737472792f7372632f696e6465782e6372617465732e696f2d313934396366386336623562353537662f70726f632d6d6163726f322d312e302e3130372f7372632f70726f62652f70726f635f6d6163726f5f7370616e5f66696c652e7273",
+          "display": "/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proc-macro2-1.0.107/src/probe/proc_macro_span_file.rs"
+        }
+      },
+      "output_kinds": [
+        "lib"
+      ],
+      "role": "Library",
+      "host": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "target": {
+        "state": "value",
+        "value": "x86_64-unknown-linux-gnu"
+      },
+      "configuration": {
+        "language": "rust",
+        "observations": {
+          "explicit_cfg": [
+            "procmacro2_build_probe"
+          ],
+          "expected_cfg": [],
+          "compiler_cfg": {
+            "state": "value",
+            "value": [
+              "debug_assertions",
+              "panic=\"unwind\"",
+              "procmacro2_build_probe",
+              "target_abi=\"\"",
+              "target_arch=\"x86_64\"",
+              "target_endian=\"little\"",
+              "target_env=\"gnu\"",
+              "target_family=\"unix\"",
+              "target_feature=\"fxsr\"",
+              "target_feature=\"sse\"",
+              "target_feature=\"sse2\"",
+              "target_has_atomic=\"16\"",
+              "target_has_atomic=\"32\"",
+              "target_has_atomic=\"64\"",
+              "target_has_atomic=\"8\"",
+              "target_has_atomic=\"ptr\"",
+              "target_os=\"linux\"",
+              "target_pointer_width=\"64\"",
+              "target_vendor=\"unknown\"",
+              "unix"
+            ]
+          },
+          "compiler_cfg_evidence": {
+            "run_id": "9d97e550ab6e0c9de235611888c8259a",
+            "source": "report.probes",
+            "index": 188
+          },
+          "test": false,
+          "edition": {
+            "state": "value",
+            "value": "2021"
+          },
+          "options": [
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6366673d70726f636d6163726f325f6275696c645f70726f6265",
+              "display": "--cfg=procmacro2_build_probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d65646974696f6e3d32303231",
+              "display": "--edition=2021"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d6e616d653d70726f635f6d6163726f32",
+              "display": "--crate-name=proc_macro2"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d63726174652d747970653d6c6962",
+              "display": "--crate-type=lib"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6361702d6c696e74733d616c6c6f77",
+              "display": "--cap-lints=allow"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d656d69743d6465702d696e666f2c6d65746164617461",
+              "display": "--emit=dep-info,metadata"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d6f75742d646972",
+              "display": "--out-dir"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2f636170747572652d73746f72652f746172676574732f39643937653535306162366530633964653233353631313838386338323539612f72656c656173652f6275696c642f70726f632d6d6163726f322d386563626237393663663861346538332f6f75742f70726f6265",
+              "display": "/capture-store/targets/9d97e550ab6e0c9de235611888c8259a/release/build/proc-macro2-8ecbb796cf8a4e83/out/probe"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7372632f70726f62652f70726f635f6d6163726f5f7370616e5f66696c652e7273",
+              "display": "src/probe/proc_macro_span_file.rs"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "2d2d746172676574",
+              "display": "--target"
+            },
+            {
+              "encoding": "unix-bytes",
+              "hex": "7838365f36342d756e6b6e6f776e2d6c696e75782d676e75",
+              "display": "x86_64-unknown-linux-gnu"
+            }
+          ],
+          "coverage": "ExplicitAndCompilerCfg",
+          "gaps": []
+        }
+      },
+      "invocation": {
+        "state": "value",
+        "value": "8217a5431742ff959778d32472145211"
+      },
+      "artifacts": [],
+      "binding": "ObservedInvocation",
+      "evidence": [
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 1998
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 2001
+        },
+        {
+          "run_id": "9d97e550ab6e0c9de235611888c8259a",
+          "source": "events.log",
+          "index": 2011
+        }
+      ]
+    }
+  ]
+}

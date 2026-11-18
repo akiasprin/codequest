@@ -297,11 +297,7 @@ fn project_impl(
     mut output: Option<&mut dyn super::normalized::Sink>,
 ) -> Result<Generation> {
     let root = snapshot.root.display();
-    let units: HashMap<_, _> = snapshot
-        .units
-        .iter()
-        .map(|u| Ok((u.id.clone(), super::identity::unit_key(u, &root)?)))
-        .collect::<Result<_>>()?;
+    let units = super::identity::compilation_identities(&snapshot.units, &root)?.units;
     let mut ids = HashMap::new();
     for e in &snapshot.entities {
         let id = if e.kind == EntityKind::CompilationUnit {
@@ -642,7 +638,11 @@ fn project_impl(
         canonical_set!(shard.relations, "relation");
         canonical_set!(shard.documents, "document");
     }
-    let mut cfgs: Vec<_> = units.values().collect();
+    let mut cfgs = snapshot
+        .units
+        .iter()
+        .map(|u| super::identity::unit_key(u, &root))
+        .collect::<Result<Vec<_>>>()?;
     cfgs.sort();
     cfgs.dedup();
     let mut producers: Vec<_> = snapshot

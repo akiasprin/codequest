@@ -91,17 +91,12 @@ fn canonicalize_impl(
 ) -> Result<Option<super::normalized::Projection>> {
     let started = std::time::Instant::now();
     let root = s.root.display();
-    let units = s
-        .units
-        .iter()
-        .map(|u| Ok((u.id.clone(), super::identity::unit_key(u, &root)?)))
-        .collect::<Result<BTreeMap<_, _>>>()?;
-    if units.values().collect::<BTreeSet<_>>().len() != units.len() {
-        return Err(Error::new(
-            "ConflictingCompilationContext",
-            "multiple observations collapse to one compilation identity; cannot publish ambiguous unit/context records",
-        ));
+    let contexts = super::identity::compilation_identities(&s.units, &root)?;
+    contexts.report(s);
+    for entity in &mut s.entities {
+        contexts.mark(entity);
     }
+    let units = contexts.units.into_iter().collect::<BTreeMap<_, _>>();
     let mut p = s.production.take().unwrap_or_default();
     p.unit_observations = s
         .units

@@ -41,6 +41,7 @@ pub fn validate(
     source: &dyn Source,
     content: &dyn ContentReader,
 ) -> Result<()> {
+    super::identity::compilation_identities(&header.units, &header.root.display())?;
     super::validate::validate_metadata(header, content)?;
     let mut ids = HashSet::new();
     let mut bodies = HashSet::new();
@@ -379,17 +380,9 @@ pub fn canonicalize(
 ) -> Result<normalized::Projection> {
     let started = std::time::Instant::now();
     let root = header.root.display();
-    let units = header
-        .units
-        .iter()
-        .map(|u| Ok((u.id.clone(), super::identity::unit_key(u, &root)?)))
-        .collect::<Result<HashMap<_, _>>>()?;
-    if units.values().collect::<HashSet<_>>().len() != units.len() {
-        return Err(Error::new(
-            "ConflictingCompilationContext",
-            "multiple observations collapse to one compilation identity",
-        ));
-    }
+    let contexts = super::identity::compilation_identities(&header.units, &root)?;
+    contexts.report(header);
+    let units = contexts.units;
     let handles = super::identity::Handles::new(header, source)?;
     let mut p = header.production.take().unwrap_or_default();
     p.unit_observations = header
@@ -698,7 +691,11 @@ pub fn canonicalize(
         }
         Ok(())
     })?;
-    let mut cfgs = units.values().collect::<Vec<_>>();
+    let mut cfgs = header
+        .units
+        .iter()
+        .map(|u| super::identity::unit_key(u, &root))
+        .collect::<Result<Vec<_>>>()?;
     cfgs.sort();
     cfgs.dedup();
     let mut producers = header

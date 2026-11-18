@@ -14,12 +14,16 @@ pub fn validate_metadata(snapshot: &SemanticSnapshot, content: &dyn ContentReade
 }
 fn validate_observations(snapshot: &SemanticSnapshot) -> Result<()> {
     if let Some(p) = &snapshot.production {
+        let observed = p
+            .unit_observations
+            .iter()
+            .map(|o| o.observed.clone())
+            .collect::<Vec<_>>();
+        let identities =
+            super::identity::compilation_identities(&observed, &snapshot.root.display())?;
         for observation in &p.unit_observations {
             if !snapshot.units.iter().any(|u| u.id == observation.unit)
-                || crate::semantic::identity::unit_key(
-                    &observation.observed,
-                    &snapshot.root.display(),
-                )? != observation.unit
+                || identities.units.get(&observation.observed.id) != Some(&observation.unit)
             {
                 return Err(Error::new(
                     "InvalidObservationBinding",

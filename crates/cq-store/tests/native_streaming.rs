@@ -70,6 +70,15 @@ fn compare_mapping(raw: Value, language: Language, mirrored: bool) {
     compare_scope(raw, language, mirrored, None);
 }
 fn compare_scope(raw: Value, language: Language, mirrored: bool, failed: Option<&str>) {
+    compare_observations(raw, language, mirrored, failed, false);
+}
+fn compare_observations(
+    raw: Value,
+    language: Language,
+    mirrored: bool,
+    failed: Option<&str>,
+    repeated: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalStore::open(dir.path()).unwrap();
     let path = dir.path().join("native.json");
@@ -119,6 +128,11 @@ fn compare_scope(raw: Value, language: Language, mirrored: bool, failed: Option<
                 seed.units.push(u);
             }
         }
+    }
+    if repeated {
+        let mut extra = seed.units[0].clone();
+        extra.id = "repeated-compile-observation".into();
+        seed.units.push(extra);
     }
     if let Some(failed) = failed {
         let production = seed.production.get_or_insert_with(Default::default);
@@ -180,6 +194,20 @@ fn compare_scope(raw: Value, language: Language, mirrored: bool, failed: Option<
         assert_eq!(streamed.get(k), Some(v), "native fact {k}");
     }
     semantic::identity::assign(&mut full).unwrap();
+    if repeated {
+        let run = full.entities.iter().find(|e| e.name == "run").unwrap();
+        let target = full.entities.iter().find(|e| e.name == "target").unwrap();
+        assert!(run.stable_handle.as_ref().unwrap().starts_with("cqg1:"));
+        assert!(run.attributes.contains_key("identity_scope_reason"));
+        assert!(target.stable_handle.as_ref().unwrap().starts_with("cq1:"));
+        // A caller cannot upgrade an ambiguous context by preassigning a
+        // persistent handle before entering the full projection path.
+        full.entities
+            .iter_mut()
+            .find(|e| e.name == "run")
+            .unwrap()
+            .stable_handle = Some("cq1:invalid-preassigned-handle".into());
+    }
     let expected = store.prepare_analysis(full).unwrap();
     let counted = Counted {
         journal: &journal,
@@ -187,6 +215,21 @@ fn compare_scope(raw: Value, language: Language, mirrored: bool, failed: Option<
     };
     let actual = store.prepare_records(thin, &counted).unwrap();
     assert_eq!(counted.full_passes.load(Ordering::Relaxed), 2);
+    if repeated {
+        assert!(
+            actual
+                .header
+                .production
+                .as_ref()
+                .unwrap()
+                .scopes
+                .iter()
+                .any(|scope| scope.key.unit.starts_with("cqo1:")
+                    && scope.key.family == cq_core::semantic::scope::FactFamily::Entity
+                    && scope.rows > 0),
+            "observation-scoped facts must not fall into the project scope"
+        );
+    }
     for family in ["entity", "body", "occurrence", "relation", "document"] {
         let mut a = BTreeMap::new();
         let mut b = BTreeMap::new();
@@ -250,6 +293,10 @@ fn real_sysroot_parent_export_preserves_the_missing_container() {
 #[test]
 fn family_projection_preserves_partial_scope_filtering() {
     compare_scope(frame(), Language::Rust, true, Some("captured-0"));
+}
+#[test]
+fn repeated_compile_observations_preserve_all_scopes_without_false_stable_handles() {
+    compare_observations(frame(), Language::Rust, true, None, true);
 }
 #[test]
 fn archive_rejects_utf8_splits_before_emitting_records() {

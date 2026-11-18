@@ -344,11 +344,13 @@ impl Spool {
             diagnostic_root: None,
             file: Mutex::new(tempfile::NamedTempFile::new()?),
             entries: BTreeMap::new(),
-            units: header
-                .units
-                .iter()
-                .map(|u| cq_core::semantic::identity::unit_key(u, &header.root.display()))
-                .collect::<Result<_>>()?,
+            units: cq_core::semantic::identity::compilation_identities(
+                &header.units,
+                &header.root.display(),
+            )?
+            .units
+            .into_values()
+            .collect(),
             universe: String::new(),
             sources: BTreeMap::new(),
             by_shard: BTreeMap::new(),

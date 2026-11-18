@@ -200,6 +200,8 @@ cargo test -p cq-store --test native_streaming --test record_validation --test d
 
 默认用例包含从真实 Brocade 导出缩减的 Rust sysroot 跨文件父模块记录，并验证完整编译与部分失败编译的规范化结果一致性。身份与投影按记录种类读取，回归限制非必要全量遍历；缺失父模块在实体集合读取完成后立即报告声明和缺失目标。外部大型导出回放仍需显式提供 `CQ_NATIVE_EXPORTS`，局部回归不能代替全库性能验收。
 
+同一配置下的重复编译观察（例如 build script 的能力探测）保留为独立的代内上下文，并报告 `ObservationScopedCompilationIdentity`；相关声明使用代内句柄，不声称跨版本稳定。非歧义上下文的稳定身份规则保持不变。`fixtures/native/repeated-rust-observations.json` 保留真实探测的三组重复观察；可通过 `cargo run -p cq-store --example audit_compilation_contexts -- /path/to/report.json` 单独回放完整编译元数据、拓扑与规范化准备，避免为检查身份重新运行 HIR。
+
 静态事实覆盖的是实际采集的构建配置。动态派发、回调、宏展开、链接选择和外部输入可能不完整；参数贡献关系不是完整 SSA，静态路径不是实际运行轨迹。作者理由需要直接材料或带证据、可复核的理解标注。PDF 仅处理文本层，未包含 OCR。
 
 语言结构的完整本地验收入口：
