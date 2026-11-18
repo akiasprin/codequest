@@ -218,6 +218,10 @@ pub fn index_repository(
     }
     summary["transfer"] = revision.metadata["transfer"].clone();
     summary["analysis_transport"] = transport;
+    if let Some(rejections) = revision.metadata.get("storage_rejections") {
+        summary["state"] = serde_json::json!("complete_with_warnings");
+        summary["storage_rejections"] = rejections.clone();
+    }
     Ok(summary)
 }
 fn release_scratch_memory() {

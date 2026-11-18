@@ -33,11 +33,31 @@ pub fn finish(store: &Path, project: &str, state: &str) {
         && let Ok(mut value) = serde_json::from_slice::<Value>(&bytes)
     {
         value["state"] = json!(state);
+        if state == "complete" && value["warning_count"].as_u64().unwrap_or(0) > 0 {
+            value["state"] = json!("complete_with_warnings");
+        }
         value["updated_ms"] = json!(cq_capture_protocol::now_ms());
         let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
         if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() {
             let _ = std::fs::rename(tmp, p);
         }
+    }
+}
+/// A warning updates the progress bar rather than printing an unstructured log.
+pub fn warning(store: &Path, project: &str, warning: &Value) {
+    let file = path(store, project);
+    let mut value = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({"project":project}));
+    value["warning_count"] = json!(value["warning_count"].as_u64().unwrap_or(0) + 1);
+    value["last_warning"] = warning.clone();
+    value["updated_ms"] = json!(cq_capture_protocol::now_ms());
+    let tmp = file.with_extension(format!("{}.warning.tmp", std::process::id()));
+    let _ = std::fs::create_dir_all(file.parent().unwrap());
+    if std::fs::write(&tmp, serde_json::to_vec(&value).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(tmp, file);
     }
 }
 pub struct Progress {
@@ -74,6 +94,8 @@ impl Progress {
         let mut p = Self::stage(store, project, "preflight", "准备索引", None, "项");
         p.value["started_ms"] = json!(cq_capture_protocol::now_ms());
         p.value["owner_pid"] = json!(std::process::id());
+        p.value.as_object_mut().unwrap().remove("warning_count");
+        p.value.as_object_mut().unwrap().remove("last_warning");
         p.persist();
         p
     }
@@ -85,6 +107,17 @@ impl Progress {
         total: Option<u64>,
         unit: &str,
     ) -> Self {
+        Self::stage_with_workers(store, project, phase, label, total, unit, 1)
+    }
+    pub fn stage_with_workers(
+        store: &Path,
+        project: &str,
+        phase: &str,
+        label: &str,
+        total: Option<u64>,
+        unit: &str,
+        workers: usize,
+    ) -> Self {
         let path = path(store, project);
         let old = std::fs::read(&path)
             .ok()
@@ -93,9 +126,14 @@ impl Progress {
         let now = cq_capture_protocol::now_ms();
         let mut p = Self {
             path,
-            value: json!({"project":project,"phase":phase,"label":label,"completed":0,"total":total,"unit":unit,"workers":1,"state":"running","started_ms":old["started_ms"].as_u64().unwrap_or(now),"owner_pid":old["owner_pid"].as_u64().unwrap_or(std::process::id()as u64),"phase_started_ms":now,"updated_ms":now}),
+            value: json!({"project":project,"phase":phase,"label":label,"completed":0,"total":total,"unit":unit,"workers":workers,"state":"running","started_ms":old["started_ms"].as_u64().unwrap_or(now),"owner_pid":old["owner_pid"].as_u64().unwrap_or(std::process::id()as u64),"phase_started_ms":now,"updated_ms":now}),
             last: Instant::now(),
         };
+        for field in ["warning_count", "last_warning"] {
+            if let Some(v) = old.get(field) {
+                p.value[field] = v.clone();
+            }
+        }
         p.persist();
         p
     }
@@ -138,7 +176,22 @@ impl Progress {
     }
     fn persist(&mut self) {
         self.last = Instant::now();
+        // A coordinator may outlive a subordinate stage that raised a warning.
+        if let Ok(bytes) = std::fs::read(&self.path)
+            && let Ok(latest) = serde_json::from_slice::<Value>(&bytes)
+            && latest["started_ms"] == self.value["started_ms"]
+            && latest["warning_count"].as_u64().unwrap_or(0)
+                > self.value["warning_count"].as_u64().unwrap_or(0)
+        {
+            self.value["warning_count"] = latest["warning_count"].clone();
+            self.value["last_warning"] = latest["last_warning"].clone();
+        }
         self.value["updated_ms"] = json!(cq_capture_protocol::now_ms());
+        if self.value["state"] == "complete"
+            && self.value["warning_count"].as_u64().unwrap_or(0) > 0
+        {
+            self.value["state"] = json!("complete_with_warnings");
+        }
         let _ = (|| -> std::io::Result<()> {
             std::fs::create_dir_all(self.path.parent().unwrap())?;
             let tmp = self
@@ -188,5 +241,58 @@ pub fn format(value: &Value, elapsed_secs: u64, tick: usize) -> String {
             )
         })
         .unwrap_or_default();
-    format!("{label} [{bar}] {count} | {elapsed_secs}s | {workers} workers{detail}")
+    let warnings = value["warning_count"].as_u64().unwrap_or(0);
+    let warning = if warnings > 0 {
+        format!(" | 告警 {warnings}：已拒绝超限内容，使用 gaps 查询原文位置")
+    } else {
+        String::new()
+    };
+    format!("{label} [{bar}] {count} | {elapsed_secs}s | {workers} workers{detail}{warning}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn warnings_survive_phase_and_coordinator_completion_and_reset_next_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut coordinator = Progress::begin(temp.path(), "warn");
+        warning(
+            temp.path(),
+            "warn",
+            &json!({"code":"OversizedValueRejected"}),
+        );
+        let mut next = Progress::stage(temp.path(), "warn", "encode", "编码", Some(1), "事实");
+        next.count(1);
+        coordinator.finish("complete");
+        let read = || {
+            serde_json::from_slice::<Value>(&std::fs::read(path(temp.path(), "warn")).unwrap())
+                .unwrap()
+        };
+        let value = read();
+        assert_eq!(value["warning_count"], 1);
+        assert_eq!(value["state"], "complete_with_warnings");
+        assert!(format(&value, 2, 0).contains("告警 1"));
+        // A distinct run must not inherit the previous run's warning.
+        std::thread::sleep(Duration::from_millis(2));
+        Progress::begin(temp.path(), "warn");
+        assert!(read()["warning_count"].is_null());
+    }
+    #[test]
+    fn parallel_phase_persists_its_budget_on_the_initial_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut p =
+            Progress::stage_with_workers(temp.path(), "p", "encode", "编码", Some(12), "事实", 128);
+        let initial: Value =
+            serde_json::from_slice(&std::fs::read(path(temp.path(), "p")).unwrap()).unwrap();
+        assert_eq!(initial["workers"], 128);
+        assert_eq!(initial["completed"], 0);
+        assert_eq!(initial["total"], 12);
+        p.count(12);
+        let final_value: Value =
+            serde_json::from_slice(&std::fs::read(path(temp.path(), "p")).unwrap()).unwrap();
+        assert_eq!(final_value["workers"], 128);
+        assert!(format(&final_value, 3, 0).contains("12/12"));
+        assert!(format(&final_value, 3, 0).contains("128 workers"));
+    }
 }

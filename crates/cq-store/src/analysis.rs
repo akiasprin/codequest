@@ -953,6 +953,7 @@ impl LocalStore {
         mut header: SemanticSnapshot,
         source: &dyn cq_core::semantic::records::Source,
     ) -> Result<Prepared> {
+        crate::facts::limits::reject_oversized_build_events(&self.root, &mut header)?;
         cq_core::semantic::record_projection::validate(&header, source, &self.content)?;
         if header.previous.is_some() && !self.paged_enabled(&header.project) {
             self.migrate_paged(&header.project)?;
@@ -972,6 +973,7 @@ impl LocalStore {
         })
     }
     pub fn prepare_analysis(&self, mut snapshot: SemanticSnapshot) -> Result<Prepared> {
+        crate::facts::limits::reject_oversized_build_events(&self.root, &mut snapshot)?;
         if snapshot.previous.is_some() && !self.paged_enabled(&snapshot.project) {
             self.migrate_paged(&snapshot.project)?;
         }

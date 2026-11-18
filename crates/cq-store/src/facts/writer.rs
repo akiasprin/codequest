@@ -1165,6 +1165,19 @@ fn write(
     let mut meta = json!({"project":s.project,"revision":s.revision,"schema_version":s.schema_version,"root":s.root,"created_ms":s.created_ms,"previous":s.previous,"counts":{"entities":s.entities.len(),"relations":s.relations.len(),"occurrences":s.occurrences.len(),"bodies":s.bodies.len(),"documents":s.documents.len(),"contexts":s.contexts.len(),"units":s.units.len(),"external":s.entities.iter().filter(|e|e.external).count(),"coverage":s.coverage.len(),"gaps":s.gaps.len()},"entity_kinds":kinds,"relation_kinds":relations});
     let indexed = prior.is_none_or(|r| r.metadata["search_index"]["version"] == 1);
     meta["search_index"] = json!({"version":if indexed{1}else{0},"vector_model":vector_model,"upgrade_required":!indexed,"ranking_window":1000});
+    let rejections = s
+        .builds
+        .iter()
+        .flat_map(|b| {
+            b.rejected_fields
+                .iter()
+                .map(move |r| json!({"family":"build","id":b.id,"rejection":r}))
+        })
+        .collect::<Vec<_>>();
+    if !rejections.is_empty() {
+        meta["storage_rejections"] = json!(rejections);
+        meta["completion"] = json!("complete_with_warnings");
+    }
     if let Some(stats) = &statistics {
         meta["counts"] = stats.counts.clone();
         meta["entity_kinds"] = json!(stats.entity_kinds);

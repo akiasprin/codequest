@@ -848,7 +848,7 @@ impl<'a> Engine<'a> {
         let m = context.as_ref().unwrap_or(self.reader.metadata());
         Ok(match q.operation.as_str() {
             "overview" => vec![
-                json!({"project":self.reader.project(),"revision":self.reader.revision(),"entities":m["counts"]["entities"],"relations":m["counts"]["relations"],"occurrences":m["counts"]["occurrences"],"documents":m["counts"]["documents"],"kinds":m["entity_kinds"],"context_count":m["counts"]["contexts"],"explanation":"Compiler facts in separate contexts; author intent requires separately cited evidence."}),
+                json!({"project":self.reader.project(),"revision":self.reader.revision(),"entities":m["counts"]["entities"],"relations":m["counts"]["relations"],"occurrences":m["counts"]["occurrences"],"documents":m["counts"]["documents"],"kinds":m["entity_kinds"],"context_count":m["counts"]["contexts"],"completion":self.reader.metadata()["completion"],"storage_rejections":self.reader.metadata()["storage_rejections"],"explanation":"Compiler facts in separate contexts; author intent requires separately cited evidence."}),
             ],
             "schema" => vec![
                 json!({"nodes":m["entity_kinds"],"relationships":m["relation_kinds"],"separate_occurrences":true}),

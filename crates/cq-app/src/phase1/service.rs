@@ -688,7 +688,7 @@ impl Service {
         }
         if operation == "status" {
             return Ok(Some(
-                json!({"project":project,"revision":reader.revision(),"created_ms":metadata["created_ms"],"counts":metadata["counts"],"database":"Ladybug","format":2,"read_stats":reader.stats()}),
+                json!({"project":project,"revision":reader.revision(),"created_ms":metadata["created_ms"],"counts":metadata["counts"],"database":"Ladybug","format":2,"completion":metadata["completion"],"storage_rejections":metadata["storage_rejections"],"read_stats":reader.stats()}),
             ));
         }
         if operation == "generation" {

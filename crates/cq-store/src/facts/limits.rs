@@ -41,7 +41,10 @@ pub fn report(
     if key_bytes > super::objects::MAX_OBJECT {
         fields.insert(0,json!({"path":"$storage_key","category":"Key","bytes":key_bytes,"digest":digest(format!("{family}:{id}").as_bytes()),"preview":id.chars().take(120).collect::<String>()}));
     }
-    let data = json!({"version":1,"kind":"unsupported_oversized_record","family":family,"id":(id.len()<=4096).then_some(id),"identity":{"bytes":id.len(),"digest":digest(id.as_bytes()),"preview":id.chars().take(120).collect::<String>()},"key_bytes":key_bytes,"value_bytes":bytes,"record_bytes":bytes,"limit_bytes":super::objects::MAX_OBJECT,"fields":fields,"originals":originals,"native_exports":native_exports,"action":"read frozen original ranges or retained native export; do not truncate keys or publish incomplete facts"});
+    let capture_reports = value["captured_report"].as_str().filter(|run| crate::atomic::valid_id(run)).map(|run| {
+        json!({"run":run,"report_path":root.map(|r|r.join("runs").join(run).join("report.json")),"journal_path":root.map(|r|r.join("runs").join(run).join("events.log")),"collection":"/invocations","meaning":"build events retain started/process/finished/argument_files observations from this sealed report"})
+    });
+    let data = json!({"version":1,"kind":"unsupported_oversized_record","family":family,"id":(id.len()<=4096).then_some(id),"identity":{"bytes":id.len(),"digest":digest(id.as_bytes()),"preview":id.chars().take(120).collect::<String>()},"key_bytes":key_bytes,"value_bytes":bytes,"record_bytes":bytes,"limit_bytes":super::objects::MAX_OBJECT,"fields":fields,"originals":originals,"capture_report":capture_reports,"native_exports":native_exports,"action":"read frozen original ranges or retained capture/native export; rejected content must be reported explicitly"});
     let path: Option<PathBuf> = root.map(|r| {
         r.join("limit-reports").join(format!(
             "{}.json",
@@ -55,6 +58,78 @@ pub fn report(
         "OversizedFact",
         serde_json::to_string(&json!({"report":path,"details":data}))?,
     ))
+}
+
+/// Reject the optional inline event collection, retaining the actual build
+/// identity/outcome and a typed receipt. Required symbol/reference integrity
+/// checks remain unchanged. Run this before canonical preparation, not after
+/// millions of facts have already been written.
+pub fn reject_oversized_build_events(root: &Path, header: &mut SemanticSnapshot) -> Result<()> {
+    for i in 0..header.builds.len() {
+        let build = &header.builds[i];
+        let encoded = serde_json::to_vec(build)?;
+        if encoded.len() <= super::objects::MAX_OBJECT || build.events.is_empty() {
+            continue;
+        }
+        let original = build
+            .captured_report
+            .as_ref()
+            .filter(|id| crate::atomic::valid_id(id))
+            .map(|id| root.join("runs").join(id).join("report.json"))
+            .filter(|p| p.is_file());
+        // Without a retained original, rejecting the collection would lose
+        // evidence. Keep the ordinary explicit refusal in that case.
+        let Some(original) = original else { continue };
+        let value = serde_json::to_value(build)?;
+        let refusal = report(
+            Some(root),
+            "build",
+            &build.id,
+            &value,
+            encoded.len(),
+            Some(header),
+        )?;
+        let diagnostic: Value = serde_json::from_str(&refusal.message())?;
+        let report = PathBuf::from(
+            diagnostic["report"]
+                .as_str()
+                .ok_or_else(|| Error::new("InvalidLimitReport", "missing report path"))?,
+        );
+        let events = serde_json::to_vec(&build.events)?;
+        let receipt = RejectedField {
+            field: "/events".into(),
+            bytes: events.len() as u64,
+            sha256: digest(&events),
+            reason: "unsupported_oversized_inline_collection".into(),
+            report: NativeValue::new(report.as_os_str()),
+            originals: vec![NativeValue::new(original.as_os_str())],
+        };
+        let mut retained = build.clone();
+        retained.events.clear();
+        retained.rejected_fields.push(receipt.clone());
+        if serde_json::to_vec(&retained)?.len() > super::objects::MAX_OBJECT {
+            return Err(refusal);
+        }
+        let run = build.id.clone();
+        header.builds[i] = retained;
+        let mut gap = Gap::new(
+            "OversizedValueRejected",
+            format!("build:{run}/events"),
+            serde_json::to_string(&receipt)?,
+        );
+        gap.evidence.push(EvidenceRef {
+            run_id: run.clone(),
+            source: "report.json#/invocations".into(),
+            index: None,
+        });
+        header.gaps.push(gap);
+        cq_core::progress::warning(
+            root,
+            &header.project,
+            &json!({"code":"OversizedValueRejected","family":"build","id":run,"field":"/events","bytes":receipt.bytes,"report":receipt.report,"originals":receipt.originals}),
+        );
+    }
+    Ok(())
 }
 pub fn root(objects: &Path) -> Option<&Path> {
     let parent = objects.parent()?;

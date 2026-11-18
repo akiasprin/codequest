@@ -33,6 +33,7 @@ pub fn observe_command(
         outcome,
         exit: result.exit,
         events: vec![],
+        rejected_fields: vec![],
         captured_report: None,
         gaps: result
             .stop

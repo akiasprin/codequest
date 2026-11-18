@@ -159,6 +159,7 @@ pub fn analyze(
                     .cloned()
             })
             .collect(),
+        rejected_fields: vec![],
         captured_report: Some(report.run.id.clone()),
         gaps: report.gaps.clone(),
     });
