@@ -195,7 +195,7 @@ impl<'a> FrameSources<'a> {
             SourceSnapshot::seal(local.into_values().collect(), self.binding.clone(), vec![]);
         (fragment, selected)
     }
-    fn merge(&mut self, files: &[FileRevision]) -> Result<()> {
+    pub(super) fn merge(&mut self, files: &[FileRevision]) -> Result<()> {
         for f in files {
             if self
                 .known
@@ -521,6 +521,36 @@ pub(super) fn emit_frame(
     gap_keys: &mut HashSet<String>,
     source_state: &mut FrameSources,
 ) -> Result<()> {
+    let output = prepare_frame(
+        s,
+        frame,
+        mapping,
+        content,
+        provider,
+        language,
+        version,
+        file,
+        source_state,
+    )?;
+    *peak = (*peak).max(output.peak);
+    merge_frame(s, output, sink, first, gap_keys, source_state)
+}
+pub(super) struct FrameOutput {
+    pub fragment: SemanticSnapshot,
+    pub peak: usize,
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_frame(
+    s: &SemanticSnapshot,
+    frame: &Value,
+    mapping: &[MaterializedInput],
+    content: &dyn ContentRepository,
+    provider: &str,
+    language: Language,
+    version: &str,
+    file: Option<u64>,
+    source_state: &FrameSources,
+) -> Result<FrameOutput> {
     let raw = frame;
     let (mut fragment, selected_mapping) = source_state.fragment(s, frame);
     super::normalize::native_graph(
@@ -532,13 +562,11 @@ pub(super) fn emit_frame(
         language,
         version,
     )?;
-    *peak = (*peak).max(
-        fragment.entities.len()
-            + fragment.bodies.len()
-            + fragment.occurrences.len()
-            + fragment.relations.len()
-            + fragment.documents.len(),
-    );
+    let peak = fragment.entities.len()
+        + fragment.bodies.len()
+        + fragment.occurrences.len()
+        + fragment.relations.len()
+        + fragment.documents.len();
     let primary_file = file.and_then(|id| rows(raw, "files").iter().find(|f| f["id"] == id));
     let wanted = primary_file.and_then(|f| {
         let path = f["path"].as_str()?;
@@ -660,6 +688,17 @@ pub(super) fn emit_frame(
                         .is_none_or(|unit| unit == u))
         })
     });
+    Ok(FrameOutput { fragment, peak })
+}
+pub(super) fn merge_frame(
+    s: &mut SemanticSnapshot,
+    output: FrameOutput,
+    sink: &dyn Store,
+    first: &mut bool,
+    gap_keys: &mut HashSet<String>,
+    source_state: &mut FrameSources,
+) -> Result<()> {
+    let mut fragment = output.fragment;
     source_state.merge(&fragment.sources.files)?;
     s.provenance_records
         .extend(fragment.provenance_records.clone());

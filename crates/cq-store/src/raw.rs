@@ -22,6 +22,11 @@ struct Data {
     sequence: u64,
     bytes: u64,
 }
+struct Encoded {
+    key: String,
+    bytes: Vec<u8>,
+    digest: String,
+}
 pub struct Journal {
     root: PathBuf,
     progress: Mutex<Option<cq_core::progress::Progress>>,
@@ -53,9 +58,56 @@ impl Journal {
         let d = self.data.lock().unwrap();
         serde_json::json!({"records":d.entries.len(),"journal_bytes":d.bytes,"payload_storage":"disk","project_semantic_snapshot":false})
     }
+    fn append(&self, records: Vec<Encoded>, replace: bool) -> Result<()> {
+        let mut d = self.data.lock().unwrap();
+        let mut bytes = Vec::new();
+        let mut entries = BTreeMap::<String, Entry>::new();
+        let mut sequence = d.sequence;
+        for record in records {
+            if let Some(old) = entries
+                .get(&record.key)
+                .or_else(|| d.entries.get(&record.key))
+            {
+                if old.digest == record.digest {
+                    continue;
+                }
+                if !replace {
+                    return Err(Error::new("ConflictingAnalysisRecord", record.key));
+                }
+            }
+            if d.bytes + bytes.len() as u64 + record.bytes.len() as u64 > 16 * 1024 * 1024 * 1024 {
+                return Err(Error::new(
+                    "AnalysisJournalBudget",
+                    "16 GiB record journal limit",
+                ));
+            }
+            sequence += 1;
+            entries.insert(
+                record.key,
+                Entry {
+                    offset: d.bytes + bytes.len() as u64,
+                    bytes: record.bytes.len() as u64,
+                    digest: record.digest,
+                    sequence,
+                },
+            );
+            bytes.extend_from_slice(&record.bytes);
+        }
+        if !bytes.is_empty() {
+            d.file.as_file_mut().seek(SeekFrom::End(0))?;
+            d.file.as_file_mut().write_all(&bytes)?;
+            d.bytes += bytes.len() as u64;
+            d.sequence = sequence;
+            d.entries.extend(entries);
+        }
+        Ok(())
+    }
 }
 impl Store for Journal {
     fn progress(&self, project: &str, completed: u64, total: u64) {
+        self.progress_workers(project, completed, total, 1);
+    }
+    fn progress_workers(&self, project: &str, completed: u64, total: u64, workers: usize) {
         let mut p = self.progress.lock().unwrap();
         if completed == 0 || p.is_none() {
             *p = Some(cq_core::progress::Progress::stage(
@@ -66,56 +118,60 @@ impl Store for Journal {
                 Some(total),
                 "文件",
             ));
+            if let Some(p) = p.as_mut() {
+                p.detail(
+                    "normalize",
+                    "还原符号与引用",
+                    0,
+                    Some(total),
+                    "文件",
+                    workers as u64,
+                );
+            }
         }
         if let Some(p) = p.as_mut() {
             p.count(completed);
         }
     }
     fn put(&self, header: &SemanticSnapshot, r: Record, replace: bool) -> Result<()> {
-        let key = format!("{}:{}", r.family(), r.id());
-        let value = r.value()?;
-        let size = serde_json::to_vec(&value)?.len();
-        if size > crate::facts::objects::MAX_OBJECT {
-            return Err(crate::facts::limits::report(
-                Some(&self.root),
-                r.family(),
-                r.id(),
-                &value,
-                size,
-                Some(header),
-            )?);
-        }
-        let b = serde_json::to_vec(&r)?;
-        let hash = digest(&b);
-        let mut d = self.data.lock().unwrap();
-        if let Some(old) = d.entries.get(&key) {
-            if old.digest == hash {
-                return Ok(());
+        self.put_batch(header, vec![r], replace)
+    }
+    fn put_batch(
+        &self,
+        header: &SemanticSnapshot,
+        records: Vec<Record>,
+        replace: bool,
+    ) -> Result<()> {
+        let mut chunk = Vec::new();
+        let mut chunk_bytes = 0;
+        for r in records {
+            let key = format!("{}:{}", r.family(), r.id());
+            let value = r.value()?;
+            let size = serde_json::to_vec(&value)?.len();
+            if size > crate::facts::objects::MAX_OBJECT {
+                return Err(crate::facts::limits::report(
+                    Some(&self.root),
+                    r.family(),
+                    r.id(),
+                    &value,
+                    size,
+                    Some(header),
+                )?);
             }
-            if !replace {
-                return Err(Error::new("ConflictingAnalysisRecord", key));
+            let b = serde_json::to_vec(&r)?;
+            let hash = digest(&b);
+            if !chunk.is_empty() && chunk_bytes + b.len() > 1024 * 1024 {
+                self.append(std::mem::take(&mut chunk), replace)?;
+                chunk_bytes = 0;
             }
-        }
-        if d.bytes + b.len() as u64 > 16 * 1024 * 1024 * 1024 {
-            return Err(Error::new(
-                "AnalysisJournalBudget",
-                "16 GiB record journal limit",
-            ));
-        }
-        let offset = d.file.as_file_mut().seek(SeekFrom::End(0))?;
-        d.file.as_file_mut().write_all(&b)?;
-        d.sequence += 1;
-        d.bytes += b.len() as u64;
-        let sequence = d.sequence;
-        d.entries.insert(
-            key,
-            Entry {
-                offset,
-                bytes: b.len() as u64,
+            chunk_bytes += b.len();
+            chunk.push(Encoded {
+                key,
+                bytes: b,
                 digest: hash,
-                sequence,
-            },
-        );
+            });
+        }
+        self.append(chunk, replace)?;
         Ok(())
     }
 }

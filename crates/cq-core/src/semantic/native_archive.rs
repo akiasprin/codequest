@@ -7,10 +7,11 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Seek, Write},
+    os::unix::fs::FileExt,
     path::Path,
-    sync::Mutex,
 };
+mod parallel;
 #[derive(Clone)]
 struct Row {
     offset: u64,
@@ -19,7 +20,7 @@ struct Row {
 pub struct Archive {
     metadata: Value,
     rows: Vec<Row>,
-    file: Mutex<tempfile::NamedTempFile>,
+    file: tempfile::NamedTempFile,
 }
 struct Builder {
     metadata: serde_json::Map<String, Value>,
@@ -233,7 +234,7 @@ impl Archive {
         let archive = Self {
             metadata: Value::Object(b.metadata),
             rows: b.rows,
-            file: Mutex::new(b.file),
+            file: b.file,
         };
         Ok(archive)
     }
@@ -242,10 +243,8 @@ impl Archive {
             .rows
             .get(index)
             .ok_or_else(|| Error::new("InvalidProviderOutput", "native row coordinate"))?;
-        let mut file = self.file.lock().unwrap();
-        file.as_file_mut().seek(SeekFrom::Start(row.offset))?;
         let mut b = vec![0; row.bytes as usize];
-        file.as_file_mut().read_exact(&mut b)?;
+        self.file.as_file().read_exact_at(&mut b, row.offset)?;
         Ok(serde_json::from_slice(&b)?)
     }
     fn hydrate_row(&self, v: Value) -> Result<Value> {
@@ -369,51 +368,17 @@ impl Archive {
     ) -> Result<()> {
         super::provider_contract::validate_metadata(&self.metadata)?;
         self.validate_ranges()?;
-        let files = self.metadata["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v["id"].as_u64())
-            .chain(std::iter::once(None));
-        let mut peak = 0;
-        let mut first = true;
-        let mut gaps = HashSet::new();
-        let catalogue = super::native_batch::Catalogue::new(&self.metadata);
-        let mut source_state = super::native_batch::FrameSources::new(s, mapping);
-        let total = self.metadata["files"].as_array().unwrap().len() as u64 + 1;
-        sink.progress(&s.project, 0, total);
-        let result: Result<()> = (|| {
-            for (done, file) in files.enumerate() {
-                let selected = catalogue.frame(file)?;
-                let frame = self.hydrate(selected)?;
-                super::native_batch::emit_frame(
-                    s,
-                    &frame,
-                    mapping,
-                    content,
-                    provider,
-                    language,
-                    version,
-                    sink,
-                    file,
-                    &mut peak,
-                    &mut first,
-                    &mut gaps,
-                    &mut source_state,
-                )?;
-                sink.progress(&s.project, done as u64 + 1, total);
-            }
-            Ok(())
-        })();
-        source_state.finish(s);
-        result?;
-        super::native_batch::record_transport(
+        parallel::normalize(
+            self,
             s,
-            peak,
-            self.metadata["files"].as_array().unwrap().len() + 1,
-        );
-
-        Ok(())
+            mapping,
+            content,
+            provider,
+            language,
+            version,
+            sink,
+            parallel::Config::from_env()?,
+        )
     }
 }
 

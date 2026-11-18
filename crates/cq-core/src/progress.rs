@@ -127,11 +127,11 @@ pub fn format(value: &Value, elapsed_secs: u64, tick: usize) -> String {
     let unit = value["unit"].as_str().unwrap_or("项");
     let workers = value["workers"].as_u64().unwrap_or(1);
     let (bar, count) = if let Some(total) = value["total"].as_u64() {
-        let size = if total == 0 {
-            24
-        } else {
-            (done.min(total).saturating_mul(24) / total) as usize
-        };
+        let size = done
+            .min(total)
+            .saturating_mul(24)
+            .checked_div(total)
+            .unwrap_or(24) as usize;
         (
             format!("{}{}", "#".repeat(size), "-".repeat(24 - size)),
             format!("{done}/{total} {unit}，剩余 {}", total.saturating_sub(done)),

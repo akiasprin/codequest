@@ -15,6 +15,9 @@ pub struct BlobStore {
     root: PathBuf,
     usage: Mutex<Usage>,
     evidence_usage: Mutex<Usage>,
+    // Serialize only competing installs of the same content address. Disk I/O
+    // must not hold the process-wide accounting lock used by other workers.
+    installs: [Mutex<()>; 64],
 }
 
 #[derive(Default)]
@@ -50,6 +53,7 @@ impl BlobStore {
             root,
             usage: Mutex::new(Usage::default()),
             evidence_usage: Mutex::new(Usage::default()),
+            installs: std::array::from_fn(|_| Mutex::new(())),
         }
     }
     /// A separate accounting scope over the same immutable content address space.
@@ -65,6 +69,56 @@ impl BlobStore {
             return Err(Error::new("InvalidBlob", "invalid identity"));
         }
         Ok(self.root.join(&id.digest))
+    }
+    fn install(
+        &self,
+        id: &BlobId,
+        account: &Mutex<Usage>,
+        budget: u64,
+        category: &str,
+        write: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        if account.lock().unwrap().seen.contains(&id.digest) {
+            return self.verify(id);
+        }
+        let stripe =
+            u8::from_str_radix(&id.digest[..2], 16).unwrap() as usize % self.installs.len();
+        let _install = self.installs[stripe].lock().unwrap();
+        {
+            let mut usage = account.lock().unwrap();
+            if usage.seen.contains(&id.digest) {
+                drop(usage);
+                return self.verify(id);
+            }
+            if id.len > budget.saturating_sub(usage.bytes) {
+                return Err(Error::new(
+                    "ContentLimit",
+                    format!(
+                        "{category} content budget exceeded: used={} requested={} limit={} bytes; blob={}",
+                        usage.bytes, id.len, budget, id.digest
+                    ),
+                ));
+            }
+            // Reserve before releasing the lock: concurrent distinct blobs
+            // must not each pass a check against the same unreserved bytes.
+            usage.bytes += id.len;
+        }
+        let result = if self.path(id)?.exists() {
+            self.verify(id)
+        } else {
+            write()
+        };
+        let mut usage = account.lock().unwrap();
+        match result {
+            Ok(()) => {
+                usage.seen.insert(id.digest.clone());
+                Ok(())
+            }
+            Err(e) => {
+                usage.bytes -= id.len;
+                Err(e)
+            }
+        }
     }
 }
 impl ContentReader for BlobStore {
@@ -94,27 +148,9 @@ impl ContentRepository for BlobStore {
     fn put(&self, bytes: &[u8], budget: u64) -> Result<BlobId> {
         let id = BlobId::of(bytes);
         let path = self.path(&id)?;
-        let mut usage = self.usage.lock().unwrap();
-        if usage.seen.contains(&id.digest) {
-            self.verify(&id)?;
-            return Ok(id);
-        }
-        if id.len > budget.saturating_sub(usage.bytes) {
-            return Err(Error::new(
-                "ContentLimit",
-                format!(
-                    "source content budget exceeded: used={} requested={} limit={} bytes; blob={}",
-                    usage.bytes, id.len, budget, id.digest
-                ),
-            ));
-        }
-        if path.exists() {
-            self.verify(&id)?;
-        } else {
-            immutable_write(&path, bytes)?;
-        }
-        usage.bytes += id.len;
-        usage.seen.insert(id.digest.clone());
+        self.install(&id, &self.usage, budget, "source", || {
+            immutable_write(&path, bytes)
+        })?;
         Ok(id)
     }
     fn freeze(&self, path: &Path, origin: &str, budget: u64) -> Result<FileRevision> {
@@ -171,36 +207,18 @@ impl BlobStore {
             len: total,
         };
         let target = self.path(&blob)?;
-        let mut usage = account.lock().unwrap();
-        if usage.seen.contains(&blob.digest) {
-            self.verify(&blob)?;
-        } else {
-            if total > budget.saturating_sub(usage.bytes) {
-                return Err(Error::new(
-                    "ContentLimit",
-                    format!(
-                        "{category} content budget exceeded: used={} requested={total} limit={budget} bytes; path={}",
-                        usage.bytes,
-                        path.display()
-                    ),
-                ));
-            }
-            if target.exists() {
-                self.verify(&blob)?;
-            } else {
-                tmp.as_file().sync_all()?;
-                match tmp.persist_noclobber(&target) {
-                    Ok(_) => {}
-                    Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        self.verify(&blob)?
-                    }
-                    Err(e) => return Err(e.error.into()),
-                };
-                std::fs::File::open(&self.root)?.sync_all()?;
-            }
-            usage.bytes += total;
-            usage.seen.insert(blob.digest.clone());
-        }
+        self.install(&blob, account, budget, category, || {
+            tmp.as_file().sync_all()?;
+            match tmp.persist_noclobber(&target) {
+                Ok(_) => {}
+                Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    self.verify(&blob)?
+                }
+                Err(e) => return Err(e.error.into()),
+            };
+            std::fs::File::open(&self.root)?.sync_all()?;
+            Ok(())
+        })?;
         let logical_path = NativeValue::new(path);
         let id = digest(&serde_json::to_vec(&(&logical_path, &blob))?);
         Ok(FileRevision {
@@ -215,6 +233,47 @@ impl BlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parallel_installs_account_once_and_never_oversubscribe() {
+        let t = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(t.path().join("blobs"));
+        std::thread::scope(|scope| {
+            for _ in 0..32 {
+                scope.spawn(|| {
+                    store.put(b"same", 4).unwrap();
+                });
+            }
+        });
+        assert_eq!(store.usage.lock().unwrap().bytes, 4);
+        let other = BlobStore::new(t.path().join("distinct"));
+        let successes = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for byte in 0u8..32 {
+                let other = &other;
+                let successes = &successes;
+                scope.spawn(move || {
+                    if other.put(&[byte], 8).is_ok() {
+                        successes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(successes.load(std::sync::atomic::Ordering::SeqCst), 8);
+        assert_eq!(other.usage.lock().unwrap().bytes, 8);
+    }
+    #[test]
+    fn failed_install_releases_reservation_and_seen_content_is_still_verified() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("blobs");
+        std::fs::write(&root, b"blocking file").unwrap();
+        let store = BlobStore::new(root.clone());
+        assert!(store.put(b"a", 1).is_err());
+        assert_eq!(store.usage.lock().unwrap().bytes, 0);
+        std::fs::remove_file(&root).unwrap();
+        let id = store.put(b"a", 1).unwrap();
+        std::fs::write(store.path(&id).unwrap(), b"b").unwrap();
+        assert_eq!(store.put(b"a", 1).unwrap_err().code(), "DigestMismatch");
+    }
     #[test]
     fn derived_output_has_separate_accounting_without_relaxing_input_limits() {
         let t = tempfile::tempdir().unwrap();
