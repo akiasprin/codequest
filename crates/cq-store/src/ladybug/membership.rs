@@ -5,7 +5,7 @@ use cq_core::Result;
 use lbug::{Connection, Value};
 use std::{
     cmp::Reverse,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashSet},
     fs::File,
     io::{Read, Write},
 };
@@ -30,6 +30,18 @@ pub(super) enum Membership {
     },
 }
 impl Membership {
+    fn slots(c: &Connection<'_>) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        Self::from_keys(
+            c.query("MATCH (s:Slot) RETURN s.id")
+                .map_err(err)?
+                .map(|row| match row.into_iter().next() {
+                    Some(Value::String(v)) => Ok(Sha256::digest(v.as_bytes()).into()),
+                    _ => Err(err("invalid native slot identity")),
+                }),
+            ROWS,
+        )
+    }
     pub fn load(c: &Connection<'_>) -> Result<Self> {
         Self::from_keys(
             c.query("MATCH (f:Fact) RETURN f.id")
@@ -139,9 +151,72 @@ impl Membership {
         }
     }
 }
+/// Exact, bounded hot set; committed additions spill to private sorted files.
+/// A failed transaction never enters this inventory. A restarted import scans
+/// the database once, so durable batches cannot introduce duplicate endpoints.
+pub(super) struct Slots {
+    base: Membership,
+    hot: HashSet<[u8; 32]>,
+    runs: Vec<Membership>,
+    limit: usize,
+}
+impl Slots {
+    pub fn load(c: &Connection<'_>) -> Result<Self> {
+        Ok(Self {
+            base: Membership::slots(c)?,
+            hot: HashSet::new(),
+            runs: Vec::new(),
+            limit: 256 * 1024,
+        })
+    }
+    pub fn contains(&self, key: &[u8; 32]) -> Result<bool> {
+        if self.hot.contains(key) || self.base.contains(key)? {
+            return Ok(true);
+        }
+        for r in &self.runs {
+            if r.contains(key)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub fn committed(&mut self, keys: Vec<[u8; 32]>) -> Result<()> {
+        self.hot.extend(keys);
+        if self.hot.len() >= self.limit {
+            self.runs
+                .push(Membership::from_keys(self.hot.drain().map(Ok), self.limit)?);
+        }
+        Ok(())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn committed_slot_inventory_spills_without_false_positive_or_lost_identity() {
+        let mut s = Slots {
+            base: Membership::Memory(vec![]),
+            hot: HashSet::new(),
+            runs: vec![],
+            limit: 3,
+        };
+        for wave in 0u8..5 {
+            let keys = (0..3)
+                .map(|i| {
+                    let mut k = [0; 32];
+                    k[0] = wave * 3 + i;
+                    k
+                })
+                .collect();
+            s.committed(keys).unwrap();
+        }
+        assert!(s.hot.is_empty());
+        for i in 0..20 {
+            let mut key = [0; 32];
+            key[0] = i;
+            assert_eq!(s.contains(&key).unwrap(), i < 15);
+        }
+    }
     #[test]
     fn compact_and_spilled_membership_have_the_same_positive_and_negative_answers() {
         let rows = (0..37).rev().map(|i| {

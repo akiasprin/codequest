@@ -23,6 +23,65 @@ impl LocalStore {
     }
 }
 impl cq_core::ports::AnalysisWorkspace for LocalStore {
+    fn reuse_stage(
+        &self,
+        stage: cq_core::execution::Stage,
+        header: &mut cq_core::model::SemanticSnapshot,
+    ) -> Result<bool> {
+        self.execution
+            .as_ref()
+            .map_or(Ok(false), |e| e.reuse(stage, header, self.raw.as_deref()))
+    }
+    fn start_stage(
+        &self,
+        stage: cq_core::execution::Stage,
+        header: &mut cq_core::model::SemanticSnapshot,
+    ) -> Result<cq_core::execution::Entry> {
+        self.execution.as_ref().map_or_else(
+            || Ok(Default::default()),
+            |e| e.start(stage, header, self.raw.as_deref()),
+        )
+    }
+    fn finish_stage(
+        &self,
+        stage: cq_core::execution::Stage,
+        header: &cq_core::model::SemanticSnapshot,
+        cursor: serde_json::Value,
+    ) -> Result<()> {
+        self.execution.as_ref().map_or(Ok(()), |e| {
+            e.finish(stage, header, self.raw.as_deref(), cursor)
+        })
+    }
+    fn checkpoint_stage(
+        &self,
+        stage: cq_core::execution::Stage,
+        header: &cq_core::model::SemanticSnapshot,
+        cursor: serde_json::Value,
+        done: u64,
+        total: u64,
+    ) -> Result<()> {
+        self.execution.as_ref().map_or(Ok(()), |e| {
+            e.checkpoint(
+                stage,
+                header,
+                self.raw.as_deref(),
+                cursor,
+                done,
+                total,
+                false,
+            )
+        })
+    }
+    fn stage_file(
+        &self,
+        stage: cq_core::execution::Stage,
+        name: &str,
+    ) -> Result<Option<std::path::PathBuf>> {
+        self.execution
+            .as_ref()
+            .map(|e| e.stage_file(stage, name))
+            .transpose()
+    }
     fn semantic_records(&self) -> Option<&dyn cq_core::semantic::records::Store> {
         self.raw
             .as_deref()

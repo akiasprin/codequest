@@ -8,7 +8,7 @@ csv = "1"
 tempfile.workspace = true
 cq-core.workspace = true
 cq-capture-protocol.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 lbug.workspace = true
 libc.workspace = true

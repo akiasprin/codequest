@@ -8,6 +8,8 @@ pub use engine::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub(crate) type AnchorLocation = (String, Option<(usize, usize, String)>);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QueryRequest {
@@ -38,6 +40,7 @@ pub struct QueryRequest {
     pub column: Option<usize>,
     pub max_lines: usize,
     pub cursor: Option<String>,
+    pub compact: bool,
 }
 impl Default for QueryRequest {
     fn default() -> Self {
@@ -68,11 +71,14 @@ impl Default for QueryRequest {
             column: None,
             max_lines: 80,
             cursor: None,
+            compact: false,
         }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryPage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<Value>,
     pub provenance_records: std::collections::BTreeMap<ProvenanceId, Provenance>,
     pub revision: String,
     pub context: Option<String>,
@@ -87,6 +93,45 @@ pub struct QueryPage {
     pub hidden: Vec<HiddenGroup>,
     pub work: usize,
     pub elapsed_ms: u64,
+}
+impl QueryPage {
+    pub fn to_compact_json(&self) -> Value {
+        let mut map = serde_json::Map::new();
+        map.insert("revision".into(), serde_json::json!(self.revision));
+        if let Some(context) = &self.context {
+            map.insert("context".into(), serde_json::json!(context));
+        }
+        map.insert("items".into(), serde_json::json!(self.items));
+        if let Some(total) = self.total {
+            map.insert("total".into(), serde_json::json!(total));
+        }
+        if self.truncated {
+            map.insert("truncated".into(), serde_json::json!(true));
+        }
+        if let Some(cursor) = &self.next_cursor {
+            map.insert("next_cursor".into(), serde_json::json!(cursor));
+        }
+        if let Some(ranking) = &self.ranking {
+            map.insert("ranking".into(), ranking.clone());
+        }
+        map.insert("state".into(), serde_json::json!(self.state));
+        if !self.coverage.is_empty() {
+            map.insert("coverage".into(), serde_json::json!(self.coverage));
+        }
+        if !self.gaps.is_empty() {
+            map.insert("gaps".into(), serde_json::json!(self.gaps));
+        }
+        if !self.hidden.is_empty() {
+            map.insert("hidden".into(), serde_json::json!(self.hidden));
+        }
+        if !self.provenance_records.is_empty() {
+            map.insert(
+                "provenance_records".into(),
+                serde_json::json!(self.provenance_records),
+            );
+        }
+        Value::Object(map)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HiddenGroup {

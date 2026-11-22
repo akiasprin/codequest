@@ -217,6 +217,46 @@ impl Client {
             deadline: Mutex::new(None),
         })
     }
+    pub fn stage(
+        &self,
+        r: &Revision,
+        stage: cq_core::execution::Stage,
+        task: &str,
+    ) -> Result<Value> {
+        self.stage_controlled(r, stage, task, None)
+    }
+    pub fn stage_controlled(
+        &self,
+        r: &Revision,
+        stage: cq_core::execution::Stage,
+        task: &str,
+        control: Option<&cq_core::control::CaptureControl>,
+    ) -> Result<Value> {
+        let started=self.call(json!({"op":"stage_start","project":r.project,"manifest":r,"stage":stage.name(),"task":task}))?;
+        loop {
+            if control.is_some_and(|c| c.is_cancelled()) {
+                let _ = self.call(json!({"op":"stage_cancel","handle":started["handle"]}));
+                return Err(Error::new(
+                    "Cancelled",
+                    "pausing at the next durable batch boundary; resume reconnects to the same task",
+                ));
+            }
+            let status = self.call(json!({"op":"stage_status","handle":started["handle"]}))?;
+            if let Some(e) = status.get("error") {
+                if e["code"] == "Cancelled" && control.is_none_or(|c| !c.is_cancelled()) {
+                    return self.stage_controlled(r, stage, task, control);
+                }
+                return Err(Error::Remote {
+                    code: e["code"].as_str().unwrap_or("StageFailed").into(),
+                    message: e["message"].as_str().unwrap_or("stage failed").into(),
+                });
+            }
+            if let Some(value) = status.get("result") {
+                return Ok(value.clone());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     pub fn publish(&self, r: &Revision, expected: Option<&str>) -> Result<CommitResult> {
         let wait_ms = std::env::var("CQ_PUBLICATION_WAIT_MS")
             .ok()
@@ -397,6 +437,12 @@ struct Server {
     hosts: Mutex<BTreeMap<String, Arc<StoreHost>>>,
     views: Mutex<BTreeMap<String, HeldView>>,
     publications: Mutex<BTreeMap<String, Publication>>,
+    stages: Mutex<BTreeMap<String, StageTask>>,
+}
+#[derive(Clone)]
+struct StageTask {
+    result: Arc<Mutex<Option<Value>>>,
+    control: cq_core::control::CaptureControl,
 }
 struct Publication {
     seal: String,
@@ -463,6 +509,97 @@ impl Server {
         let op = s("op")?;
         if op == "ping" {
             return Ok(json!({"pid":std::process::id(),"format":2,"publication_protocol":1}));
+        }
+        if op == "stage_start" {
+            let r: Revision = serde_json::from_value(v["manifest"].clone())?;
+            r.verify()?;
+            if r.project != s("project")? {
+                return Err(Error::new("WrongProject", "stage binding"));
+            }
+            let stage = cq_core::execution::Stage::parse(s("stage")?)?;
+            let key = digest(&serde_json::to_vec(&(&r.seal, stage, s("task")?))?);
+            let h = self.host(&r.project)?;
+            let mut tasks = self.stages.lock().unwrap();
+            if tasks.get(&key).is_some_and(|t| {
+                t.result
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|v| v.get("error").is_some())
+            }) {
+                tasks.remove(&key);
+            }
+            if !tasks.contains_key(&key) {
+                if tasks.len() >= 128 {
+                    tasks.retain(|_, t| t.result.lock().unwrap().is_none());
+                }
+                if tasks.len() >= 128 {
+                    return Err(Error::new("StoreBusy", "stage task budget"));
+                }
+                let result = Arc::new(Mutex::new(None));
+                let control = cq_core::control::CaptureControl::default();
+                tasks.insert(
+                    key.clone(),
+                    StageTask {
+                        result: result.clone(),
+                        control: control.clone(),
+                    },
+                );
+                let owner = v["_client_pid"].as_u64().unwrap_or(0) as i32;
+                if owner > 0 {
+                    let done = result.clone();
+                    let control = control.clone();
+                    std::thread::spawn(move || {
+                        loop {
+                            if done.lock().unwrap().is_some() {
+                                break;
+                            }
+                            if unsafe { libc::kill(owner, 0) } != 0
+                                && std::io::Error::last_os_error().raw_os_error()
+                                    == Some(libc::ESRCH)
+                            {
+                                control.cancel();
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    });
+                }
+                std::thread::spawn(move || {
+                    let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        h.execute_stage(&r, stage, &control)
+                    }))
+                    .unwrap_or_else(|_| Err(Error::new("StageWorkerPanic", "resume the stage")));
+                    *result.lock().unwrap() = Some(match value {
+                        Ok(v) => json!({"result":v}),
+                        Err(e) => json!({"error":{"code":e.code(),"message":e.to_string()}}),
+                    });
+                });
+            }
+            return Ok(json!({"handle":key}));
+        }
+        if op == "stage_cancel" {
+            if let Some(task) = self.stages.lock().unwrap().get(s("handle")?) {
+                task.control.cancel();
+            }
+            return Ok(
+                json!({"state":"cancelling","safe_boundary":"current audit wave or native transaction"}),
+            );
+        }
+        if op == "stage_status" {
+            let task = self.stages.lock().unwrap().get(s("handle")?).cloned();
+            return match task {
+                Some(t) => Ok(t
+                    .result
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(json!({"state":"running"}))),
+                None => Err(Error::new(
+                    "StageHandleExpired",
+                    "restart the stage; durable outputs are retained",
+                )),
+            };
         }
         if op == "publish_start" {
             let r: Revision = serde_json::from_value(v["manifest"].clone())?;
@@ -611,6 +748,7 @@ impl Server {
             "open",
             "reconnect",
             "publish",
+            "audit_stage",
             "resolve",
             "rebuild",
             "compact",
@@ -671,6 +809,11 @@ impl Server {
                         },
                     );
                     Ok(result)
+                }
+                "audit_stage" => {
+                    let r: Revision = serde_json::from_value(v["manifest"].clone())?;
+                    let stage = cq_core::execution::Stage::parse(s("stage")?)?;
+                    h.audit_stage(&r, stage)
                 }
                 "publish" => {
                     let r: Revision = serde_json::from_value(v["manifest"].clone())?;
@@ -790,6 +933,7 @@ pub fn serve(root: &Path) -> Result<()> {
         hosts: Mutex::new(BTreeMap::new()),
         views: Mutex::new(BTreeMap::new()),
         publications: Mutex::new(BTreeMap::new()),
+        stages: Mutex::new(BTreeMap::new()),
     });
     use std::sync::atomic::{AtomicUsize, Ordering};
     listener.set_nonblocking(true)?;
@@ -879,6 +1023,7 @@ mod tests {
             root: dir.path().to_owned(),
             hosts: Mutex::new(BTreeMap::new()),
             publications: Mutex::new(BTreeMap::new()),
+            stages: Mutex::new(BTreeMap::new()),
             views: Mutex::new(BTreeMap::new()),
         };
         let server = make_server();
@@ -986,6 +1131,7 @@ mod tests {
             root: dir.path().to_owned(),
             hosts: Mutex::new(BTreeMap::new()),
             publications: Mutex::new(BTreeMap::new()),
+            stages: Mutex::new(BTreeMap::new()),
             views: Mutex::new(BTreeMap::from([(
                 "session".into(),
                 HeldView {

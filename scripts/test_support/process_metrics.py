@@ -6,7 +6,7 @@ def measured_run(command,*,store=None,timeout=2400,env=None,metrics_output=None)
     # The benchmark owns a fresh process group. Killing only a namespace wrapper
     # can leave its actual indexer alive, holding stdout open beyond the deadline.
     proc=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env,start_new_session=True)
-    known={proc.pid};roles={};samples=0;tree_peak=0;host_baseline={};started=time.monotonic();phases=[]
+    known={proc.pid};roles={};samples=0;tree_peak=0;host_baseline={};started=time.monotonic();phases=[];fd_sampled={}
     project=command[command.index('--name')+1] if '--name' in command else None
     progress_path=Path(store)/'progress'/(hashlib.sha256(str(project).encode()).hexdigest()+'.json') if store and project else None
     def discover_host():
@@ -48,6 +48,16 @@ def measured_run(command,*,store=None,timeout=2400,env=None,metrics_output=None)
                 rss=int(status.get('VmRSS','0 kB').split()[0])*1024;high=int(status.get('VmHWM','0 kB').split()[0])*1024
                 role='store_host'if name=='cq-store-host'else'name:'+name
                 item=roles.setdefault(str(pid),{'role':role,'max_rss_bytes':0,'lifetime_hwm_bytes':0,'io_first':{},'io_last':{}});item['max_rss_bytes']=max(item['max_rss_bytes'],rss);item['lifetime_hwm_bytes']=max(item['lifetime_hwm_bytes'],high);total+=rss
+                now=time.monotonic()
+                if now-fd_sampled.get(pid,0)>=1:
+                    fd_sampled[pid]=now
+                    try:
+                        count=sum(1 for _ in(base/'fd').iterdir())
+                        item['max_open_fds']=max(item.get('max_open_fds',0),count)
+                        item['last_open_fds']=count
+                        limit=next(line.split()[3:5]for line in(base/'limits').read_text().splitlines()if line.startswith('Max open files'))
+                        item['nofile_soft'],item['nofile_hard']=limit
+                    except (OSError,StopIteration):pass
                 try:
                     io={k:int(v.strip())for k,v in(line.split(':',1)for line in(base/'io').read_text().splitlines())}
                     if not item['io_first']:item['io_first']=io

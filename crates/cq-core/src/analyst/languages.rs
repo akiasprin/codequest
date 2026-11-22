@@ -1,6 +1,7 @@
 //! Native Go and C/C++ analysts. All durable data access uses core ports.
+use crate::execution::Stage;
 use crate::{Error, Result, control::CaptureControl, model::*, ports::*};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -73,6 +74,31 @@ pub(super) fn consume(
     store: &dyn AnalysisWorkspace,
     export: NativeExport<'_>,
 ) -> Result<()> {
+    consume_impl(s, store, export, None, true)
+}
+pub(super) fn consume_with_tracking(
+    s: &mut SemanticSnapshot,
+    store: &dyn AnalysisWorkspace,
+    export: NativeExport<'_>,
+    tracked: bool,
+) -> Result<()> {
+    consume_impl(s, store, export, None, tracked)
+}
+pub(super) fn consume_untracked(
+    s: &mut SemanticSnapshot,
+    store: &dyn AnalysisWorkspace,
+    export: NativeExport<'_>,
+    archive: crate::semantic::native_archive::Archive,
+) -> Result<()> {
+    consume_impl(s, store, export, Some(archive), false)
+}
+fn consume_impl(
+    s: &mut SemanticSnapshot,
+    store: &dyn AnalysisWorkspace,
+    export: NativeExport<'_>,
+    loaded: Option<crate::semantic::native_archive::Archive>,
+    tracked: bool,
+) -> Result<()> {
     let NativeExport {
         allow_partial,
         worker,
@@ -88,29 +114,66 @@ pub(super) fn consume(
             "native export exceeds 1 GiB",
         ));
     }
-    let archive = store
-        .semantic_records()
-        .map(|_| crate::semantic::native_archive::Archive::open(output))
-        .transpose()?;
+    let archived = if tracked {
+        store.start_stage(Stage::Archive, s)?
+    } else {
+        Default::default()
+    };
+    let archive = if loaded.is_some() {
+        loaded
+    } else if store.semantic_records().is_some() {
+        if archived.reused {
+            Some(crate::semantic::native_archive::Archive::restore(
+                Path::new(
+                    archived.cursor["archive"]
+                        .as_str()
+                        .ok_or_else(|| Error::new("MissingStageArtifact", "native archive"))?,
+                ),
+            )?)
+        } else {
+            let a = crate::semantic::native_archive::Archive::open(output)?;
+            if let Some(path) = store.stage_file(Stage::Archive, "archive")? {
+                a.retain(&path)?;
+                store.finish_stage(
+                    Stage::Archive,
+                    s,
+                    json!({"archive":path,"files":[path.join("rows"),path.join("index.json")]}),
+                )?;
+            }
+            Some(a)
+        }
+    } else {
+        None
+    };
     let raw: Value = if let Some(a) = &archive {
         a.header()?
     } else {
         serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(output)?))?
     };
+    let normalized = if tracked {
+        store.start_stage(Stage::Normalize, s)?
+    } else {
+        Default::default()
+    };
+    if normalized.reused {
+        return Ok(());
+    }
     let version = raw["version"].as_str().unwrap_or("native-v1");
     let blob = store
         .content()
         .freeze_evidence(output, "native_export_evidence", 1024 * 1024 * 1024)?
         .blob;
-    s.providers.push(ProviderRecord {
-        analysis: None,
-        reused_from: input["analysis_reuse"].as_str().map(str::to_owned),
-        name: provider.into(),
-        version: version.into(),
-        binary_digest: digest(&std::fs::read(worker)?),
-        input_digest: digest(&serde_json::to_vec(input)?),
-        protocol: format!("native-v1; raw={}", blob.digest),
-    });
+    if normalized.cursor.is_null() {
+        s.providers.push(ProviderRecord {
+            analysis: None,
+            reused_from: input["analysis_reuse"].as_str().map(str::to_owned),
+            name: provider.into(),
+            version: version.into(),
+            binary_digest: digest(&std::fs::read(worker)?),
+            input_digest: digest(&serde_json::to_vec(input)?),
+            protocol: format!("native-v1; raw={}", blob.digest),
+        });
+    }
     let diagnostics = crate::semantic::diagnostics::read(&raw)?;
     if diagnostics.iter().any(|d| d.is_error()) {
         if !allow_partial {
@@ -134,10 +197,17 @@ pub(super) fn consume(
             s.gaps
                 .push(Gap::new("NativeDiagnostic", provider, d.message));
         }
+        if tracked {
+            store.finish_stage(
+                Stage::Normalize,
+                s,
+                json!({"state":"unavailable","reason":"native diagnostics"}),
+            )?;
+        }
         return Ok(());
     }
     if let Some(sink) = store.semantic_records() {
-        archive.as_ref().unwrap().normalize(
+        archive.as_ref().unwrap().normalize_policy(
             s,
             mapping,
             store.content(),
@@ -145,6 +215,7 @@ pub(super) fn consume(
             language,
             version,
             sink,
+            tracked,
         )?;
     } else {
         crate::semantic::normalize::native_graph(
@@ -160,6 +231,9 @@ pub(super) fn consume(
     for d in diagnostics {
         s.gaps
             .push(Gap::new("NativeDiagnostic", provider, d.message));
+    }
+    if tracked {
+        store.finish_stage(Stage::Normalize, s, Value::Null)?;
     }
     Ok(())
 }

@@ -19,7 +19,7 @@ fn tools() -> Vec<Value> {
         ),
         (
             "search_graph",
-            "Search symbols with BM25 or offline semantic ranking; results retain build context.",
+            "Search symbols by name or text; exact names precede bounded lexical windows. Results retain build context.",
         ),
         (
             "query_graph",
@@ -87,10 +87,11 @@ fn tools() -> Vec<Value> {
     ] {
         let mut properties = json!({"project":{"type":"string","description":"Name returned by list_projects"},"revision":{"type":"string","description":"Pin an immutable revision; a cursor pins its own revision"},"operation":{"type":"string"},"subject":{"type":"string","description":"Exact entity id preferred; ambiguous names return candidates"},"target":{"type":"string"},"text":{"type":"string"},"context":{"type":"string"},"file":{"type":"string"},"kind":{"type":"string"},"relation":{"type":"string"},"direction":{"enum":["outbound","inbound","both"]},"depth":{"type":"integer","minimum":0,"maximum":4096},"limit":{"type":"integer","minimum":1,"maximum":1000},"max_bytes":{"type":"integer","minimum":128},"max_work":{"type":"integer","minimum":1},"timeout_ms":{"type":"integer","minimum":1},"cursor":{"type":"string"},"line":{"type":"integer","minimum":1},"column":{"type":"integer","minimum":1,"description":"One-based UTF-8 byte column"},"max_lines":{"type":"integer","minimum":1},"regex":{"type":"boolean"},"include_candidates":{"type":"boolean"},"include_external":{"type":"boolean"},"semantic":{"type":"boolean"},"document_kind":{"type":"string"}});
         properties["max_job_bytes"] = json!({"type":"integer","minimum":1,"description":"Explicit global/export job encoded-data budget; default 64 MiB"});
-        properties["exact_semantic"] = json!({"type":"boolean","description":"Scan all persisted vectors instead of approximate locality-sensitive candidates"});
+        properties["exact_semantic"] = json!({"type":"boolean","description":"Experimental vector retrieval, disabled by default; LSH is not part of default acceptance"});
         properties["explicit_job"] = json!({"type":"boolean","description":"Allow an explicitly requested generation/export analysis job"});
         properties["authority"] = json!({"enum":["SemanticResolution","RuleDerived","AuthorStatement","Hypothesis","RuntimeObservation"],"description":"Filter returned relationship/search evidence; symbol identity anchors remain available"});
         properties["mode"] = json!({"enum":["calls","data_flow","types"],"description":"Static calls or positional argument-to-parameter contribution; no SSA/runtime claim"});
+        properties["compact"] = json!({"type":"boolean","description":"Omit verbose provenance records, raw byte spans, and repetitive metadata; returns relative file:line locations and owner symbol names."});
         if name == "query_codequest" {
             properties["operation"] = json!({"type":"string","description":"Query operation or next with an opaque cursor; retains original revision, scope and filters"});
         }
@@ -98,7 +99,8 @@ fn tools() -> Vec<Value> {
             properties["root"] =
                 json!({"type":"string","description":"Absolute local repository path"});
             properties["name"] = json!({"type":"string"});
-            properties["language"] = json!({"enum":["auto","rust","go","c","cpp"]});
+            properties["language"] =
+                json!({"enum":["auto","rust","go","c","cpp","typescript","ts"]});
             properties["build_args"] = json!({"type":"array","items":{"type":"string"},"description":"Cargo/Go command and arguments, e.g. [check,--workspace,--all-targets,--offline]"});
             properties["compdb"] =
                 json!({"type":"string","description":"C/C++ compile_commands.json path"});
@@ -140,9 +142,12 @@ fn tools() -> Vec<Value> {
     }
     tools
 }
-fn call(s: &Arc<Service>, name: &str, mut a: Value) -> Result<Value> {
+fn call(s: &Arc<Service>, name: &str, mut a: Value, compact_default: bool) -> Result<Value> {
     if name == "list_projects" {
         return Ok(json!(s.store.list_projects()?));
+    }
+    if compact_default && a.is_object() && a.get("compact").is_none() {
+        a["compact"] = json!(true);
     }
     if a.get("text").is_none() {
         if let Some(text) = a.get("query").cloned() {
@@ -212,7 +217,9 @@ fn call(s: &Arc<Service>, name: &str, mut a: Value) -> Result<Value> {
         }
         "query_graph" => "cypher",
         "trace_path" => {
-            if a["target"].is_string() {
+            if a["operation"].as_str() == Some("impact") {
+                "impact"
+            } else if a["target"].is_string() {
                 "path"
             } else {
                 "trace"
@@ -260,7 +267,7 @@ fn call(s: &Arc<Service>, name: &str, mut a: Value) -> Result<Value> {
     .to_owned();
     s.dispatch(&project, &operation, a, revision.as_deref())
 }
-pub fn run(service: Arc<Service>, auto_refresh: bool) -> Result<()> {
+pub fn run(service: Arc<Service>, auto_refresh: bool, compact_default: bool) -> Result<()> {
     if auto_refresh {
         for project in service.store.list_projects()? {
             service.watch(&project.name)?;
@@ -308,7 +315,7 @@ pub fn run(service: Arc<Service>, auto_refresh: bool) -> Result<()> {
         threads.push(std::thread::spawn(move||{let result=(||->Result<Value>{match request["method"].as_str().unwrap_or(""){
             "initialize"=>Ok(json!({"protocolVersion":"2024-11-05","serverInfo":{"name":"CodeQuest","version":env!("CARGO_PKG_VERSION")},"capabilities":{"tools":{"listChanged":false},"resources":{},"prompts":{}}})),
             "ping"=>Ok(json!({})),"tools/list"=>Ok(json!({"tools":tools()})),"resources/list"=>Ok(json!({"resources":[]})),"prompts/list"=>Ok(json!({"prompts":[]})),
-            "tools/call"=>{let params=&request["params"];let name=params["name"].as_str().ok_or_else(||Error::new("MissingTool","name is required"))?;match call(&service,name,params["arguments"].clone()){Ok(v)=>Ok(json!({"content":[{"type":"text","text":serde_json::to_string(&v)?}],"isError":false})),Err(e)=>Ok(json!({"content":[{"type":"text","text":json!({"error":e.to_string()}).to_string()}],"isError":true}))}},
+            "tools/call"=>{let params=&request["params"];let name=params["name"].as_str().ok_or_else(||Error::new("MissingTool","name is required"))?;match call(&service,name,params["arguments"].clone(),compact_default){Ok(v)=>Ok(json!({"content":[{"type":"text","text":serde_json::to_string(&v)?}],"isError":false})),Err(e)=>Ok(json!({"content":[{"type":"text","text":json!({"error":e.to_string()}).to_string()}],"isError":true}))}},
             _=>Err(Error::new("MethodNotFound","unsupported MCP method")),
         }})();let response=match result{Ok(value)=>json!({"jsonrpc":"2.0","id":id,"result":value}),Err(e)=>json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":e.to_string()}})};let mut out=output.lock().unwrap();let _=writeln!(out,"{response}");let _=out.flush();}));
         if threads.len() >= 64 {
@@ -322,4 +329,185 @@ pub fn run(service: Arc<Service>, auto_refresh: bool) -> Result<()> {
     }
     service.shutdown();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cq_core::{model::*, ports::ContentRepository};
+    use std::collections::BTreeMap;
+
+    fn sample_service() -> (tempfile::TempDir, Arc<Service>) {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(Service::open(&dir.path().join("store")).unwrap());
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let file_path = repo.join("lib.rs");
+        let text = "pub fn leaf() {}\npub fn caller() { leaf(); }\n";
+        std::fs::write(&file_path, text).unwrap();
+        let f = service
+            .store
+            .content
+            .freeze(&file_path, "test", 64 * 1024)
+            .unwrap();
+        let fid = f.id.clone();
+        let span = |needle: &str| {
+            let start = text.find(needle).unwrap() as u64;
+            SourceAnchor {
+                file_revision: fid.clone(),
+                start,
+                end: start + needle.len() as u64,
+            }
+        };
+        let mut s = SemanticSnapshot::empty("mcp-demo".into(), NativeValue::new(&repo));
+        s.sources = SourceSnapshot::seal(vec![f], InputBinding::PrePostChecked, vec![]);
+        let pid = s.intern_provenance(Provenance {
+            provider: "test".into(),
+            version: "1".into(),
+            authority: Authority::SemanticResolution,
+            build_run: None,
+            note: "mcp test".into(),
+        });
+        let leaf_s = span("leaf");
+        let caller_s = span("caller");
+        let call_pos = text.find("leaf();").unwrap() as u64;
+        let call_s = SourceAnchor {
+            file_revision: fid.clone(),
+            start: call_pos,
+            end: call_pos + "leaf".len() as u64,
+        };
+        for (id, name, src) in [
+            ("leaf", "leaf", leaf_s.clone()),
+            ("caller", "caller", caller_s.clone()),
+        ] {
+            s.entities.push(Entity {
+                stable_handle: None,
+                locations: Default::default(),
+                id: id.into(),
+                unit: "u".into(),
+                provider_id: id.into(),
+                kind: EntityKind::Function,
+                name: name.into(),
+                qualified_name: format!("demo::{name}"),
+                source: Some(src.clone()),
+                extent: Some(src),
+                signature: format!("fn {name}()"),
+                parent: None,
+                external: false,
+                exported: true,
+                attributes: BTreeMap::new(),
+                type_definitions: vec![],
+                type_navigation: vec![],
+                provenance: pid.clone(),
+            });
+        }
+        s.relations.push(Relation {
+            id: "r1".into(),
+            from: "caller".into(),
+            to: "leaf".into(),
+            kind: RelationKind::Calls,
+            source: Some(call_s.clone()),
+            occurrence: Some("o1".into()),
+            provenance: pid.clone(),
+        });
+        s.occurrences.push(Occurrence {
+            locations: Default::default(),
+            id: "o1".into(),
+            unit: "u".into(),
+            owner: Some("caller".into()),
+            source: call_s,
+            kind: RelationKind::Calls,
+            declaration: Resolution::Resolved("leaf".into()),
+            executable: Resolution::Resolved("leaf".into()),
+            dispatch: Dispatch::Direct,
+            evaluation: Evaluation::Immediate,
+            arguments: vec![],
+            argument_bindings: vec![],
+            provenance: pid,
+        });
+        s.seal().unwrap();
+        service.store.publish_paged_semantics(&s, None).unwrap();
+        (dir, service)
+    }
+
+    #[test]
+    fn mcp_tools_expose_compact_and_typescript() {
+        let list = tools();
+        let search = list.iter().find(|t| t["name"] == "search_graph").unwrap();
+        assert!(search["inputSchema"]["properties"]["compact"].is_object());
+        let idx = list
+            .iter()
+            .find(|t| t["name"] == "index_repository")
+            .unwrap();
+        let langs = idx["inputSchema"]["properties"]["language"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(langs.iter().any(|v| v == "typescript"));
+    }
+
+    #[test]
+    fn mcp_trace_path_dispatches_impact_and_respects_compact_default() {
+        let (_dir, service) = sample_service();
+        let imp = call(
+            &service,
+            "trace_path",
+            json!({
+                "project": "mcp-demo",
+                "operation": "impact",
+                "subject": "leaf",
+                "depth": 2
+            }),
+            true,
+        )
+        .unwrap();
+        let names: Vec<&str> = imp["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["entity"]["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"caller"),
+            "trace_path(operation=impact) must return inbound caller; got {names:?}"
+        );
+        // Compact default omits provenance and includes relative file/line.
+        let first = &imp["items"][0]["entity"];
+        assert_eq!(first["file"], "lib.rs");
+        assert!(first.get("provenance").is_none());
+
+        // Explicit compact: false restores full provenance and raw source anchor.
+        let full = call(
+            &service,
+            "query_codequest",
+            json!({
+                "project": "mcp-demo",
+                "operation": "references",
+                "subject": "leaf",
+                "compact": false
+            }),
+            true,
+        )
+        .unwrap();
+        assert!(full["items"][0]["provenance"].is_string());
+        assert!(full["items"][0]["source"].is_object());
+        assert_eq!(full["items"][0]["owner_name"], "demo::caller");
+
+        // Compact default omits provenance and raw source anchor while preserving owner & file:line.
+        let compact_refs = call(
+            &service,
+            "query_codequest",
+            json!({
+                "project": "mcp-demo",
+                "operation": "references",
+                "subject": "leaf"
+            }),
+            true,
+        )
+        .unwrap();
+        assert!(compact_refs["items"][0].get("provenance").is_none());
+        assert!(compact_refs["items"][0].get("source").is_none());
+        assert_eq!(compact_refs["items"][0]["owner"], "demo::caller");
+        assert_eq!(compact_refs["items"][0]["file"], "lib.rs");
+        assert_eq!(compact_refs["items"][0]["line"], 2);
+    }
 }

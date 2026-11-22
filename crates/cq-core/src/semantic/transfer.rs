@@ -48,6 +48,22 @@ pub struct Begin {
 pub trait Sink {
     fn begin(&mut self, begin: &Begin) -> Result<()>;
     fn batch(&mut self, key: &ScopeKey, sequence: u64, records: &[Record]) -> Result<()>;
+    /// A disk producer can transfer ownership instead of cloning every JSON
+    /// payload into the next bounded stage. The same batch contract applies.
+    fn batch_owned(&mut self, key: &ScopeKey, sequence: u64, records: Vec<Record>) -> Result<()> {
+        self.batch(key, sequence, &records)
+    }
+    fn batch_wave(
+        &mut self,
+        key: &ScopeKey,
+        sequence: u64,
+        batches: Vec<Vec<Record>>,
+    ) -> Result<()> {
+        for (i, batch) in batches.into_iter().enumerate() {
+            self.batch_owned(key, sequence + i as u64, batch)?;
+        }
+        Ok(())
+    }
     fn end(&mut self, key: &ScopeKey, batches: u64) -> Result<()>;
     fn finish(&mut self) -> Result<()>;
 }
@@ -357,9 +373,17 @@ impl<'a> Validator<'a> {
         Ok(())
     }
     fn records(&mut self, key: &ScopeKey, sequence: u64, records: &[Record]) -> Result<()> {
+        self.batch_header(key, sequence, records)?;
+        let prepared = records
+            .iter()
+            .map(|row| Self::prepare_payload(key, row))
+            .collect::<Result<Vec<_>>>()?;
+        self.accept_records(key, sequence, records, prepared)
+    }
+    fn batch_header(&self, key: &ScopeKey, sequence: u64, records: &[Record]) -> Result<()> {
         let a = self
             .active
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new("MissingScopeBegin", "payload before receipt"))?;
         if &a.begin.descriptor.key != key
             || sequence != a.sequence
@@ -368,20 +392,31 @@ impl<'a> Validator<'a> {
         {
             return Err(Error::new("InvalidBatch", "scope/sequence/row bound"));
         }
-        let prepared = crate::compute::map(records.iter().collect(), |row| {
-            let value = serde_json::to_vec(&row.value)?;
-            let reference = ContentRef {
-                hash: digest(&value),
-                bytes: value.len() as u64,
-            };
-            let expected_key = crate::ports::facts::fact_key(
-                production::family_name(&key.family),
-                row.value["id"]
-                    .as_str()
-                    .ok_or_else(|| Error::new("InvalidIdentity", "missing record id"))?,
-            );
-            Ok((value.len(), reference, expected_key))
-        })?;
+        Ok(())
+    }
+    fn prepare_payload(key: &ScopeKey, row: &Record) -> Result<(usize, ContentRef, String)> {
+        let value = serde_json::to_vec(&row.value)?;
+        let reference = ContentRef {
+            hash: digest(&value),
+            bytes: value.len() as u64,
+        };
+        let expected_key = crate::ports::facts::fact_key(
+            production::family_name(&key.family),
+            row.value["id"]
+                .as_str()
+                .ok_or_else(|| Error::new("InvalidIdentity", "missing record id"))?,
+        );
+        Ok((value.len(), reference, expected_key))
+    }
+    fn accept_records(
+        &mut self,
+        key: &ScopeKey,
+        sequence: u64,
+        records: &[Record],
+        prepared: Vec<(usize, ContentRef, String)>,
+    ) -> Result<()> {
+        self.batch_header(key, sequence, records)?;
+        let a = self.active.as_mut().unwrap();
         let mut bytes = 0;
         for (row, (length, reference, expected_key)) in records.iter().zip(prepared) {
             bytes += length;
@@ -403,6 +438,39 @@ impl<'a> Validator<'a> {
         }
         a.sequence += 1;
         Ok(())
+    }
+    /// Hash independent payloads together while retaining every original
+    /// 128-row/byte-limited protocol batch and its ordered validation state.
+    pub fn validate_wave(
+        &mut self,
+        key: &ScopeKey,
+        sequence: u64,
+        batches: &[Vec<Record>],
+    ) -> Result<()> {
+        self.checked(|v| {
+            if batches.is_empty()
+                || batches.len() > 8
+                || batches
+                    .iter()
+                    .any(|b| b.is_empty() || b.len() > production::BATCH_ROWS)
+            {
+                return Err(Error::new("InvalidBatch", "wave/batch row bound"));
+            }
+            v.batch_header(key, sequence, &batches[0])?;
+            let rows = batches.iter().flatten().collect();
+            let mut proofs =
+                crate::compute::map_records(rows, |row| Self::prepare_payload(key, row))?
+                    .into_iter();
+            for (i, batch) in batches.iter().enumerate() {
+                v.accept_records(
+                    key,
+                    sequence + i as u64,
+                    batch,
+                    proofs.by_ref().take(batch.len()).collect(),
+                )?;
+            }
+            Ok(())
+        })
     }
     fn close(&mut self, key: &ScopeKey, batches: u64) -> Result<()> {
         let a = self
@@ -429,6 +497,14 @@ impl Sink for Validator<'_> {
     fn batch(&mut self, k: &ScopeKey, n: u64, r: &[Record]) -> Result<()> {
         self.checked(|v| v.records(k, n, r))
     }
+    fn batch_wave(
+        &mut self,
+        key: &ScopeKey,
+        sequence: u64,
+        batches: Vec<Vec<Record>>,
+    ) -> Result<()> {
+        self.validate_wave(key, sequence, &batches)
+    }
     fn end(&mut self, k: &ScopeKey, n: u64) -> Result<()> {
         self.checked(|v| v.close(k, n))
     }
@@ -440,5 +516,153 @@ impl Sink for Validator<'_> {
                 Err(Error::new("MissingScopeReceipt", "unclosed/missing scope"))
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod wave_tests {
+    use super::*;
+    use serde_json::json;
+    struct Empty;
+    impl Base for Empty {
+        fn revision(&self) -> Option<&str> {
+            None
+        }
+        fn keys(&self) -> Result<Vec<ScopeKey>> {
+            Ok(vec![])
+        }
+        fn scope(&self, _: &ScopeKey) -> Result<Option<BaseScope>> {
+            Ok(None)
+        }
+    }
+    fn fixture(rows: usize, text_bytes: usize) -> (Production, Begin, Vec<Vec<Record>>) {
+        let records = (0..rows)
+            .map(|i| {
+                let id = format!("{i:04}");
+                Record {
+                    key: format!("body:{id}"),
+                    value: json!({"id":id,"text":"x".repeat(text_bytes)}),
+                }
+            })
+            .collect::<Vec<_>>();
+        let references = records
+            .iter()
+            .map(|r| {
+                let bytes = serde_json::to_vec(&r.value).unwrap();
+                (
+                    r.key.clone(),
+                    ContentRef {
+                        hash: digest(&bytes),
+                        bytes: bytes.len() as u64,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let key = ScopeKey {
+            unit: "wave".into(),
+            context: digest(b"wave"),
+            family: FactFamily::Body,
+        };
+        let descriptor = ScopeDescriptor {
+            key: key.clone(),
+            input_witness: digest(b"input"),
+            completion: Completion::Complete,
+            rows: rows as u64,
+            digest: state_digest(&references).unwrap(),
+        };
+        let receipt = Receipt::new(key, Completion::Complete, Output::Full(references)).unwrap();
+        let p = Production {
+            scopes: vec![descriptor.clone()],
+            ..Default::default()
+        };
+        (
+            p,
+            Begin {
+                descriptor,
+                base_revision: None,
+                receipt,
+            },
+            records
+                .chunks(production::BATCH_ROWS)
+                .map(|r| r.to_vec())
+                .collect(),
+        )
+    }
+    #[test]
+    fn wave_validation_matches_individual_batches_including_the_tail() {
+        let (p, begin, batches) = fixture(129, 4);
+        for wave in [false, true] {
+            let mut validator = Validator::new(&p, &Empty).unwrap();
+            validator.begin(&begin).unwrap();
+            if wave {
+                validator
+                    .validate_wave(&begin.descriptor.key, 0, &batches)
+                    .unwrap();
+            } else {
+                for (n, b) in batches.iter().enumerate() {
+                    validator.batch(&begin.descriptor.key, n as u64, b).unwrap();
+                }
+            }
+            validator.end(&begin.descriptor.key, 2).unwrap();
+            validator.finish().unwrap();
+        }
+    }
+    #[test]
+    fn bad_waves_reject_corruption_duplicates_order_scope_sequence_and_bounds_and_poison() {
+        for case in 0..8 {
+            let (p, begin, mut batches) = fixture(129, 4);
+            let mut key = begin.descriptor.key.clone();
+            let mut sequence = 0;
+            match case {
+                0 => batches[1][0].value["text"] = json!("corrupt"),
+                1 => batches[1][0] = batches[0][0].clone(),
+                2 => batches.swap(0, 1),
+                3 => {
+                    let extra = batches[1][0].clone();
+                    batches[0].push(extra);
+                }
+                4 => sequence = 1,
+                5 => {
+                    key.unit = "wrong".into();
+                    key.context = digest(b"wrong");
+                }
+                6 => batches.clear(),
+                _ => batches = vec![batches[0].clone(); 9],
+            }
+            let mut validator = Validator::new(&p, &Empty).unwrap();
+            validator.begin(&begin).unwrap();
+            let error = validator
+                .validate_wave(&key, sequence, &batches)
+                .unwrap_err();
+            assert!(
+                matches!(error.code(), "InvalidBatch" | "InvalidTransferPayload"),
+                "case {case}: {error}"
+            );
+            assert_eq!(
+                validator.finish().unwrap_err().code(),
+                "InvalidProductionTransaction"
+            );
+        }
+    }
+    #[test]
+    fn wave_keeps_the_byte_limit_and_single_large_record_exception() {
+        let (p, begin, batches) = fixture(3, 600000);
+        let mut validator = Validator::new(&p, &Empty).unwrap();
+        validator.begin(&begin).unwrap();
+        assert_eq!(
+            validator
+                .validate_wave(&begin.descriptor.key, 0, &batches)
+                .unwrap_err()
+                .code(),
+            "InvalidBatch"
+        );
+        let (p, begin, batches) = fixture(1, 2 * 1024 * 1024);
+        let mut validator = Validator::new(&p, &Empty).unwrap();
+        validator.begin(&begin).unwrap();
+        validator
+            .validate_wave(&begin.descriptor.key, 0, &batches)
+            .unwrap();
+        validator.end(&begin.descriptor.key, 1).unwrap();
+        validator.finish().unwrap();
     }
 }

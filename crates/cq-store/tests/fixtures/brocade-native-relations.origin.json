@@ -1,0 +1,28 @@
+{
+  "origin": "retained rust-analyzer export from Brocade; actual relationship payloads with source anchors and provenance IDs",
+  "selection": "first two observations per relationship kind from the 50000-row component sample",
+  "scope": "native projection fixture; referenced source/provenance/entity closures are intentionally outside this component fixture",
+  "records": 37,
+  "kinds": {
+    "Accesses": 2,
+    "Calls": 2,
+    "Contains": 2,
+    "CreatesBody": 2,
+    "Decorates": 2,
+    "Dispatches": 2,
+    "Exports": 2,
+    "Extends": 2,
+    "HasMember": 2,
+    "Implements": 2,
+    "Imports": 2,
+    "Instantiates": 2,
+    "LexicallyContains": 1,
+    "MayCall": 2,
+    "Overrides": 2,
+    "PassesValue": 2,
+    "References": 2,
+    "Tests": 2,
+    "UsesType": 2
+  },
+  "sha256": "a3eab0760cbe3e3b4a0033038b7361c9faef4a3dcc67bbf88892526d7fc884e8"
+}

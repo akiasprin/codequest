@@ -245,6 +245,9 @@ impl StoreHost {
                 }
             }
         }
+        for revision in crate::execution::Execution::retained_roots(format.parent().unwrap())? {
+            mark(&self.objects, &serde_json::to_value(revision)?, &mut live)?;
+        }
         let staging = format.join("staging");
         if staging.exists() {
             for entry in std::fs::read_dir(staging)? {

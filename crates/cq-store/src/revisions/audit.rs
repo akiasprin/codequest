@@ -85,6 +85,10 @@ impl StoreHost {
         tree::get(&self.objects, &root, id, &mut ReadStats::default())
     }
     pub(super) fn audit_publication(&self, r: &Revision) -> Result<Value> {
+        if let Some(proof) = self.cached_audit(r)? {
+            self.audit_delta(r)?;
+            return Ok(json!({"mode":"resumed_full_audit","proof":proof}));
+        }
         let prior = r
             .parent
             .as_deref()

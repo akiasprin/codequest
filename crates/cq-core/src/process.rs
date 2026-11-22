@@ -21,6 +21,19 @@ pub fn output(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let parent = std::process::id() as i32;
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
     let mut child = command.spawn()?;
     let overflow = Arc::new(AtomicBool::new(false));
     let collect = |reader: Box<dyn Read + Send>| {

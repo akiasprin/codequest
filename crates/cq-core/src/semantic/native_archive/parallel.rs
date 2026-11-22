@@ -1,7 +1,7 @@
 //! Workers own only source frames. The immutable archive/catalogue is shared;
 //! source metadata and records are committed in provider order by one owner.
 use super::*;
-use crate::semantic::native_batch::{self, Catalogue, FrameOutput, FrameSources};
+use crate::semantic::native_batch::{self, Catalogue, FrameMetadata, FrameOutput, FrameSources};
 use std::{
     sync::{Condvar, Mutex, mpsc},
     time::Duration,
@@ -11,6 +11,7 @@ use std::{
 pub(super) struct Config {
     pub workers: usize,
     pub inflight_bytes: u64,
+    pub checkpoints: bool,
 }
 impl Config {
     pub fn from_env() -> Result<Self> {
@@ -27,6 +28,7 @@ impl Config {
             }
         }
         Ok(Self {
+            checkpoints: true,
             workers: if std::env::var_os("CQ_WORKERS").is_some() {
                 crate::compute::workers()?
             } else {
@@ -59,10 +61,13 @@ struct Usage {
     bytes: u64,
     tasks: usize,
     next_issue: usize,
-    next_admit: usize,
+    waiting: BTreeMap<usize, u64>,
     completed: u64,
     stages: [usize; 5],
     cancelled: bool,
+    archive_rows: u64,
+    archive_reads: u64,
+    archive_read_bytes: u64,
 }
 struct Budget {
     state: Mutex<Usage>,
@@ -71,6 +76,24 @@ struct Budget {
     tasks: usize,
 }
 impl Budget {
+    fn waiting_reason(&self, s: &Usage, index: usize, bytes: u64) -> Option<WaitReason> {
+        let available = self.bytes.saturating_sub(s.bytes);
+        // Oversized frames keep the existing run-alone exception. Later
+        // frames may not use that exception ahead of an unfinished predecessor.
+        if bytes > available && (s.bytes != 0 || index as u64 != s.completed) {
+            return Some(WaitReason::Memory);
+        }
+        // Prefer the oldest planned frame whenever it can run. If it cannot
+        // fit, smaller frames may use the remaining capacity. Their completed
+        // metadata is spooled, so it cannot strand the predecessor's budget.
+        if let Some((&first, &needed)) = s.waiting.first_key_value()
+            && first < index
+            && (needed <= available || (s.bytes == 0 && first as u64 == s.completed))
+        {
+            return Some(WaitReason::Priority);
+        }
+        None
+    }
     fn claim(&self, total: usize) -> Option<Permit<'_>> {
         let mut state = self.state.lock().unwrap();
         while !state.cancelled && state.next_issue < total && state.tasks >= self.tasks {
@@ -106,16 +129,43 @@ impl Budget {
                     planning: s.stages[0],
                     preparing: s.stages[2],
                     waiting_admission: s.stages[1],
+                    waiting_memory: s
+                        .waiting
+                        .iter()
+                        .filter(|(index, bytes)| {
+                            matches!(
+                                self.waiting_reason(&s, **index, **bytes),
+                                Some(WaitReason::Memory)
+                            )
+                        })
+                        .count(),
+                    waiting_priority: s
+                        .waiting
+                        .iter()
+                        .filter(|(index, bytes)| {
+                            matches!(
+                                self.waiting_reason(&s, **index, **bytes),
+                                Some(WaitReason::Priority)
+                            )
+                        })
+                        .count(),
                     queued: total - s.next_issue,
                     ready: s.stages[3],
                     merging: s.stages[4],
                     inflight_bytes: s.bytes,
                     budget_bytes: self.bytes,
+                    archive_rows: s.archive_rows,
+                    archive_reads: s.archive_reads,
+                    archive_read_bytes: s.archive_read_bytes,
                 },
             )
         };
         sink.progress_pipeline(project, completed, total as u64, &pipeline);
     }
+}
+enum WaitReason {
+    Memory,
+    Priority,
 }
 struct Permit<'a> {
     budget: &'a Budget,
@@ -124,20 +174,41 @@ struct Permit<'a> {
     stage: Stage,
     released: bool,
 }
-type FrameResult<'a> = (usize, Result<FrameOutput>, Permit<'a>);
+// Facts have already reached the conflict-checking journal. Only the remaining
+// source/provenance metadata waits here. Keeping it on disk prevents a later
+// frame from holding the memory needed by an earlier, larger frame. At most
+// `Budget::tasks` temporary files can exist, and cancellation drops them all.
+struct StoredFrame {
+    file: tempfile::NamedTempFile,
+}
+impl StoredFrame {
+    fn write(output: FrameOutput) -> Result<Self> {
+        let file = tempfile::NamedTempFile::new()?;
+        let mut writer = BufWriter::new(file.as_file());
+        serde_json::to_writer(&mut writer, &output.into_metadata()?)?;
+        writer.flush()?;
+        drop(writer);
+        Ok(Self { file })
+    }
+    fn read(self) -> Result<FrameMetadata> {
+        Ok(serde_json::from_reader(BufReader::new(
+            self.file.reopen()?,
+        ))?)
+    }
+}
+type FrameResult<'a> = (usize, Result<StoredFrame>, Permit<'a>);
 impl Permit<'_> {
     fn admit(&mut self, bytes: u64) -> bool {
         let mut s = self.budget.state.lock().unwrap();
         s.stages[self.stage as usize] -= 1;
         self.stage = Stage::Waiting;
         s.stages[self.stage as usize] += 1;
-        // Plans finish out of order, but payload reservations must follow file
-        // order. Otherwise later results can fill the budget and prevent the
-        // earliest outstanding frame from ever being admitted or merged.
-        while !s.cancelled
-            && (self.index != s.next_admit
-                || (s.bytes != 0 && bytes > self.budget.bytes.saturating_sub(s.bytes)))
-        {
+        s.waiting.insert(self.index, bytes);
+        self.budget.changed.notify_all();
+        // Claiming is ordered and reserves a worker for the earliest plan.
+        // The independent task window bounds speculative execution. Memory
+        // admission may be out of order; metadata merge remains ordered.
+        while !s.cancelled && self.budget.waiting_reason(&s, self.index, bytes).is_some() {
             s = self.budget.changed.wait(s).unwrap();
         }
         if s.cancelled {
@@ -145,7 +216,7 @@ impl Permit<'_> {
         }
         s.bytes += bytes;
         self.bytes = bytes;
-        s.next_admit += 1;
+        s.waiting.remove(&self.index);
         s.stages[self.stage as usize] -= 1;
         self.stage = Stage::Preparing;
         s.stages[self.stage as usize] += 1;
@@ -174,6 +245,7 @@ impl Permit<'_> {
         }
         let mut s = self.budget.state.lock().unwrap();
         s.tasks -= 1;
+        s.waiting.remove(&self.index);
         s.bytes -= self.bytes;
         s.stages[self.stage as usize] -= 1;
         if complete {
@@ -197,22 +269,6 @@ impl Drop for Cancel<'_> {
         self.0.cancel();
     }
 }
-fn metadata_estimate(snapshot: &SemanticSnapshot) -> Result<u64> {
-    struct Count(u64);
-    impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.saturating_add(bytes.len() as u64);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    serde_json::to_writer(&mut count, snapshot)?;
-    Ok(count.0.saturating_mul(4).max(1024 * 1024))
-}
-
 impl Archive {
     fn frame_estimate<'a>(&self, rows: impl Iterator<Item = &'a Value>) -> u64 {
         let bytes = rows
@@ -221,7 +277,10 @@ impl Archive {
             .fold(0u64, |n, row| n.saturating_add(row.bytes));
         // JSON allocations, the normalized facts and both representations can
         // coexist. Calibration can change without changing semantic results.
-        bytes.saturating_mul(8).max(1024 * 1024)
+        bytes
+            .saturating_mul(8)
+            .max(1024 * 1024)
+            .saturating_add(READ_AHEAD_BYTES as u64)
     }
 }
 
@@ -244,23 +303,40 @@ pub(super) fn normalize(
         .map(|v| v["id"].as_u64())
         .chain(std::iter::once(None))
         .collect::<Vec<_>>();
+    let cursor = if config.checkpoints {
+        sink.normalization_cursor()?
+    } else {
+        Value::Null
+    };
+    let resumed = cursor["frames"].as_u64().unwrap_or(0) as usize;
+    if resumed > files.len() {
+        return Err(Error::new(
+            "InvalidStageCheckpoint",
+            "normalization frame cursor",
+        ));
+    }
     let workers = config.workers.max(1).min(files.len());
     let budget = Budget {
-        state: Mutex::new(Usage::default()),
+        state: Mutex::new(Usage {
+            next_issue: resumed,
+            completed: resumed as u64,
+            ..Usage::default()
+        }),
         changed: Condvar::new(),
         bytes: config.inflight_bytes,
         tasks: workers * 2,
     };
-    let catalogue = Catalogue::new(&archive.metadata);
+    let catalogue = Catalogue::new(&archive.metadata)?;
     let initial_sources = FrameSources::new(s, mapping);
     let mut sources = FrameSources::new(s, mapping);
-    let mut template = SemanticSnapshot::empty(s.project.clone(), s.root.clone());
-    template.builds.extend(s.builds.last().cloned());
-    template.providers = s.providers.clone();
-    template.provenance_records = s.provenance_records.clone();
-    let mut peak = 0;
-    let mut first = true;
-    let mut gaps = HashSet::new();
+    let template = SemanticSnapshot::empty(s.project.clone(), s.root.clone());
+    let mut peak = cursor["peak"].as_u64().unwrap_or(0) as usize;
+    let mut first = resumed == 0;
+    let mut gaps = s
+        .gaps
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<HashSet<_>, _>>()?;
     sink.progress_workers(&s.project, 0, files.len() as u64, workers);
     let project = s.project.clone();
     budget.report(&project, files.len(), workers, sink);
@@ -276,16 +352,27 @@ pub(super) fn normalize(
             let catalogue = &catalogue;
             scope.spawn(move || {
                 while let Some(mut permit) = budget.claim(files.len()) {
+                    if sink.is_cancelled() {
+                        budget.cancel();
+                        break;
+                    }
                     let index = permit.index;
                     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         // Expensive closure discovery is worker work. Only row
-                        // numbers are retained until ordered memory admission.
+                        // numbers are retained until bounded memory admission.
                         let plan = catalogue.plan(files[index])?;
                         if !permit.admit(archive.frame_estimate(catalogue.plan_rows(&plan))) {
                             return Ok(None);
                         }
-                        let frame =
-                            catalogue.render_with(&plan, |row| archive.hydrate_row_ref(row))?;
+                        let mut reader = RowReader::new(archive);
+                        let frame = catalogue.render_with(&plan, |row| reader.hydrate(row))?;
+                        {
+                            let mut state = budget.state.lock().unwrap();
+                            state.archive_rows += reader.rows;
+                            state.archive_reads += reader.reads;
+                            state.archive_read_bytes += reader.bytes;
+                        }
+                        drop(reader);
                         let mut output = native_batch::prepare_frame(
                             template,
                             &frame,
@@ -304,8 +391,7 @@ pub(super) fn normalize(
                         // workers join and enumerate canonical record keys.
                         crate::semantic::records::drain(&mut output.fragment, sink)?;
                         drop(frame);
-                        let retained = metadata_estimate(&output.fragment)?;
-                        Ok(Some((output, retained)))
+                        Ok(Some(StoredFrame::write(output)?))
                     }))
                     .unwrap_or_else(|_| {
                         Err(Error::new(
@@ -313,15 +399,15 @@ pub(super) fn normalize(
                             "source frame worker panicked",
                         ))
                     });
-                    let (output, retained) = match output {
+                    let output = match output {
                         Ok(None) => break,
-                        Ok(Some((output, retained))) => (Ok(output), retained),
-                        Err(e) => (Err(e), 0),
+                        Ok(Some(output)) => Ok(output),
+                        Err(e) => Err(e),
                     };
                     // Payloads have been persisted and dropped. Keep only the
-                    // metadata estimate until the ordered coordinator merges
+                    // spooled metadata until the ordered coordinator merges
                     // it; the task-window bound remains in force independently.
-                    permit.ready(retained);
+                    permit.ready(0);
                     if tx.send((index, output, permit)).is_err() {
                         break;
                     }
@@ -330,7 +416,7 @@ pub(super) fn normalize(
         }
         drop(results_tx);
         let mut pending = BTreeMap::new();
-        let mut next = 0;
+        let mut next = resumed;
         while next < files.len() {
             match results_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok((index, result, permit)) => {
@@ -349,11 +435,15 @@ pub(super) fn normalize(
             }
             while let Some((result, mut permit)) = pending.remove(&next) {
                 permit.transition(Stage::Merging);
-                let output = result?;
+                let output = result?.read()?;
                 peak = peak.max(output.peak);
-                native_batch::merge_frame(s, output, sink, &mut first, &mut gaps, &mut sources)?;
+                native_batch::merge_metadata(s, output, &mut first, &mut gaps, &mut sources)?;
                 permit.complete();
                 next += 1;
+                if config.checkpoints && (next.is_multiple_of(64) || next == files.len()) {
+                    sources.checkpoint(s);
+                    sink.checkpoint_normalization(s, next as u64, files.len() as u64, peak as u64)?;
+                }
                 budget.report(&project, files.len(), workers, sink);
             }
         }

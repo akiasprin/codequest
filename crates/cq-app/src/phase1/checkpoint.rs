@@ -5,7 +5,7 @@ use super::{
 };
 use cq_core::{Error, Result, model::*};
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
-fn fingerprint(r: &IndexRequest) -> Result<String> {
+pub(super) fn fingerprint(r: &IndexRequest) -> Result<String> {
     let mut request = r.clone();
     request.capture_run = None;
     request.reuse_hir = false;
@@ -115,9 +115,34 @@ pub fn stage(
     r: &IndexRequest,
     snapshot: &SemanticSnapshot,
 ) -> Result<()> {
+    if store.execution.is_some()
+        && let Some(previous) = store.index_inputs(&snapshot.revision)?
+    {
+        if snapshot.analysis_request.as_ref() != Some(&previous.request) {
+            return Err(Error::new(
+                "InvalidCheckpoint",
+                "same semantic revision has a different build request",
+            ));
+        }
+        // Retain the fingerprint of the implementation that produced the
+        // original immutable snapshot. A later compatible resume is recorded
+        // by its execution, not by overwriting that earlier observation.
+        return Ok(());
+    }
+    let frozen = store
+        .execution
+        .as_ref()
+        .map(|e| cq_store::execution::Execution::request(&store.root, &e.id()))
+        .transpose()?
+        .and_then(|v| v["_legacy_fingerprint"].as_str().map(str::to_owned));
+    let fingerprint = if let Some(frozen) = frozen {
+        frozen
+    } else {
+        fingerprint(r)?
+    };
     store.stage_index_inputs(
         &snapshot.revision,
-        &fingerprint(r)?,
+        &fingerprint,
         snapshot.analysis_request.as_ref().ok_or_else(|| {
             Error::new(
                 "MissingAnalysisRequest",

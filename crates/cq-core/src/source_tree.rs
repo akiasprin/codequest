@@ -33,8 +33,9 @@ fn walk(root: &Path, out: &mut BTreeMap<String, String>, depth: usize) -> Result
             }
         } else if path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
             [
-                "rs", "go", "c", "cc", "cpp", "cxx", "h", "hpp", "hxx", "md", "rst", "txt", "pdf",
-                "toml", "yaml", "yml", "json", "mod", "sum", "work", "lock",
+                "rs", "go", "c", "cc", "cpp", "cxx", "h", "hpp", "hxx", "ts", "tsx", "mts", "cts",
+                "js", "jsx", "mjs", "cjs", "md", "rst", "txt", "pdf", "toml", "yaml", "yml",
+                "json", "mod", "sum", "work", "lock",
             ]
             .contains(&s)
         }) || ["README", "rust-toolchain", "config", "Makefile"]

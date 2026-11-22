@@ -18,3 +18,4 @@ pub mod languages;
 
 pub mod cpp;
 pub mod go;
+pub mod ts;

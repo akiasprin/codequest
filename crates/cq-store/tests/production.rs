@@ -29,6 +29,7 @@ fn fixture(store: &LocalStore, run: &str) -> SemanticSnapshot {
             spawn_error: None,
         },
         events: vec![],
+        rejected_fields: vec![],
         captured_report: None,
         gaps: vec![],
     });

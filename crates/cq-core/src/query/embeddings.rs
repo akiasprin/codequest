@@ -1,6 +1,10 @@
 //! Frozen static token embeddings. This is not sentence transformer inference.
 use crate::{Error, Result, model::digest};
 use std::collections::HashMap;
+/// Vector retrieval is experimental and excluded from the default index.
+pub fn enabled() -> bool {
+    std::env::var("CQ_EXPERIMENTAL_VECTOR_SEARCH").is_ok_and(|v| v == "1")
+}
 pub struct TokenVectors {
     tokens: HashMap<String, usize>,
     bytes: Vec<u8>,
@@ -8,8 +12,8 @@ pub struct TokenVectors {
     pub digest: String,
 }
 impl TokenVectors {
-    pub fn configured() -> Result<Option<std::sync::Arc<Self>>> {
-        let dir = std::env::var_os("CQ_TOKEN_VECTORS")
+    fn configured_directory() -> Option<std::path::PathBuf> {
+        std::env::var_os("CQ_TOKEN_VECTORS")
             .map(std::path::PathBuf::from)
             .or_else(|| {
                 std::env::current_exe().ok().and_then(|e| {
@@ -20,7 +24,39 @@ impl TokenVectors {
                             .join(".codequest-tools/embeddings"),
                     )
                 })
-            });
+            })
+    }
+    pub fn configured_identity() -> Result<serde_json::Value> {
+        if !enabled() {
+            return Ok(serde_json::json!({"label":"disabled","enabled":false}));
+        }
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let Some(dir) =
+            Self::configured_directory().filter(|d| d.join("code_vectors.bin").is_file())
+        else {
+            return Ok(
+                serde_json::json!({"label":"offline sparse random indexing; no pretrained model"}),
+            );
+        };
+        let mut file = std::fs::File::open(dir.join("code_vectors.bin"))?;
+        let mut header = [0; 8];
+        file.read_exact(&mut header)?;
+        let dimension = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let mut hash = Sha256::new();
+        hash.update(header);
+        std::io::copy(&mut file, &mut hash)?;
+        let vector = format!("{:x}", hash.finalize());
+        let vocabulary = crate::model::digest(&std::fs::read(dir.join("code_tokens.txt"))?);
+        Ok(
+            serde_json::json!({"label":format!("nomic-embed-code static token vectors; sha256={vector}; dimension={dimension}; first 4096 document terms; not sentence-transformer inference"),"vectors":vector,"vocabulary":vocabulary,"dimension":dimension}),
+        )
+    }
+    pub fn configured() -> Result<Option<std::sync::Arc<Self>>> {
+        if !enabled() {
+            return Ok(None);
+        }
+        let dir = Self::configured_directory();
         dir.filter(|d| d.join("code_vectors.bin").is_file())
             .map(|d| {
                 Self::load(

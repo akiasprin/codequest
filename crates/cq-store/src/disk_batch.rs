@@ -67,7 +67,7 @@ pub(crate) fn decode<T: Send>(
         read_at(file, &mut bytes, start)?;
         windows.push(bytes);
     }
-    cq_core::compute::map(
+    cq_core::compute::map_records(
         locations.into_iter().enumerate().collect(),
         |(i, (window, offset, length))| decode(i, &windows[window][offset..offset + length]),
     )

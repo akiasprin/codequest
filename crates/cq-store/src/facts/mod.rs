@@ -6,5 +6,7 @@ pub mod tree;
 pub mod writer;
 
 mod bulk;
+mod descriptor_budget;
+pub(crate) mod inventory;
 mod packed;
 mod statistics;

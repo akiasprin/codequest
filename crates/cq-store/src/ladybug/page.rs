@@ -31,6 +31,19 @@ struct Locator {
     hash: String,
     bytes: u64,
 }
+pub(super) fn is_locator(text: &str, r: &ObjectRef) -> Result<bool> {
+    // A legacy canonical payload may itself be a JSON codec marker.
+    if text.len() as u64 == r.bytes && digest(text.as_bytes()) == r.hash {
+        return Ok(false);
+    }
+    if let Ok(locator) = serde_json::from_str::<Locator>(text) {
+        if locator.codec != LOCATOR_CODEC || locator.hash != r.hash || locator.bytes != r.bytes {
+            return Err(invalid());
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
 
 /// Native storage is an index; immutable canonical files own the payload.
 /// Keeping only the bound locator also avoids native checkpoint dictionaries

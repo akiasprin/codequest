@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         outcome: report.run.outcome.clone(),
         exit: report.run.tool_exit.clone(),
         events: vec![],
+        rejected_fields: vec![],
         captured_report: Some(report.run.id.clone()),
         gaps: vec![],
     });

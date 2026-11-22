@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub struct LocalStore {
     pub root: PathBuf,
     pub content: BlobStore,
+    pub execution: Option<std::sync::Arc<crate::execution::Execution>>,
     pub(crate) raw: Option<std::sync::Arc<crate::raw::Journal>>,
 }
 impl LocalStore {
@@ -17,6 +18,7 @@ impl LocalStore {
         Self {
             root: self.root.clone(),
             content: self.content.budget_scope(),
+            execution: self.execution.clone(),
             raw: None,
         }
     }
@@ -25,6 +27,9 @@ impl LocalStore {
         s.raw = Some(std::sync::Arc::new(crate::raw::Journal::new(
             self.root.clone(),
         )?));
+        if let Some(e) = &s.execution {
+            s.raw.as_ref().unwrap().attach_execution(e);
+        }
         Ok(s)
     }
     pub fn analysis_records(&self) -> Option<&crate::raw::Journal> {
@@ -44,6 +49,7 @@ impl LocalStore {
         Ok(Self {
             content: BlobStore::new(root.join("blobs")),
             root,
+            execution: None,
             raw: None,
         })
     }

@@ -5,7 +5,7 @@ use cq_core::{
 };
 use cq_store::LocalStore;
 use std::{path::PathBuf, process::Command};
-fn native_request(
+pub(super) fn native_request(
     r: &IndexRequest,
     control: &CaptureControl,
     go: bool,
@@ -50,6 +50,35 @@ fn native_request(
         recorder,
     })
 }
+pub fn ts_provider_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("CQ_TS_COMPILER") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1).take(5) {
+            candidates.push(ancestor.join("providers/ts-compiler/index.mjs"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("providers/ts-compiler/index.mjs"));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../providers/ts-compiler/index.mjs"),
+    );
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+    Err(cq_core::Error::new(
+        "MissingProvider",
+        "cannot locate providers/ts-compiler/index.mjs; set CQ_TS_COMPILER",
+    ))
+}
 pub fn index_go(
     r: &IndexRequest,
     store: &LocalStore,
@@ -65,4 +94,23 @@ pub fn index_cpp(
     s: &mut SemanticSnapshot,
 ) -> Result<()> {
     cq_core::analyst::cpp::analyze(&native_request(r, control, false)?, store, control, s)
+}
+pub fn index_ts(
+    r: &IndexRequest,
+    store: &LocalStore,
+    control: &CaptureControl,
+    s: &mut SemanticSnapshot,
+    tracked: bool,
+) -> Result<()> {
+    let provider = ts_provider_path()?;
+    let req = NativeAnalysisRequest {
+        allow_partial: r.allow_partial,
+        root: r.root.clone(),
+        language: "typescript".into(),
+        build_args: r.build_args.clone(),
+        compdb: None,
+        provider,
+        recorder: PathBuf::new(),
+    };
+    cq_core::analyst::ts::analyze(&req, store, control, s, tracked)
 }

@@ -1,7 +1,8 @@
 //! Rust build observation and HIR semantic replay, behind storage ports.
 use super::{RustBuildObserver, RustBuildRequest};
+use crate::execution::Stage;
 use crate::{Error, Result, analyst::BuildObserver, control::CaptureControl, model::*, ports::*};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 pub struct RustAnalysisRequest {
     pub allow_partial: bool,
@@ -26,6 +27,9 @@ pub fn analyze(
     control: &CaptureControl,
     snapshot: &mut SemanticSnapshot,
 ) -> Result<()> {
+    if workspace.reuse_stage(Stage::Normalize, snapshot)? {
+        return Ok(());
+    }
     if request.reuse_hir && request.capture_run.is_none() {
         return Err(Error::new(
             "MissingCaptureRun",
@@ -45,7 +49,13 @@ pub fn analyze(
     } else {
         request.build_args.clone()
     };
-    let mut report = if let Some(run) = &request.capture_run {
+    let capture = workspace.start_stage(Stage::Capture, snapshot)?;
+    let capture_run = capture
+        .reused
+        .then(|| capture.cursor["run"].as_str().map(str::to_owned))
+        .flatten()
+        .or_else(|| request.capture_run.clone());
+    let mut report = if let Some(run) = &capture_run {
         let (_, report) = workspace.load_report(run)?;
         if report.plan.project.path() != request.root {
             return Err(Error::new(
@@ -98,6 +108,9 @@ pub fn analyze(
             "InputChangedDuringBuild",
             "capture retained pre-build bytes; cannot publish semantics as the observed build",
         ));
+    }
+    if !capture.reused {
+        workspace.finish_stage(Stage::Capture,snapshot,json!({"run":report.run.id,"report":workspace.run_directory(&report.run.id)?.join("report.json")}))?;
     }
     // Macro execution must replay a retained binary rather than a mutable target path.
     let macro_paths: Vec<_> = report
@@ -159,6 +172,7 @@ pub fn analyze(
                     .cloned()
             })
             .collect(),
+        rejected_fields: vec![],
         captured_report: Some(report.run.id.clone()),
         gaps: report.gaps.clone(),
     });
@@ -205,6 +219,20 @@ pub fn analyze(
             .dependencies
             .retain(|d| safe.contains(&d.consumer));
         if replay_report.units.is_empty() {
+            for stage in [
+                Stage::Materialize,
+                Stage::NativeExport,
+                Stage::Archive,
+                Stage::Normalize,
+            ] {
+                if !workspace.start_stage(stage, snapshot)?.reused {
+                    workspace.finish_stage(
+                        stage,
+                        snapshot,
+                        json!({"state":"unavailable","reason":"no successful compilation unit"}),
+                    )?;
+                }
+            }
             return Ok(());
         }
     }
@@ -229,12 +257,34 @@ pub fn analyze(
         });
     }
     progress.detail("materialize", "冻结编译输入", 0, None, "文件", 1);
+    let materialized = workspace.start_stage(Stage::Materialize, snapshot)?;
     let view = workspace.prepare_rust(&replay_report, control)?;
+    if !materialized.reused {
+        workspace.finish_stage(
+            Stage::Materialize,
+            snapshot,
+            json!({"input_digest":view.digest}),
+        )?;
+    }
     let worker = request.provider.clone();
-    let output = workspace
+    let legacy_output = workspace
         .run_directory(&report.run.id)?
         .join("hir-export.json");
-    if request.reuse_hir {
+    let exported = workspace.start_stage(Stage::NativeExport, snapshot)?;
+    let output = if exported.reused {
+        PathBuf::from(
+            exported.cursor["output"]
+                .as_str()
+                .ok_or_else(|| Error::new("MissingStageArtifact", "HIR export"))?,
+        )
+    } else if request.reuse_hir {
+        legacy_output
+    } else {
+        workspace
+            .stage_file(Stage::NativeExport, "hir-export.json")?
+            .unwrap_or(legacy_output)
+    };
+    if request.reuse_hir || exported.reused {
         if !output.is_file()
             || !output
                 .with_extension("hir-shards")
@@ -256,6 +306,10 @@ pub fn analyze(
             &snapshot.project,
         )?;
     }
+    if !exported.reused {
+        workspace.finish_stage(Stage::NativeExport, snapshot, json!({"output":output}))?;
+    }
+    let archive_stage = workspace.start_stage(Stage::Archive, snapshot)?;
     progress.detail("archive", "解析 HIR 导出", 0, None, "字节", 1);
     let metadata = std::fs::metadata(&output)?;
     let export_limit = crate::semantic::native_archive::export_limit()?;
@@ -268,10 +322,17 @@ pub fn analyze(
             ),
         ));
     }
-    let archive = workspace
-        .semantic_records()
-        .map(|_| {
-            crate::semantic::native_archive::Archive::open_with_progress(
+    let archive = if workspace.semantic_records().is_some() {
+        if archive_stage.reused {
+            Some(crate::semantic::native_archive::Archive::restore(
+                Path::new(
+                    archive_stage.cursor["archive"]
+                        .as_str()
+                        .ok_or_else(|| Error::new("MissingStageArtifact", "native archive"))?,
+                ),
+            )?)
+        } else {
+            let archive = crate::semantic::native_archive::Archive::open_with_progress(
                 &output,
                 Some(crate::progress::Progress::stage(
                     workspace.directory(),
@@ -281,9 +342,24 @@ pub fn analyze(
                     Some(metadata.len()),
                     "字节",
                 )),
-            )
-        })
-        .transpose()?;
+            )?;
+            if let Some(path) = workspace.stage_file(Stage::Archive, "archive")? {
+                archive.retain(&path)?;
+                workspace.finish_stage(
+                    Stage::Archive,
+                    snapshot,
+                    json!({"archive":path,"files":[path.join("rows"),path.join("index.json")]}),
+                )?;
+            }
+            Some(archive)
+        }
+    } else {
+        None
+    };
+    let normalized = workspace.start_stage(Stage::Normalize, snapshot)?;
+    if normalized.reused {
+        return Ok(());
+    }
     progress.detail("normalize", "还原符号与引用", 0, None, "文件", 1);
     let raw: Value = if let Some(a) = &archive {
         a.header()?
@@ -339,24 +415,26 @@ pub fn analyze(
         .content()
         .freeze_evidence(&output, "native_export_evidence", export_limit)?
         .blob;
-    snapshot.providers.push(ProviderRecord {
-        analysis: raw
-            .get("incremental")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()?,
-        reused_from: request.reuse_hir.then(|| {
-            format!(
-                "capture:{};retained_native_export:{};source_bytes_revalidated",
-                report.run.id, blob.digest
-            )
-        }),
-        name: "rust-analyzer-hir".into(),
-        version: version.clone(),
-        binary_digest: worker_digest,
-        input_digest: view.digest,
-        protocol: format!("codequest-hir-export/v1; raw={}", blob.digest),
-    });
+    if normalized.cursor.is_null() {
+        snapshot.providers.push(ProviderRecord {
+            analysis: raw
+                .get("incremental")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?,
+            reused_from: request.reuse_hir.then(|| {
+                format!(
+                    "capture:{};retained_native_export:{};source_bytes_revalidated",
+                    report.run.id, blob.digest
+                )
+            }),
+            name: "rust-analyzer-hir".into(),
+            version: version.clone(),
+            binary_digest: worker_digest,
+            input_digest: view.digest,
+            protocol: format!("codequest-hir-export/v1; raw={}", blob.digest),
+        });
+    }
     let diagnostics = crate::semantic::diagnostics::read(&raw)?;
     if diagnostics.iter().any(|d| d.is_error()) {
         if !request.allow_partial {
@@ -377,6 +455,11 @@ pub fn analyze(
                 .gaps
                 .push(Gap::new("NativeDiagnostic", "rust-analyzer-hir", d.message));
         }
+        workspace.finish_stage(
+            Stage::Normalize,
+            snapshot,
+            json!({"state":"unavailable","reason":"native diagnostics"}),
+        )?;
         return Ok(());
     }
     if let Some(sink) = workspace.semantic_records() {
@@ -428,5 +511,6 @@ pub fn analyze(
             }],
         });
     }
+    workspace.finish_stage(Stage::Normalize, snapshot, Value::Null)?;
     Ok(())
 }

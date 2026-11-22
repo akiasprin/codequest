@@ -196,7 +196,70 @@ impl LocalStore {
             Some(prepared),
         )
     }
+    pub fn resume_candidate_directories(
+        &self,
+        candidate: &crate::execution::Candidate,
+    ) -> Result<Revision> {
+        let execution = self
+            .execution
+            .as_ref()
+            .ok_or_else(|| Error::new("MissingExecution", "directory resume"))?;
+        let _gate = crate::revisions::retention::ObjectGate::lock(&self.root.join("format-2"))?;
+        let objects = Objects::buffered(self.root.join("format-2/objects"))?;
+        let revision = writer::resume_directories(
+            &objects,
+            execution,
+            &candidate.header,
+            &candidate.revision,
+        )?;
+        execution.save_candidate(&candidate.header, &revision, candidate.transport.clone())?;
+        Ok(revision)
+    }
+    pub fn encode_analysis(&self, prepared: &crate::analysis::Prepared) -> Result<Revision> {
+        self.encode_impl(
+            &prepared.header,
+            prepared.header.previous.as_deref(),
+            Some(prepared),
+        )
+    }
     fn publish_impl(
+        &self,
+        s: &SemanticSnapshot,
+        expected: Option<&str>,
+        prepared: Option<&crate::analysis::Prepared>,
+    ) -> Result<Revision> {
+        let revision = self.encode_impl(s, expected, prepared)?;
+        self.publish_candidate(&revision)
+    }
+    pub fn publish_candidate(&self, revision: &Revision) -> Result<Revision> {
+        revision.verify()?;
+        let client = Client::new(&self.root)?;
+        let result = client.publish(revision, revision.parent.as_deref())?;
+        if result.outcome != CommitOutcome::Committed {
+            return Err(if result.outcome == CommitOutcome::Unknown {
+                Error::CommitUnknown {
+                    revision: revision.revision.clone(),
+                    message: result.detail.unwrap_or_default(),
+                }
+            } else {
+                Error::new(
+                    "PublishRejected",
+                    result
+                        .detail
+                        .unwrap_or_else(|| format!("{:?}", result.outcome)),
+                )
+            });
+        }
+        let result = self.resolve_publication(&revision.project, &revision.revision)?;
+        if result.outcome != CommitOutcome::Committed {
+            return Err(Error::new(
+                "PublishRejected",
+                "publication registration incomplete",
+            ));
+        }
+        Ok(revision.clone())
+    }
+    fn encode_impl(
         &self,
         s: &SemanticSnapshot,
         expected: Option<&str>,
@@ -221,7 +284,8 @@ impl LocalStore {
                 "failed/cancelled builds cannot publish a complete revision",
             ));
         }
-        if self.paged_enabled(&s.project)
+        if self.execution.is_none()
+            && self.paged_enabled(&s.project)
             && let Ok(r) = self.paged_manifest(&s.project, &s.revision)
         {
             let outcome = Client::new(&self.root)?.call(serde_json::json!({
@@ -233,7 +297,9 @@ impl LocalStore {
                 return Ok(r);
             }
         }
-        if self.head(&s.project)?.as_deref() != expected {
+        if self.head(&s.project)?.as_deref() != expected
+            && self.head(&s.project)?.as_deref() != Some(&s.revision)
+        {
             return Err(Error::new("PublishConflict", "HEAD changed"));
         }
         if expected.is_some() && !self.paged_enabled(&s.project) {
@@ -261,7 +327,11 @@ impl LocalStore {
             )?;
             let prepare_started = std::time::Instant::now();
             let revision = if let Some(p) = prepared {
-                writer::scoped(&objects, &self.content, p)?
+                if let Some(e) = &self.execution {
+                    writer::scoped_tracked(&objects, &self.content, p, e)?
+                } else {
+                    writer::scoped(&objects, &self.content, p)?
+                }
             } else {
                 writer::snapshot(&objects, &self.content, s, prior.as_ref())?
             };
@@ -289,62 +359,24 @@ impl LocalStore {
                 &serde_json::json!({"revision":s.revision,"objects_written":counts.0,"object_bytes_written":counts.1,"prepare_ms":prepared_ms,"changes":revision.changes,"resources":objects.resource_stats(),"phase":"canonical objects and durability barrier; native index writes are separate"}),
             )?;
             self.ensure_paged_checkpoint(&revision)?;
-            crate::atomic::immutable_write(&staging, &serde_json::to_vec(&revision)?)?;
+            let admitted = if self.head(&s.project)?.as_deref() == Some(&revision.revision) {
+                let old = self.paged_manifest(&s.project, &revision.revision)?;
+                if old.seal != revision.seal {
+                    return Err(Error::new(
+                        "RevisionConflict",
+                        "recomputed content differs from the admitted immutable revision",
+                    ));
+                }
+                true
+            } else {
+                false
+            };
+            if !admitted {
+                crate::atomic::immutable_write(&staging, &serde_json::to_vec(&revision)?)?;
+            }
+
             revision
         };
-        let client = Client::new(&self.root)?;
-        let mut result = client.publish(&revision, expected)?;
-        if result.outcome == CommitOutcome::Unknown {
-            result = match client
-                .call(serde_json::json!({"op":"resolve","project":s.project,"revision":s.revision}))
-            {
-                Ok(value) => serde_json::from_value(value)?,
-                Err(e) => {
-                    return Err(Error::CommitUnknown {
-                        revision: s.revision.clone(),
-                        message: format!("resolve before retry: {e}"),
-                    });
-                }
-            };
-        }
-        if result.outcome != CommitOutcome::Committed {
-            let detail = result
-                .detail
-                .unwrap_or_else(|| format!("{:?}", result.outcome));
-            return Err(if result.outcome == CommitOutcome::Unknown {
-                Error::CommitUnknown {
-                    revision: s.revision.clone(),
-                    message: detail,
-                }
-            } else {
-                Error::new("PublishRejected", detail)
-            });
-        }
-        {
-            let _guard = crate::revisions::retention::ObjectGate::lock(
-                self.root.join("format-2").as_path(),
-            )?;
-            if staging.exists() {
-                std::fs::remove_file(&staging)?;
-                std::fs::File::open(staging.parent().unwrap())?.sync_all()?;
-            }
-        }
-        let dir = self.project_path(&s.project);
-        std::fs::create_dir_all(&dir)?;
-        let mut languages = s.units.iter().map(|u| u.language).collect::<Vec<_>>();
-        languages.sort_by_key(|l| format!("{l:?}"));
-        languages.dedup();
-        crate::revisions::save(
-            &dir.join("project.json"),
-            &crate::graph::ProjectInfo {
-                name: s.project.clone(),
-                root: s.root.clone(),
-                head: Some(s.revision.clone()),
-                created_ms: s.created_ms,
-                languages,
-            },
-        )?;
-        crate::atomic::immutable_write(&dir.join("format-2"), b"2")?;
         Ok(revision)
     }
     /// Migration is explicit and retains every legacy artifact. The active

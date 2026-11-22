@@ -90,6 +90,22 @@ pub fn map_phase<T: Send>(
     })
 }
 pub trait Store: Source {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn normalization_cursor(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::Value::Null)
+    }
+    fn checkpoint_normalization(
+        &self,
+        _header: &SemanticSnapshot,
+        _done: u64,
+        _total: u64,
+        _peak: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn task_progress(
         &self,
         _project: &str,

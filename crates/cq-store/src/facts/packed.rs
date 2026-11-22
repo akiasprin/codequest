@@ -7,14 +7,199 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
-    os::{fd::AsRawFd, unix::fs::FileExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileExt, MetadataExt},
+    },
     path::{Path, PathBuf},
 };
 const MAGIC: &[u8; 8] = b"CQPACK01";
 const ENTRY: usize = 64;
 const HEADER: u64 = 16;
-const BATCH: usize = 1024;
+const BATCH: usize = 16 * 1024;
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+
+// Keep sparse fences and an open descriptor for each immutable index version.
+// A lookup reads one small contiguous block instead of issuing a pread at every
+// binary-search level. File damage remains an I/O error, with no unsafe mapping.
+const INDEX_BLOCK: usize = 128;
+const INDEX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+struct Index {
+    version: (u64, u64, u64, i64, i64, i64, i64),
+    file: File,
+    fences: Vec<[u8; 32]>,
+    rows: u64,
+    block: Vec<u8>,
+    block_start: Option<usize>,
+}
+/// A locator is resolved under the reader lock; payload I/O happens afterwards.
+pub(super) struct ReadPlan {
+    pub path: PathBuf,
+    pub offset: u64,
+    pub bytes: u64,
+    pub whole_file: bool,
+}
+impl ReadPlan {
+    pub fn range(&self, start: u64, length: u64) -> Result<Vec<u8>> {
+        if start.checked_add(length).is_none_or(|end| end > self.bytes) {
+            return Err(Error::new("InvalidFactRef", "record range outside object"));
+        }
+        let file = File::open(&self.path)?;
+        let size = file.metadata()?.len();
+        if self
+            .offset
+            .checked_add(self.bytes)
+            .is_none_or(|end| end > size)
+            || self.whole_file && size != self.bytes
+        {
+            return Err(Error::new("DigestMismatch", "object extent"));
+        }
+        let mut bytes = vec![0; length as usize];
+        file.read_exact_at(&mut bytes, self.offset + start)?;
+        Ok(bytes)
+    }
+    pub fn read(&self) -> Result<Vec<u8>> {
+        let file = File::open(&self.path)?;
+        if self.whole_file && file.metadata()?.len() != self.bytes {
+            return Err(Error::new("DigestMismatch", "loose object length"));
+        }
+        let mut bytes = vec![0; self.bytes as usize];
+        file.read_exact_at(&mut bytes, self.offset)?;
+        Ok(bytes)
+    }
+}
+#[derive(Default)]
+pub(super) struct Reader {
+    indexes: BTreeMap<String, Index>,
+    cached: u64,
+    pub index_opens: u64,
+    pub index_blocks: u64,
+}
+impl Reader {
+    pub fn clear(&mut self) {
+        self.indexes.clear();
+        self.cached = 0;
+    }
+    pub fn cached_bytes(&self) -> u64 {
+        self.cached
+    }
+    pub fn read(&mut self, root: &Path, r: &ObjectRef) -> Result<Option<Vec<u8>>> {
+        self.plan(root, r)?.map(|p| p.read()).transpose()
+    }
+    pub fn plan(&mut self, root: &Path, r: &ObjectRef) -> Result<Option<ReadPlan>> {
+        let prefix = &r.hash[..2];
+        let path = index_path(root, prefix);
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let version = |m: &std::fs::Metadata| {
+            (
+                m.dev(),
+                m.ino(),
+                m.len(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+            )
+        };
+        if self
+            .indexes
+            .get(prefix)
+            .is_none_or(|i| i.version != version(&meta))
+        {
+            if let Some(old) = self.indexes.remove(prefix) {
+                self.cached -= old.fences.len() as u64 * 32;
+            }
+            let file = File::open(&path)?;
+            self.index_opens += 1;
+            let rows = header(&file)?;
+            let size = rows.div_ceil(INDEX_BLOCK as u64) * 32;
+            if size > INDEX_CACHE_BYTES {
+                return lookup(root, &r.hash)?.map(|v| plan(root, r, v)).transpose();
+            }
+            while self.cached + size > INDEX_CACHE_BYTES {
+                let Some((_, old)) = self.indexes.pop_first() else {
+                    break;
+                };
+                self.cached -= old.fences.len() as u64 * 32;
+            }
+            let metadata = file.metadata()?;
+            let mut input = BufReader::with_capacity(1024 * 1024, file.try_clone()?);
+            input.seek(SeekFrom::Start(HEADER))?;
+            let mut fences = Vec::with_capacity(size as usize / 32);
+            let mut block = [0u8; INDEX_BLOCK * ENTRY];
+            let mut done = 0;
+            while done < rows {
+                let count = (rows - done).min(INDEX_BLOCK as u64) as usize;
+                input.read_exact(&mut block[..count * ENTRY])?;
+                let key = block[..32].try_into().unwrap();
+                if fences.last().is_some_and(|last| last >= &key) {
+                    return Err(Error::new("InvalidPackIndex", "unsorted fences"));
+                }
+                fences.push(key);
+                done += count as u64;
+            }
+            self.cached += size;
+            self.indexes.insert(
+                prefix.into(),
+                Index {
+                    version: version(&metadata),
+                    file,
+                    fences,
+                    rows,
+                    block: Vec::new(),
+                    block_start: None,
+                },
+            );
+        }
+        let index = self.indexes.get_mut(prefix).unwrap();
+        let key = binary::<32>(&r.hash)?;
+        let upper = index.fences.partition_point(|f| f <= &key);
+        if upper == 0 {
+            return Ok(None);
+        }
+        let start = (upper - 1) * INDEX_BLOCK;
+        let count = (index.rows - start as u64).min(INDEX_BLOCK as u64) as usize;
+        if index.block_start != Some(start) {
+            index.block.resize(count * ENTRY, 0);
+            index
+                .file
+                .read_exact_at(&mut index.block, HEADER + start as u64 * ENTRY as u64)?;
+            index.block_start = Some(start);
+            self.index_blocks += 1;
+        }
+        let block = &index.block;
+        let (mut lo, mut hi) = (0, count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let offset = mid * ENTRY;
+            let found: &[u8; 32] = block[offset..offset + 32].try_into().unwrap();
+            match found.cmp(&key) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => {
+                    let v = Locator::decode(block[offset..offset + ENTRY].try_into().unwrap())?;
+                    return plan(root, r, v).map(Some);
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+fn plan(root: &Path, r: &ObjectRef, v: Locator) -> Result<ReadPlan> {
+    if v.bytes != r.bytes {
+        return Err(Error::new("DigestMismatch", "packed object length"));
+    }
+    Ok(ReadPlan {
+        path: data_path(root, &v.segment),
+        offset: v.offset,
+        bytes: v.bytes,
+        whole_file: false,
+    })
+}
 
 #[derive(Clone)]
 struct Locator {
@@ -121,6 +306,7 @@ fn read_locator(root: &Path, v: &Locator) -> Result<Vec<u8>> {
     }
     Ok(b)
 }
+#[cfg(test)]
 pub(super) fn read(root: &Path, r: &ObjectRef) -> Result<Option<Vec<u8>>> {
     let Some(v) = lookup(root, &r.hash)? else {
         return Ok(None);
@@ -194,7 +380,7 @@ fn save_index(root: &Path, prefix: &str, rows: &BTreeMap<[u8; 32], Locator>) -> 
     result
 }
 struct Pending {
-    file: File,
+    file: BufWriter<File>,
     segment: [u8; 16],
     bytes: u64,
     rows: BTreeMap<[u8; 32], Locator>,
@@ -217,9 +403,10 @@ impl Writer {
     pub fn put(&mut self, r: &ObjectRef, bytes: &[u8]) -> Result<bool> {
         let prefix = &r.hash[..2];
         let hash = binary::<32>(&r.hash)?;
-        if let Some(p) = self.pending.get(prefix)
+        if let Some(p) = self.pending.get_mut(prefix)
             && let Some(v) = p.rows.get(&hash)
         {
+            p.file.flush()?;
             if read_locator(&self.root, v)? != bytes {
                 return Err(Error::new("DigestMismatch", "duplicate pending object"));
             }
@@ -242,7 +429,7 @@ impl Writer {
             self.pending.insert(
                 prefix.into(),
                 Pending {
-                    file,
+                    file: BufWriter::with_capacity(64 * 1024, file),
                     segment,
                     bytes: 0,
                     rows: BTreeMap::new(),
@@ -261,22 +448,24 @@ impl Writer {
         p.rows.insert(hash, loc);
         Ok(true)
     }
-    pub fn read(&self, r: &ObjectRef) -> Result<Option<Vec<u8>>> {
-        if let Some(p) = self.pending.get(&r.hash[..2])
+    pub fn read(&mut self, r: &ObjectRef) -> Result<Option<Vec<u8>>> {
+        if let Some(p) = self.pending.get_mut(&r.hash[..2])
             && let Some(v) = p.rows.get(&binary::<32>(&r.hash)?)
         {
             if v.bytes != r.bytes {
                 return Err(Error::new("DigestMismatch", "pending length"));
             }
+            p.file.flush()?;
             return read_locator(&self.root, v).map(Some);
         }
         Ok(None)
     }
     fn seal(&mut self, prefix: &str) -> Result<()> {
-        let Some(p) = self.pending.remove(prefix) else {
+        let Some(mut p) = self.pending.remove(prefix) else {
             return Ok(());
         };
-        p.file.sync_all()?;
+        p.file.flush()?;
+        p.file.get_ref().sync_all()?;
         File::open(self.root.join("packs"))?.sync_all()?;
         self.syncs += 2;
         let _lock = Lock::take(&self.root)?;
@@ -373,6 +562,103 @@ mod tests {
     use super::*;
     use crate::facts::objects::Objects;
     use cq_core::ports::facts::ReadStats;
+    fn one_bucket(n: usize) -> Vec<(ObjectRef, Vec<u8>)> {
+        use sha2::{Digest, Sha256};
+        let mut rows = Vec::new();
+        for i in 0u64.. {
+            let bytes = i.to_le_bytes().to_vec();
+            let hash = Sha256::digest(&bytes);
+            if hash[0] == 0 {
+                rows.push((
+                    ObjectRef {
+                        hash: hex(&hash),
+                        bytes: bytes.len() as u64,
+                    },
+                    bytes,
+                ));
+                if rows.len() == n {
+                    break;
+                }
+            }
+        }
+        rows
+    }
+    #[test]
+    fn performance_pack_index_is_not_republished_for_each_thousand_objects() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("objects");
+        let rows = one_bucket(2049);
+        let mut writer = Writer::new(&root).unwrap();
+        for (r, bytes) in &rows {
+            writer.put(r, bytes).unwrap();
+        }
+        // A preparation owns ObjectGate; publication only needs the durable
+        // catalogue at its barrier, rather than repeated whole-bucket rewrites.
+        writer.sync().unwrap();
+        assert!(
+            writer.syncs <= 5,
+            "one populated bucket needs one durability barrier, got {} fsyncs",
+            writer.syncs
+        );
+        drop(writer);
+        for (r, bytes) in rows {
+            assert_eq!(read(&root, &r).unwrap().unwrap(), bytes);
+        }
+    }
+    #[test]
+    fn performance_immutable_bucket_index_is_opened_once_for_many_distinct_reads() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("objects");
+        let rows = one_bucket(64);
+        {
+            let o = Objects::buffered(root.clone()).unwrap();
+            for (_, bytes) in &rows {
+                o.put(bytes).unwrap();
+            }
+            o.sync_pending().unwrap();
+        }
+        let o = Objects::new(root).unwrap();
+        for (r, bytes) in rows {
+            assert_eq!(
+                &**o.read(&r, &mut ReadStats::default()).unwrap(),
+                bytes.as_slice()
+            );
+        }
+        assert_eq!(o.resource_stats()["pack_index_opens"].as_u64(), Some(1));
+        assert_eq!(
+            o.resource_stats()["pack_index_read_blocks"].as_u64(),
+            Some(1)
+        );
+        assert!(
+            o.resource_stats()["pack_index_cache_bytes"]
+                .as_u64()
+                .unwrap()
+                < 256
+        );
+    }
+    #[test]
+    fn cached_locator_snapshots_follow_replacement_and_do_not_hide_truncation() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("objects");
+        let rows = one_bucket(2);
+        let a = Objects::buffered(root.clone()).unwrap();
+        a.put(&rows[0].1).unwrap();
+        a.sync_pending().unwrap();
+        let reader = Objects::new(root.clone()).unwrap();
+        reader.read(&rows[0].0, &mut ReadStats::default()).unwrap();
+        let b = Objects::buffered(root.clone()).unwrap();
+        b.put(&rows[1].1).unwrap();
+        b.sync_pending().unwrap();
+        reader.read(&rows[1].0, &mut ReadStats::default()).unwrap();
+        assert_eq!(
+            reader.resource_stats()["pack_index_opens"].as_u64(),
+            Some(2)
+        );
+        std::fs::write(index_path(&root, "00"), b"broken").unwrap();
+        // A physical read bypasses the payload cache and checks the changed
+        // locator snapshot; this must remain an error after cache optimization.
+        assert!(reader.audit_bytes(&rows[0].0).is_err());
+    }
     fn files(p: &Path) -> usize {
         std::fs::read_dir(p)
             .unwrap()

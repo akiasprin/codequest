@@ -2,9 +2,66 @@
 //! own ordering; workers perform independent transformations and bounded sorts.
 use crate::{Error, Result};
 use rayon::prelude::*;
-use std::sync::OnceLock;
+use std::sync::{Condvar, Mutex, OnceLock, mpsc};
 
 pub const MAX_WORKERS: usize = 128;
+const QUEUED_BYTES: u64 = 512 * 1024 * 1024;
+static ADMISSION: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+struct Permit(u64);
+impl Drop for Permit {
+    fn drop(&mut self) {
+        *ADMISSION.0.lock().unwrap() -= self.0;
+        ADMISSION.1.notify_all();
+    }
+}
+pub struct Job<T>(mpsc::Receiver<Result<T>>);
+impl<T> Job<T> {
+    pub fn try_join(self) -> std::result::Result<Result<T>, Self> {
+        match self.0.try_recv() {
+            Ok(result) => Ok(result),
+            Err(mpsc::TryRecvError::Empty) => Err(self),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Ok(Err(Error::new("WorkerFailed", "queued task disconnected")))
+            }
+        }
+    }
+    pub fn join(self) -> Result<T> {
+        self.0
+            .recv()
+            .map_err(|_| Error::new("WorkerFailed", "queued task disconnected"))?
+    }
+}
+/// Input memory is reserved by a coordinator before submission. Only small
+/// completion receipts may outlive this reservation; callers join before
+/// removing any task-owned files. Worker-side admission is rejected to avoid
+/// nested pool starvation with a one-thread configuration.
+pub fn submit<T: Send + 'static>(
+    bytes: u64,
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<Job<T>> {
+    if rayon::current_thread_index().is_some() {
+        return Err(Error::new(
+            "NestedWorkerAdmission",
+            "submit from the coordinator",
+        ));
+    }
+    let pool = pool()?;
+    let mut used = ADMISSION.0.lock().unwrap();
+    while *used != 0 && bytes > QUEUED_BYTES.saturating_sub(*used) {
+        used = ADMISSION.1.wait(used).unwrap();
+    }
+    *used += bytes;
+    drop(used);
+    let permit = Permit(bytes);
+    let (tx, rx) = mpsc::sync_channel(1);
+    pool.spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .unwrap_or_else(|_| Err(Error::new("WorkerFailed", "queued task panicked")));
+        drop(permit);
+        let _ = tx.send(result);
+    });
+    Ok(Job(rx))
+}
 
 fn configured(value: Option<&str>, cpus: usize) -> Result<usize> {
     value.map_or(Ok(cpus.saturating_mul(2).clamp(1, MAX_WORKERS)), |v| {
@@ -63,6 +120,18 @@ pub fn sort_by<T: Send>(
     Ok(())
 }
 
+/// Bound splitting overhead for short per-record transformations. Coarse jobs
+/// such as compiler units and index partitions keep using `map` unchanged.
+pub fn map_records<T: Send, U: Send>(
+    items: Vec<T>,
+    f: impl Fn(T) -> Result<U> + Sync + Send,
+) -> Result<Vec<U>> {
+    if items.len() <= 1 {
+        return items.into_iter().map(f).collect();
+    }
+    pool()?.install(|| items.into_par_iter().with_min_len(16).map(f).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +160,19 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.code(), "Injected");
+        assert_eq!(submit(16, || Ok(42)).unwrap().join().unwrap(), 42);
+        let failure = submit(16, || -> Result<()> {
+            Err(Error::new("Injected", "worker failure"))
+        })
+        .unwrap()
+        .join()
+        .unwrap_err();
+        assert_eq!(failure.code(), "Injected");
+        assert_eq!(
+            map(vec![0, 1], |_| submit(16, || Ok(1)).map(|_| ()))
+                .unwrap_err()
+                .code(),
+            "NestedWorkerAdmission"
+        );
     }
 }

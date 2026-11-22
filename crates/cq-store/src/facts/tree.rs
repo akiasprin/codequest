@@ -19,6 +19,60 @@ pub(crate) enum Node {
 pub(crate) fn order(key: &str) -> String {
     format!("{}:{key}", digest(key.as_bytes()))
 }
+
+#[cfg(test)]
+mod initial_build_tests {
+    use super::*;
+    #[test]
+    fn parallel_empty_root_edits_preserve_streamed_root_and_duplicate_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let objects = Objects::buffered(temp.path().join("objects")).unwrap();
+        let mut expected = BTreeMap::new();
+        let mut changes = Vec::new();
+        for i in 0..4097 {
+            let key = format!("scope-member:{i}");
+            let value = serde_json::json!({"index":i});
+            expected.insert(order(&key), value.clone());
+            changes.push((key, Some(value)));
+        }
+        changes.push((
+            "scope-member:1".into(),
+            Some(serde_json::json!({"replacement":true})),
+        ));
+        changes.push(("scope-member:2".into(), None));
+        expected.insert(
+            order("scope-member:1"),
+            serde_json::json!({"replacement":true}),
+        );
+        expected.remove(&order("scope-member:2"));
+        let (oracle, count) = build_sorted(&objects, expected.into_iter().map(Ok)).unwrap();
+        let actual = edit(&objects, &None, changes, &mut ReadStats::default()).unwrap();
+        assert_eq!(count, 4096);
+        assert_eq!(actual, oracle);
+        objects.sync_pending().unwrap();
+        let reopened = Objects::new(objects.root.clone()).unwrap();
+        assert_eq!(
+            get(
+                &reopened,
+                &actual,
+                "scope-member:1",
+                &mut ReadStats::default()
+            )
+            .unwrap(),
+            Some(serde_json::json!({"replacement":true}))
+        );
+        assert!(
+            get(
+                &reopened,
+                &actual,
+                "scope-member:2",
+                &mut ReadStats::default()
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}
 /// Build an initial immutable map once from strictly ordered keys. Only a
 /// leaf-sized lookahead and the branch stack are retained, not the whole map.
 pub(crate) fn build_sorted(
@@ -374,18 +428,55 @@ pub fn visit(
     root: &Root,
     mut f: impl FnMut(&str, &Value) -> Result<()>,
 ) -> Result<()> {
-    let mut after = None;
-    loop {
-        let p = scan(o, root, after.as_deref(), 256, &mut ReadStats::default())?;
-        for (_, k, v) in p.rows {
-            f(&k, &v)?;
-        }
-        if p.complete {
-            break;
-        }
-        after = p.after;
+    for row in Ordered::new(o, root) {
+        let (sort, value) = row?;
+        let key = sort
+            .get(65..)
+            .ok_or_else(|| Error::new("InvalidManifestTree", "leaf key"))?;
+        f(key, &value)?;
     }
     Ok(())
+}
+
+/// A bounded DFS cursor for complete traversal; unlike repeated keyset scans,
+/// this decodes each branch/leaf once and retains at most one leaf plus a stack.
+pub(crate) struct Ordered<'a> {
+    objects: &'a Objects,
+    stack: Vec<ObjectRef>,
+    leaf: std::collections::btree_map::IntoIter<String, Value>,
+    failed: bool,
+}
+impl<'a> Ordered<'a> {
+    pub fn new(objects: &'a Objects, root: &Root) -> Self {
+        Self {
+            objects,
+            stack: root.iter().cloned().collect(),
+            leaf: BTreeMap::new().into_iter(),
+            failed: false,
+        }
+    }
+}
+impl Iterator for Ordered<'_> {
+    type Item = Result<(String, Value)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        loop {
+            if let Some(row) = self.leaf.next() {
+                return Some(Ok(row));
+            }
+            let r = self.stack.pop()?;
+            match self.objects.decode::<Node>(&r, &mut ReadStats::default()) {
+                Ok(Node::Leaf(rows)) => self.leaf = rows.into_iter(),
+                Ok(Node::Branch(children)) => self.stack.extend(children.into_values().rev()),
+                Err(e) => {
+                    self.failed = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+    }
 }
 
 /// Visit only different Merkle paths. Mixed leaf/branch shapes are partitioned

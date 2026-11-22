@@ -12,11 +12,14 @@ mod membership;
 mod page;
 pub struct Projection {
     db: Database,
+    buffer_bytes: u64,
     queries: Mutex<u64>,
     cache: Mutex<BTreeMap<String, Arc<Vec<u8>>>>,
+    locators: Mutex<BTreeMap<String, u64>>,
     imports: Mutex<import::ImportStats>,
     import_lock: Mutex<()>,
     directory: std::path::PathBuf,
+    database_path: std::path::PathBuf,
 }
 fn err(e: impl std::fmt::Display) -> Error {
     Error::new("GraphDatabase", e.to_string())
@@ -29,6 +32,7 @@ impl Projection {
         Self::open_limited(path, create, 16 * 1024 * 1024 * 1024)
     }
     pub fn open_limited(path: &Path, create: bool, disk_limit: u64) -> Result<Self> {
+        let buffer_bytes = residency::buffer_bytes()?;
         if !create && !path.is_file() {
             return Err(Error::new(
                 "RecoveryRequired",
@@ -45,19 +49,26 @@ impl Projection {
         let db = Database::new(
             path,
             SystemConfig::default()
-                .buffer_pool_size(residency::BUFFER_BYTES)
+                .buffer_pool_size(buffer_bytes)
                 .max_num_threads(cq_core::compute::workers()? as u64)
                 .max_db_size(disk_limit.min(16 * 1024 * 1024 * 1024))
+                // COPY_FROM otherwise forces a checkpoint at every COMMIT,
+                // regardless of the WAL threshold. Imports own bounded explicit
+                // checkpoints; WAL commits and replay checks remain enabled.
+                .auto_checkpoint(false)
                 .throw_on_wal_replay_failure(true),
         )
         .map_err(err)?;
         let p = Self {
             db,
+            buffer_bytes,
             queries: Mutex::new(0),
             cache: Mutex::new(BTreeMap::new()),
+            locators: Mutex::new(BTreeMap::new()),
             imports: Mutex::new(Default::default()),
             import_lock: Mutex::new(()),
             directory: path.parent().unwrap().to_owned(),
+            database_path: path.to_owned(),
         };
         if create {
             let c = p.connection()?;
@@ -150,6 +161,57 @@ impl Projection {
             ))
             .map_err(err)?
             .to_string())
+    }
+    pub fn record(
+        &self,
+        objects: &crate::facts::objects::Objects,
+        r: &cq_core::ports::facts::FactRef,
+        timeout: u64,
+        io: &mut cq_core::ports::facts::ReadStats,
+    ) -> Result<(Vec<u8>, u64)> {
+        if let Some(&bytes) = self.locators.lock().unwrap().get(&r.object.hash) {
+            if bytes != r.object.bytes {
+                return Err(Error::new("IndexIncomplete", "page length"));
+            }
+            return Ok((objects.read_record(r, io)?, 0));
+        }
+        if let Some(bytes) = self.cache.lock().unwrap().get(&r.object.hash).cloned() {
+            if bytes.len() as u64 != r.object.bytes {
+                return Err(Error::new("IndexIncomplete", "page length"));
+            }
+            let row = crate::facts::writer::record_bytes(&bytes, r)?.to_vec();
+            return Ok((row, 0));
+        }
+        let c = self.connection()?;
+        c.set_query_timeout(timeout.max(1));
+        let mut statement = c
+            .prepare("MATCH (p:Page {id:$id}) RETURN p.bytes")
+            .map_err(err)?;
+        *self.queries.lock().unwrap() += 1;
+        let rows: Vec<_> = c
+            .execute(
+                &mut statement,
+                vec![("id", Value::String(r.object.hash.clone()))],
+            )
+            .map_err(err)?
+            .collect();
+        let Some(Value::String(text)) = rows.first().and_then(|r| r.first()) else {
+            return Err(Error::new("IndexIncomplete", &r.object.hash));
+        };
+        io.bytes_decoded += text.len() as u64;
+        if page::is_locator(text, &r.object)? {
+            let mut locators = self.locators.lock().unwrap();
+            if locators.len() >= 4096 {
+                locators.clear();
+            }
+            locators.insert(r.object.hash.clone(), r.object.bytes);
+            drop(locators);
+            return Ok((objects.read_record(r, io)?, 1));
+        }
+        // Old inline/segmented indexes keep their established validation path.
+        let (bytes, extra) = self.page(objects, &r.object, timeout, io)?;
+        let row = crate::facts::writer::record_bytes(&bytes, r)?.to_vec();
+        Ok((row, extra + 1))
     }
     pub fn physical_counts(&self) -> Result<serde_json::Value> {
         let mut counts = serde_json::Map::new();

@@ -116,7 +116,7 @@ impl Drop for Maintenance<'_> {
 }
 impl StoreHost {
     fn point(&self, stage: &str) -> Result<()> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         {
             let hooks = self.root.join("test-hooks");
             if hooks.join(stage).is_file() {
@@ -214,7 +214,60 @@ impl StoreHost {
             }
             Err(e) => return Err(e),
         };
+        // A structurally readable database can still carry an invalid receipt.
+        // Like a missing projection, it is reconstructible from the admitted
+        // immutable manifests. HEAD is never inferred from the projection.
+        let receipt_mismatch =
+            catalog
+                .committed
+                .keys()
+                .try_fold(false, |bad, id| -> Result<bool> {
+                    let r: Revision = load(&root.join("commits").join(id))?;
+                    r.verify()?;
+                    Ok(bad || !index.receipt(&r)?)
+                })?;
         drop(index);
+        if receipt_mismatch {
+            let _objects = retention::ObjectGate::lock(objects.root.parent().unwrap())?;
+            let epoch = cq_capture_protocol::new_id()?;
+            let rebuilt = crate::ladybug::residency::acquire(
+                &root.join("indexes").join(&epoch).join("graph.lbdb"),
+                true,
+                false,
+                std::time::Duration::from_secs(5),
+            )?;
+            let mut manifests = catalog
+                .committed
+                .keys()
+                .map(|id| load::<Revision>(&root.join("commits").join(id)))
+                .collect::<Result<Vec<_>>>()?;
+            manifests.sort_by_key(|r| r.sequence);
+            for r in &manifests {
+                r.verify()?;
+                rebuilt.import(&objects, r)?;
+            }
+            let pending = root.join("pending.json");
+            if pending.exists() {
+                let p: Pending = load(&pending)?;
+                let head: Option<String> = if root.join("HEAD").exists() {
+                    Some(load(&root.join("HEAD"))?)
+                } else {
+                    None
+                };
+                if head.as_deref() == Some(&p.manifest.revision) {
+                    p.manifest.verify()?;
+                    rebuilt.import(&objects, &p.manifest)?;
+                }
+            }
+            route = Route {
+                epoch,
+                generation: route.generation + 1,
+            };
+            eprintln!(
+                "{}",
+                json!({"event":"projection_rebuilt","project":project,"reason":"receipt_mismatch","epoch":route.epoch})
+            );
+        }
         let host = Arc::new(Self {
             root,
             objects,
@@ -450,6 +503,59 @@ impl StoreHost {
         self.recover_retirement()?;
         self.blocked.store(false, Ordering::Release);
         Ok(())
+    }
+    pub fn execute_stage(
+        &self,
+        r: &Revision,
+        stage: cq_core::execution::Stage,
+        control: &cq_core::control::CaptureControl,
+    ) -> Result<Value> {
+        use cq_core::execution::Stage;
+        r.verify()?;
+        if self
+            .catalog
+            .lock()
+            .unwrap()
+            .published
+            .get(&r.revision)
+            .is_some_and(|seal| seal != &r.seal)
+        {
+            return Err(Error::new(
+                "RevisionConflict",
+                "a staged operation cannot change an admitted revision's manifest",
+            ));
+        }
+
+        match stage {
+            Stage::AuditInventory
+            | Stage::AuditPayloads
+            | Stage::AuditDirectories
+            | Stage::AuditScopes => self.audit_stage_controlled(r, stage, control),
+            Stage::GraphInventory | Stage::GraphPages | Stage::GraphFacts => {
+                let _g = self.publication.lock().unwrap();
+                let _objects = retention::ObjectGate::lock(self.objects.root.parent().unwrap())?;
+                r.verify()?;
+                if r.project != self.project {
+                    return Err(Error::new("WrongProject", &r.project));
+                }
+                let epoch = self.route.lock().unwrap().epoch.clone();
+                let directory = self.root.join("native-stages").join(&epoch).join(&r.seal);
+                crate::atomic::create_directory(&directory)?;
+                let projection = self.index(&epoch)?;
+                projection.import_stage(&self.objects, r, stage, &directory, control)?;
+                let stats = serde_json::to_value(projection.import_stats())?;
+                let value =
+                    json!({"stage":stage.name(),"epoch":epoch,"manifest":r.seal,"stats":stats});
+                let receipt = directory.join(format!(
+                    "{}-{}.json",
+                    stage.name(),
+                    cq_capture_protocol::new_id()?
+                ));
+                crate::atomic::immutable_write(&receipt, &serde_json::to_vec(&value)?)?;
+                Ok(json!({"receipt":receipt,"summary":value}))
+            }
+            _ => Err(Error::new("UnknownStage", stage.name())),
+        }
     }
     pub fn publish(&self, r: &Revision, expected: Option<&str>) -> CommitResult {
         let mut state = CommitOutcome::NotCommitted;
@@ -883,9 +989,9 @@ impl View {
     }
     fn row(&self, key: String, r: FactRef) -> Result<FactRow> {
         let mut io = ReadStats::default();
-        let (bytes, queried) = self.index()?.page(
+        let (bytes, queried) = self.index()?.record(
             &self.host.objects,
-            &r.object,
+            &r,
             self.remaining()?.as_millis().max(1) as u64,
             &mut io,
         )?;
@@ -898,13 +1004,7 @@ impl View {
             let mut stats = self.stats.lock().unwrap();
             stats.database_queries += queried;
         }
-        let end = r
-            .offset
-            .checked_add(r.length)
-            .ok_or_else(|| Error::new("InvalidFactRef", "overflow"))?;
-        let b = bytes
-            .get(r.offset as usize..end as usize)
-            .ok_or_else(|| Error::new("IndexIncomplete", "record bounds"))?;
+        let b = &bytes;
         if cq_core::model::digest(b) != r.digest {
             return Err(Error::new("IndexIncomplete", "record digest"));
         }

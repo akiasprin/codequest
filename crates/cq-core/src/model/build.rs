@@ -15,6 +15,7 @@ pub enum Language {
     Go,
     C,
     Cpp,
+    TypeScript,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationKind {

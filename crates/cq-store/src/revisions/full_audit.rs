@@ -9,27 +9,30 @@ use cq_core::semantic::{
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 type Key = [u8; 32];
+mod directories;
+mod stages;
+const DIRECTORY_WAVE: usize = 4096;
 fn hash(bytes: &[u8]) -> Key {
     Sha256::digest(bytes).into()
 }
 fn reference_hash(value: &Value) -> Result<Key> {
     Ok(hash(&serde_json::to_vec(value)?))
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Owner {
     Unit(u32),
     Entity(Key),
     Project,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Fact {
     reference: Key,
-    groups: Vec<u32>,
-    group_count: usize,
+    groups: std::ops::Range<usize>,
     family: Option<FactFamily>,
     owner: Owner,
     scoped: bool,
 }
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Group {
     expected: u64,
     seen: bool,
@@ -44,17 +47,22 @@ fn family(s: &str) -> Option<FactFamily> {
         _ => None,
     }
 }
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Proof {
     indexed: bool,
+    #[serde(with = "stages::entries")]
     facts: HashMap<Key, Fact>,
+    #[serde(with = "stages::entries")]
     group_ids: HashMap<Key, u32>,
     groups: Vec<Group>,
+    group_members: Vec<u32>,
     units: BTreeMap<String, u32>,
     unit_names: Vec<String>,
     selected_units: BTreeSet<String>,
+    #[serde(with = "stages::entries")]
     entities: HashMap<Key, u32>,
-    required: HashMap<Key, (String, &'static str)>,
+    #[serde(with = "stages::entries")]
+    required: HashMap<Key, (String, u8)>,
     scopes: Vec<(String, Value)>,
 }
 impl Proof {
@@ -71,7 +79,7 @@ impl Proof {
         let key = format!("{family}:{id}");
         self.required
             .entry(hash(key.as_bytes()))
-            .or_insert((key, code));
+            .or_insert((key, if code == "DanglingEndpoint" { 1 } else { 2 }));
     }
     fn record(
         &mut self,
@@ -86,7 +94,7 @@ impl Proof {
             .next()
             .ok_or_else(|| Error::new("InvalidFactKey", &key))?;
         let f = family(name);
-        let mut group_ids = Vec::with_capacity(names.len());
+        let group_start = self.group_members.len();
         for gh in &names {
             let id = if let Some(id) = self.group_ids.get(gh) {
                 *id
@@ -97,7 +105,7 @@ impl Proof {
                 id
             };
             self.groups[id as usize].expected += 1;
-            group_ids.push(id);
+            self.group_members.push(id);
         }
         let owner = match f {
             Some(FactFamily::Entity | FactFamily::Body | FactFamily::Occurrence) => {
@@ -141,8 +149,7 @@ impl Proof {
                 kh,
                 Fact {
                     reference: fingerprint,
-                    groups: group_ids,
-                    group_count: names.len(),
+                    groups: group_start..self.group_members.len(),
                     family: f,
                     owner,
                     scoped: false,
@@ -155,17 +162,31 @@ impl Proof {
         Ok(())
     }
     fn scopes(&mut self, o: &Objects, partial: bool, root: &Path, project: &str) -> Result<()> {
+        self.scopes_controlled(o, partial, root, project, None)
+    }
+    fn scopes_controlled(
+        &mut self,
+        o: &Objects,
+        partial: bool,
+        root: &Path,
+        project: &str,
+        control: Option<&cq_core::control::CaptureControl>,
+    ) -> Result<()> {
         let scopes = std::mem::take(&mut self.scopes);
-        let mut progress = cq_core::progress::Progress::stage(
+        let mut progress = cq_core::progress::Progress::stage_with_workers(
             root,
             project,
             "audit.scopes",
             "审计范围成员",
             Some(scopes.len() as u64),
             "范围",
+            cq_core::compute::workers().unwrap_or(1),
         );
         let mut completed = 0;
         for wave in scopes.chunks(cq_core::compute::workers()?.min(8)) {
+            if control.is_some_and(|c| c.is_cancelled()) {
+                return Err(Error::new("Cancelled", "audit scopes paused"));
+            }
             let results = cq_core::compute::map(wave.iter().collect(), |(id, value)| {
                 let mut members = Vec::new();
                 let descriptor: ScopeDescriptor =
@@ -282,30 +303,33 @@ impl StoreHost {
             "事实",
         );
         let mut count = 0;
-        let mut pages = BTreeMap::<String, Vec<(String, FactRef, Key)>>::new();
+        let mut pages = BTreeMap::<String, crate::facts::inventory::Page<Key>>::new();
         tree::visit(&self.objects, &r.roots.facts, |key, v| {
             let f: FactRef = serde_json::from_value(v.clone())?;
             count += 1;
             inventory.count(count);
-            pages.entry(f.object.hash.clone()).or_default().push((
-                key.into(),
-                f,
-                reference_hash(v)?,
-            ));
+            crate::facts::inventory::push(&mut pages, key, f, reference_hash(v)?)?;
             Ok(())
         })?;
         let page_count = pages.len();
-        let mut proof = Proof {
-            indexed: r.metadata["search_index"]["version"] == 1,
-            ..Proof::default()
-        };
-        let mut progress = cq_core::progress::Progress::stage(
+        let mut proof =
+            Proof {
+                indexed: r.metadata["search_index"]["version"] == 1,
+                // The inventory was counted independently. Reserve once rather
+                // than keeping two multi-gigabyte tables alive during rehashing.
+                facts: HashMap::with_capacity(usize::try_from(count).map_err(|_| {
+                    Error::new("AuditReadBudget", "fact count exceeds address space")
+                })?),
+                ..Proof::default()
+            };
+        let mut progress = cq_core::progress::Progress::stage_with_workers(
             root,
             &r.project,
             "audit.pages",
             "审计事实载荷",
             Some(page_count as u64),
             "页",
+            cq_core::compute::workers().unwrap_or(1),
         );
         let mut completed = 0;
         let mut pages = pages.into_values();
@@ -317,9 +341,10 @@ impl StoreHost {
             if wave.is_empty() {
                 break;
             }
-            let values = cq_core::compute::map(wave, |rows| {
-                let bytes = self.objects.audit_bytes(&rows[0].1.object)?;
-                cq_core::compute::map(rows, |(key, f, fingerprint)| {
+            let values = cq_core::compute::map(wave, |page| {
+                let bytes = self.objects.audit_bytes(&page.object)?;
+                cq_core::compute::map(page.rows, |row| {
+                    let (key, f, fingerprint) = row.expand(&page.object);
                     let value = writer::decode_bytes(&bytes, &f)?;
                     let family = key.split(':').next().unwrap();
                     let names =
@@ -341,67 +366,51 @@ impl StoreHost {
         }
         for (key, (id, code)) in std::mem::take(&mut proof.required) {
             if !proof.facts.contains_key(&key) {
-                return Err(Error::new(code, id));
+                return Err(Error::new(
+                    if code == 1 {
+                        "DanglingEndpoint"
+                    } else {
+                        "MissingProvenance"
+                    },
+                    id,
+                ));
             }
         }
-        let mut directories = Vec::new();
+        let mut progress = cq_core::progress::Progress::stage_with_workers(
+            root,
+            &r.project,
+            "audit.directories",
+            "审计检索目录",
+            Some(proof.groups.iter().map(|g| g.expected).sum()),
+            "成员",
+            cq_core::compute::workers().unwrap_or(1),
+        );
+        let mut directories = Vec::with_capacity(DIRECTORY_WAVE);
+        let mut directory_peak = 0;
+        let mut directory_stats = directories::DirectoryStats::default();
+        let mut completed = 0;
         tree::visit(&self.objects, &r.roots.groups, |name, value| {
             directories.push((
                 name.to_owned(),
                 serde_json::from_value::<writer::Group>(value.clone())?,
             ));
+            directory_peak = directory_peak.max(directories.len());
+            if directories.len() == DIRECTORY_WAVE {
+                directory_stats.add(proof.directories(
+                    &self.objects,
+                    std::mem::take(&mut directories),
+                    &mut progress,
+                    &mut completed,
+                )?);
+            }
             Ok(())
         })?;
-        let mut progress = cq_core::progress::Progress::stage(
-            root,
-            &r.project,
-            "audit.directories",
-            "审计检索目录",
-            Some(directories.len() as u64),
-            "目录",
-        );
-        let mut completed = 0;
-        for wave in directories.chunks(cq_core::compute::workers()?.min(32)) {
-            let ids = cq_core::compute::map(wave.iter().collect(), |(name, group)| {
-                let id = *proof
-                    .group_ids
-                    .get(&hash(name.as_bytes()))
-                    .ok_or_else(|| Error::new("IndexIncomplete", "foreign directory"))?;
-                if proof.groups[id as usize].seen {
-                    return Err(Error::new("IndexIncomplete", "duplicate directory"));
-                }
-
-                let mut count = 0;
-                tree::visit(&self.objects, &group.root, |key, v| {
-                    let entry = proof
-                        .facts
-                        .get(&hash(key.as_bytes()))
-                        .ok_or_else(|| Error::new("IndexIncomplete", "foreign directory member"))?;
-                    if entry.reference != reference_hash(v)?
-                        || !entry.groups[..entry.group_count].contains(&id)
-                    {
-                        return Err(Error::new(
-                            "IndexIncomplete",
-                            "directory owner/reference mismatch",
-                        ));
-                    }
-                    count += 1;
-                    Ok(())
-                })?;
-                if count != group.count || count != proof.groups[id as usize].expected {
-                    return Err(Error::new("IndexIncomplete", "directory count mismatch"));
-                }
-                Ok(id)
-            })?;
-            for id in ids {
-                if proof.groups[id as usize].seen {
-                    return Err(Error::new("IndexIncomplete", "duplicate directory"));
-                }
-                proof.groups[id as usize].seen = true;
-                completed += 1;
-                progress.count(completed);
-            }
-        }
+        directory_stats.add(proof.directories(
+            &self.objects,
+            directories,
+            &mut progress,
+            &mut completed,
+        )?);
         if proof.groups.iter().any(|g| !g.seen) {
             return Err(Error::new("IndexIncomplete", "missing canonical directory"));
         }
@@ -412,13 +421,14 @@ impl StoreHost {
             )?);
             Ok(())
         })?;
-        let mut progress = cq_core::progress::Progress::stage(
+        let mut progress = cq_core::progress::Progress::stage_with_workers(
             root,
             &r.project,
             "audit.sources",
             "审计冻结源码",
             Some(sources.len() as u64),
             "文件",
+            cq_core::compute::workers().unwrap_or(1),
         );
         let mut completed = 0;
         for wave in sources.chunks(cq_core::compute::workers()?.min(8)) {
@@ -435,10 +445,14 @@ impl StoreHost {
             )?;
         }
         Ok(
-            json!({"payload_pages":page_count,"facts":proof.facts.len(),"directories":proof.groups.len(),"payload_order":"physical_page","directory_checks":"exact membership through SHA-256 fact/reference identities"}),
+            json!({"payload_pages":page_count,"facts":proof.facts.len(),"directories":proof.groups.len(),"payload_order":"physical_page","directory_checks":"exact membership through SHA-256 fact/reference identities","maximum_buffered_directories":directory_peak,"directory_execution":directory_stats,"proof_group_members":proof.group_members.len()}),
         )
     }
     pub(super) fn audit(&self, r: &Revision) -> Result<Value> {
+        // A physical audit starts with fresh immutable locator snapshots; cached
+        // payload pages are already bypassed by audit_bytes.
+        self.objects.clear_index_cache();
+        self.objects.clear_cache();
         let result = self.audit_full_pages(r);
         // Full audit indexes are temporary; return their freed arenas before
         // opening a large native database. No live allocations are changed.
@@ -453,6 +467,161 @@ impl StoreHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "read-only real directory-root I/O probe; CQ_P0_REAL_MANIFEST, CQ_P0_REAL_OBJECTS, CQ_P0_READ_REPORT"]
+    fn retained_brocade_directory_roots_measure_single_and_physical_batch_reads() {
+        use std::time::Instant;
+        let manifest = std::env::var("CQ_P0_REAL_MANIFEST").unwrap();
+        let r: Revision = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        r.verify().unwrap();
+        let o = Objects::new(std::path::PathBuf::from(
+            std::env::var_os("CQ_P0_REAL_OBJECTS").unwrap(),
+        ))
+        .unwrap();
+        let n = std::env::var("CQ_P0_READ_COUNT")
+            .ok()
+            .map(|s| s.parse::<usize>().unwrap())
+            .unwrap_or(500_000);
+        let start = Instant::now();
+        let refs = tree::Ordered::new(&o, &r.roots.groups)
+            .take(n)
+            .map(|row| {
+                let (_, v) = row.unwrap();
+                serde_json::from_value::<writer::Group>(v)
+                    .unwrap()
+                    .root
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(refs.len(), n);
+        let inventory_seconds = start.elapsed().as_secs_f64();
+        let shape = |node: tree::Node| match node {
+            tree::Node::Leaf(v) => (v.len() as u64, 0u64),
+            tree::Node::Branch(v) => (0, v.len() as u64),
+        };
+        let cpu = || {
+            let mut r = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, r.as_mut_ptr()) },
+                0
+            );
+            let r = unsafe { r.assume_init() };
+            (r.ru_utime.tv_sec + r.ru_stime.tv_sec) as f64
+                + (r.ru_utime.tv_usec + r.ru_stime.tv_usec) as f64 / 1_000_000.0
+        };
+        // Give both strategies an explicitly warm OS-cache comparison. This
+        // probe must never claim cold disk performance or complete audit time.
+        for r in &refs {
+            o.audit_bytes(r).unwrap();
+        }
+        o.clear_index_cache();
+        let single_cpu_start = cpu();
+        let start = Instant::now();
+        let mut single = (0, 0);
+        for r in &refs {
+            let node = serde_json::from_slice(&o.audit_bytes(r).unwrap()).unwrap();
+            let (a, b) = shape(node);
+            single.0 += a;
+            single.1 += b;
+        }
+        let single_seconds = start.elapsed().as_secs_f64();
+        let single_cpu_seconds = cpu() - single_cpu_start;
+        o.clear_index_cache();
+        let batch_cpu_start = cpu();
+        let start = Instant::now();
+        let mut batched = (0, 0);
+        let mut io = crate::facts::objects::BatchReadStats::default();
+        let mut at = 0;
+        while at < refs.len() {
+            let first = at;
+            let mut bytes = 0;
+            while at < refs.len() && at - first < 4096 && bytes + refs[at].bytes <= 8 * 1024 * 1024
+            {
+                bytes += refs[at].bytes;
+                at += 1;
+            }
+            assert!(at > first);
+            let (values, s) = o
+                .audit_batch(&refs[first..at], |_, b| {
+                    Ok(shape(serde_json::from_slice(b)?))
+                })
+                .unwrap();
+            io.add(s);
+            for (a, b) in values {
+                batched.0 += a;
+                batched.1 += b;
+            }
+        }
+        let batch_seconds = start.elapsed().as_secs_f64();
+        let batch_cpu_seconds = cpu() - batch_cpu_start;
+        assert_eq!(single, batched);
+        assert_eq!(io.objects, refs.len() as u64);
+        let report = json!({"passed":true,"revision":r.revision,"manifest":manifest,"directory_roots":refs.len(),"inventory_seconds":inventory_seconds,"single_seconds":single_seconds,"batch_seconds":batch_seconds,"single_cpu_seconds":single_cpu_seconds,"batch_cpu_seconds":batch_cpu_seconds,"single_average_cpu_cores":single_cpu_seconds/single_seconds,"batch_average_cpu_cores":batch_cpu_seconds/batch_seconds,"io":io,"shape":batched,"scope":"read-only real immutable directory root pages; each SHA-256 and JSON decode checked; excludes descendants, independent membership proof, compiler, HIR, publication, query; full unmeasured cache-prewarm pass, then sequential, then batch; OS page cache not cleared"});
+        std::fs::write(
+            std::env::var_os("CQ_P0_READ_REPORT").unwrap(),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn performance_directory_audit_keeps_a_bounded_wave_and_still_rejects_missing_members() {
+        let t = tempfile::tempdir().unwrap();
+        let h = StoreHost::open(t.path(), "directory-wave").unwrap();
+        let o = Objects::buffered(h.objects.root.clone()).unwrap();
+        let mut w = writer::Writer::new(&o, writer::Roots::default());
+        for i in 0..2049 {
+            let id = format!("f{i}");
+            w.append(
+                "entity",
+                &id,
+                &json!({"id":id,"kind":"Function","name":id,"unit":"u","external":false}),
+            )
+            .unwrap();
+        }
+        let (roots, changes) = w.finish_inventory().unwrap();
+        o.sync_pending().unwrap();
+        let mut r = Revision {
+            format: 2,
+            project: "directory-wave".into(),
+            revision: cq_core::model::digest(b"directory-wave"),
+            parent: None,
+            sequence: 1,
+            roots,
+            metadata: json!({}),
+            changes,
+            seal: String::new(),
+        };
+        r.seal().unwrap();
+        let stats = h.audit(&r).unwrap();
+        assert!(stats["directories"].as_u64().unwrap() > 512);
+        assert!(stats["maximum_buffered_directories"].as_u64().unwrap() <= DIRECTORY_WAVE as u64);
+        assert!(
+            stats["directory_execution"]["branch_jobs"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            stats["directory_execution"]["member_checks"],
+            stats["proof_group_members"]
+        );
+        assert!(
+            stats["directory_execution"]["maximum_pending_jobs"]
+                .as_u64()
+                .unwrap()
+                <= 16 * 1024
+        );
+        r.roots.groups = tree::set(
+            &h.objects,
+            &r.roots.groups,
+            "all:entity",
+            None,
+            &mut ReadStats::default(),
+        )
+        .unwrap();
+        r.seal().unwrap();
+        assert_eq!(h.audit(&r).unwrap_err().code(), "IndexIncomplete");
+    }
     fn fixture() -> (tempfile::TempDir, Arc<StoreHost>, Revision) {
         let t = tempfile::tempdir().unwrap();
         let h = StoreHost::open(t.path(), "full-proof").unwrap();

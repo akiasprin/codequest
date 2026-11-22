@@ -15,6 +15,7 @@ pub mod materialize;
 pub mod analysis;
 pub mod checkpoint;
 mod disk_batch;
+pub mod execution;
 pub mod raw;
 thread_local! {static SNAPSHOT_DECODES:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};}
 pub fn snapshot_decode_count() -> u64 {

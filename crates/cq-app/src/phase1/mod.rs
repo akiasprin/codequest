@@ -1,4 +1,5 @@
 mod index;
+mod interrupt;
 mod languages;
 mod mcp;
 mod progress;
@@ -105,6 +106,59 @@ pub fn run(args: Vec<OsString>) -> Result<(Value, i32)> {
     let service = std::sync::Arc::new(Service::open(&options.store())?);
     drop(opening);
     match options.command.as_str() {
+        "drop-run" => {
+            let id = options
+                .text("--run")
+                .ok_or_else(|| Error::new("MissingExecution", "drop-run needs --run ID"))?;
+            Ok((
+                cq_store::execution::Execution::discard(&service.store.root, &id)?,
+                0,
+            ))
+        }
+        "runs" => Ok((
+            cq_store::execution::Execution::list(&service.store.root)?,
+            0,
+        )),
+        "run-status" => {
+            let id = options
+                .text("--run")
+                .ok_or_else(|| Error::new("MissingExecution", "run-status needs --run ID"))?;
+            Ok((
+                cq_store::execution::Execution::status(&service.store.root, &id)?,
+                0,
+            ))
+        }
+        "resume" | "rerun-stage" => {
+            let id = options
+                .text("--run")
+                .ok_or_else(|| Error::new("MissingExecution", "provide --run ID"))?;
+            let request: IndexRequest = serde_json::from_value(
+                cq_store::execution::Execution::request(&service.store.root, &id)?,
+            )?;
+            let stage = options
+                .text("--stage")
+                .map(|s| cq_core::execution::Stage::parse(&s))
+                .transpose()?;
+            if options.command == "rerun-stage" && stage.is_none() {
+                return Err(Error::new("MissingStage", "rerun-stage needs --stage NAME"));
+            }
+            if options.command == "resume" && stage.is_some() {
+                return Err(Error::new(
+                    "InvalidArguments",
+                    "use rerun-stage to invalidate a completed stage",
+                ));
+            }
+            let until = options
+                .text("--until-stage")
+                .map(|s| cq_core::execution::Stage::parse(&s))
+                .transpose()?;
+            Ok((
+                interrupt::run(|control| {
+                    index::workflow(&request, &service.store, control, Some(&id), stage, until)
+                })?,
+                0,
+            ))
+        }
         "export-snapshot" => {
             let project = options
                 .text("--project")
@@ -175,7 +229,7 @@ pub fn run(args: Vec<OsString>) -> Result<(Value, i32)> {
             Ok((service.store.migrate_paged(&project)?, 0))
         }
         "help" | "--help" => Ok((
-            json!({"commands":["capture run / inspect","index --root DIR [--language rust|go|c|cpp|auto] [--name NAME] [--compdb FILE] [-- cargo check ...]","query --project NAME --json '{\"operation\":\"search\",\"text\":\"JSON\"}'","repl [--project NAME]","mcp [--auto-refresh]","projects","status --project NAME","refresh --project NAME","compare --project NAME --base REV --target REV","annotate --project NAME --json ANNOTATION","annotations --project NAME","cypher --project NAME --text 'MATCH (n) RETURN count(*)'","docs --project NAME","rustdoc --project NAME","schema --project NAME","migrate-store --project NAME","rebuild-store --project NAME","compact-store --project NAME","retention-preview --project NAME","retention-apply --project NAME --request PLAN.json"],"store":service.store.root}),
+            json!({"commands":["runs","run-status --run ID","resume --run ID [--until-stage NAME]","rerun-stage --run ID --stage NAME [--until-stage NAME]","drop-run --run ID","capture run / inspect","index --root DIR [--language rust|go|c|cpp|typescript|auto] [--name NAME] [--compdb FILE] [-- cargo check ...]","query --project NAME --json '{\"operation\":\"search\",\"text\":\"JSON\"}'","repl [--project NAME]","mcp [--auto-refresh]","projects","status --project NAME","refresh --project NAME","compare --project NAME --base REV --target REV","annotate --project NAME --json ANNOTATION","annotations --project NAME","cypher --project NAME --text 'MATCH (n) RETURN count(*)'","docs --project NAME","rustdoc --project NAME","schema --project NAME","migrate-store --project NAME","rebuild-store --project NAME","compact-store --project NAME","retention-preview --project NAME","retention-apply --project NAME --request PLAN.json"],"store":service.store.root}),
             0,
         )),
         "publish-snapshot" => {
@@ -202,7 +256,16 @@ pub fn run(args: Vec<OsString>) -> Result<(Value, i32)> {
         }
         "index" => {
             let request = IndexRequest::from_options(&options)?;
-            Ok((service.index(request)?, 0))
+            let until = options
+                .text("--until-stage")
+                .map(|s| cq_core::execution::Stage::parse(&s))
+                .transpose()?;
+            Ok((
+                interrupt::run(|control| {
+                    index::workflow(&request, &service.store, control, None, None, until)
+                })?,
+                0,
+            ))
         }
         "refresh" => {
             let project = options
@@ -216,7 +279,10 @@ pub fn run(args: Vec<OsString>) -> Result<(Value, i32)> {
             Ok((json!({"state":"repl_closed"}), 0))
         }
         "mcp" => {
-            mcp::run(service, options.yes("--auto-refresh"))?;
+            let compact = options.yes("--compact")
+                || std::env::var("CQ_MCP_COMPACT")
+                    .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            mcp::run(service, options.yes("--auto-refresh"), compact)?;
             Ok((Value::Null, 0))
         }
         "next"

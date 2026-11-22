@@ -1,12 +1,14 @@
 //! Initial directory construction sorts bounded runs on disk. Final group trees
 //! are built once; the incremental writer retains its ordinary copy-on-write path.
-use super::{objects::Objects, tree, writer::Group};
+#[path = "bulk_resume.rs"]
+mod resume;
+use super::{descriptor_budget, objects::Objects, tree, writer::Group};
 use cq_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     cmp::Reverse,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, VecDeque},
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
@@ -17,7 +19,16 @@ use std::{
 };
 const RUN_BYTES: usize = 8 * 1024 * 1024;
 const FAN_IN: usize = 32;
+fn fan_in() -> Result<usize> {
+    Ok(FAN_IN.min(descriptor_budget::capacity()? - 1))
+}
 const DISK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+// Keep ordinary directories whole. Only the complete fact/family inventories
+// need key partitioning; splitting every tiny directory creates millions of
+// temporary member trees that the final merge would immediately rebuild.
+fn key_partitioned(directory: &str) -> bool {
+    directory == "facts" || directory.starts_with("all:")
+}
 fn disk_budget(value: Option<&str>) -> Result<u64> {
     value.map_or(Ok(DISK_BYTES), |v| {
         v.parse::<u64>()
@@ -98,7 +109,8 @@ struct RunWriter(BufWriter<lz4_flex::frame::FrameEncoder<CappedFile>>);
 impl RunWriter {
     fn new(path: &Path, allowance: u64, shared: Arc<SharedDisk>) -> Result<Self> {
         let file = CappedFile {
-            file: File::create(path)?,
+            file: File::create(path)
+                .map_err(|e| descriptor_budget::io(e, "create sorted run", path))?,
             written: 0,
             limit: allowance,
             shared,
@@ -130,10 +142,64 @@ impl RunWriter {
 #[derive(Serialize, Deserialize)]
 struct Row {
     directory: String,
+    key: Arc<str>,
+    value: Arc<Value>,
+}
+pub(super) struct PreparedRows(Vec<(Row, usize)>);
+/// A fact's ordered key and immutable reference are shared by all memberships.
+/// This is only an in-memory representation; scratch tuples and Merkle leaves
+/// retain their existing encodings.
+pub(super) fn prepare_memberships(
+    directories: Vec<String>,
     key: String,
     value: Value,
+) -> Result<PreparedRows> {
+    let key: Arc<str> = Arc::from(tree::order(&key));
+    let key_bytes = serde_json::to_vec(&key)?.len();
+    let value_bytes = serde_json::to_vec(&value)?.len();
+    let value = Arc::new(value);
+    let rows = directories
+        .into_iter()
+        .map(|directory| {
+            let directory = tree::order(&directory);
+            // Exact JSON size of the Row struct without serializing the same
+            // reference once for every membership. Field syntax occupies 30 bytes.
+            let bytes = 30 + serde_json::to_vec(&directory)?.len() + key_bytes + value_bytes;
+            Ok((
+                Row {
+                    directory,
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+                bytes,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    Ok(PreparedRows(rows))
+}
+#[derive(Default)]
+struct PendingRuns(VecDeque<(PathBuf, cq_core::compute::Job<u64>)>);
+impl std::ops::Deref for PendingRuns {
+    type Target = VecDeque<(PathBuf, cq_core::compute::Job<u64>)>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for PendingRuns {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for PendingRuns {
+    fn drop(&mut self) {
+        while let Some((_, job)) = self.0.pop_front() {
+            let _ = job.join();
+        }
+    }
 }
 struct RunBuilder {
+    // Declaration order matters: join writes before removing their TempDir.
+    pending: PendingRuns,
     dir: tempfile::TempDir,
     rows: Vec<Row>,
     bytes: usize,
@@ -147,6 +213,8 @@ struct RunBuilder {
     prefix: String,
     shared_disk: Arc<SharedDisk>,
     shared_progress: Option<Arc<Mutex<(u64, cq_core::progress::Progress)>>>,
+    asynchronous: bool,
+    control: Option<cq_core::control::CaptureControl>,
 }
 impl RunBuilder {
     pub fn new(root: &Path) -> Result<Self> {
@@ -169,14 +237,17 @@ impl RunBuilder {
                 limit: disk_budget(std::env::var("CQ_INDEX_SCRATCH_BYTES").ok().as_deref())?,
             }),
             shared_progress: None,
+            asynchronous: false,
+            control: None,
+            pending: PendingRuns::default(),
         })
     }
     #[cfg(test)]
     pub fn push(&mut self, directory: &str, key: &str, value: Value) -> Result<()> {
         let row = Row {
             directory: tree::order(directory),
-            key: tree::order(key),
-            value,
+            key: Arc::from(tree::order(key)),
+            value: Arc::new(value),
         };
         let size = serde_json::to_vec(&row)?.len();
         if !self.rows.is_empty() && self.bytes + size > self.run_bytes {
@@ -192,7 +263,29 @@ impl RunBuilder {
         self.dir.path().join(format!("{}.jsonl.lz4", self.serial))
     }
     fn flush(&mut self) -> Result<()> {
+        self.collect_ready()?;
         if self.rows.is_empty() {
+            return Ok(());
+        }
+        if self.asynchronous {
+            let path = self.path();
+            let output = path.clone();
+            let mut rows = std::mem::take(&mut self.rows);
+            let estimate = (self.bytes as u64)
+                .saturating_mul(4)
+                .saturating_add(8 * 1024 * 1024);
+            let allowance = self.disk_bytes.saturating_sub(self.live_bytes);
+            let disk = self.shared_disk.clone();
+            let job = cq_core::compute::submit(estimate, move || {
+                rows.sort_unstable_by(|a, b| (&a.directory, &a.key).cmp(&(&b.directory, &b.key)));
+                let mut out = RunWriter::new(&output, allowance, disk)?;
+                for row in rows {
+                    out.push(&row)?;
+                }
+                out.finish()
+            })?;
+            self.bytes = 0;
+            self.pending.push_back((path, job));
             return Ok(());
         }
         cq_core::compute::sort_by(&mut self.rows, |a, b| {
@@ -215,7 +308,31 @@ impl RunBuilder {
         }
         Ok(())
     }
+    fn join_pending(&mut self) -> Result<()> {
+        while let Some((path, job)) = self.pending.pop_front() {
+            let bytes = job.join()?;
+            self.live_bytes += bytes;
+            self.runs.push((0, path));
+        }
+        Ok(())
+    }
+    fn collect_ready(&mut self) -> Result<()> {
+        while let Some((path, job)) = self.pending.pop_front() {
+            match job.try_join() {
+                Ok(result) => {
+                    self.live_bytes += result?;
+                    self.runs.push((0, path));
+                }
+                Err(job) => {
+                    self.pending.push_front((path, job));
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
     fn compact_levels(&mut self) -> Result<()> {
+        let fan_in = fan_in()?;
         for level in 0..64 {
             loop {
                 let selected = self
@@ -224,9 +341,9 @@ impl RunBuilder {
                     .enumerate()
                     .filter(|(_, r)| r.0 == level)
                     .map(|(i, _)| i)
-                    .take(FAN_IN)
+                    .take(fan_in)
                     .collect::<Vec<_>>();
-                if selected.len() < FAN_IN {
+                if selected.len() < fan_in {
                     break;
                 }
                 self.merge_runs(selected, level + 1)?;
@@ -240,15 +357,21 @@ impl RunBuilder {
             .map(|i| self.runs[*i].1.clone())
             .collect::<Vec<_>>();
         let path = self.path();
+        let mut merged = Merge::open(&paths)?;
         let mut out = RunWriter::new(
             &path,
             self.disk_bytes.saturating_sub(self.live_bytes),
             self.shared_disk.clone(),
         )?;
-        for row in Merge::open(&paths)? {
+        for row in &mut merged {
+            if self.control.as_ref().is_some_and(|c| c.is_cancelled()) {
+                return Err(Error::new("Cancelled", "directory merge paused"));
+            }
             out.push(&row?)?;
         }
-        self.live_bytes += out.finish()?;
+        let written = out.finish()?;
+        drop(merged);
+        self.live_bytes += written;
         for i in indices.into_iter().rev() {
             self.runs.remove(i);
         }
@@ -261,7 +384,7 @@ impl RunBuilder {
         self.runs.push((level, path));
         Ok(())
     }
-    pub fn build(mut self, o: &Objects) -> Result<tree::Root> {
+    fn build_with_count(mut self, o: &Objects) -> Result<(tree::Root, u64)> {
         let mut progress = super::limits::root(&o.root)
             .zip(self.project.as_deref())
             .filter(|_| self.shared_progress.is_none())
@@ -276,14 +399,17 @@ impl RunBuilder {
                 )
             });
         self.flush()?;
+        self.join_pending()?;
         self.compact_levels()?;
-        while self.runs.len() > FAN_IN {
-            self.merge_runs((0..FAN_IN).collect(), 64)?;
+        let fan_in = fan_in()?;
+        while self.runs.len() > fan_in {
+            self.merge_runs((0..fan_in).collect(), 64)?;
         }
         let paths = self.runs.iter().map(|r| r.1.clone()).collect::<Vec<_>>();
         let mut merged = Merge::open(&paths)?.peekable();
         let mut failed = false;
         let mut completed = 0;
+        let mut reported = 0;
         if let Some(p) = &mut progress {
             p.detail(
                 "bulk_tree",
@@ -305,38 +431,73 @@ impl RunBuilder {
                     return Some(Err(merged.next().unwrap().err().unwrap()));
                 }
             };
-            let rows = std::iter::from_fn(|| match merged.peek() {
-                Some(Ok(row)) if row.directory == directory => {
-                    completed += 1;
-                    if let Some(shared) = &self.shared_progress {
-                        let mut p = shared.lock().unwrap();
-                        p.0 += 1;
-                        let n = p.0;
-                        p.1.count(n);
-                    }
-                    if let Some(p) = &mut progress {
-                        p.count(completed);
-                    }
-                    Some(merged.next().unwrap().map(|r| (r.key, r.value)))
+            let rows = std::iter::from_fn(|| {
+                if self.control.as_ref().is_some_and(|c| c.is_cancelled()) {
+                    return Some(Err(Error::new("Cancelled", "directory range paused")));
                 }
-                Some(Err(_)) => Some(merged.next().unwrap().map(|r| (r.key, r.value))),
-                _ => None,
+                match merged.peek() {
+                    Some(Ok(row)) if row.directory == directory => {
+                        completed += 1;
+                        if completed - reported >= 1024
+                            && let Some(shared) = &self.shared_progress
+                        {
+                            let mut p = shared.lock().unwrap();
+                            p.0 += completed - reported;
+                            reported = completed;
+                            let n = p.0;
+                            p.1.count(n);
+                        }
+                        if let Some(p) = &mut progress {
+                            p.count(completed);
+                        }
+                        Some(
+                            merged
+                                .next()
+                                .unwrap()
+                                .map(|r| (r.key.to_string(), Arc::unwrap_or_clone(r.value))),
+                        )
+                    }
+                    Some(Err(_)) => Some(
+                        merged
+                            .next()
+                            .unwrap()
+                            .map(|r| (r.key.to_string(), Arc::unwrap_or_clone(r.value))),
+                    ),
+                    _ => None,
+                }
             });
-            let result =
-                tree::build_sorted_prefix(o, rows, &self.prefix).and_then(|(root, count)| {
-                    Ok((directory, serde_json::to_value(Group { root, count })?))
-                });
+            let prefix = if key_partitioned(directory.get(65..).unwrap_or("")) {
+                self.prefix.as_str()
+            } else {
+                ""
+            };
+            let result = tree::build_sorted_prefix(o, rows, prefix).and_then(|(root, count)| {
+                Ok((directory, serde_json::to_value(Group { root, count })?))
+            });
             if result.is_err() {
                 failed = true;
             }
             Some(result)
         });
-        let (root, _) = tree::build_sorted(o, directories)?;
-        Ok(root)
+        let result = tree::build_sorted(o, directories)?;
+        if let Some(shared) = &self.shared_progress {
+            let mut p = shared.lock().unwrap();
+            p.0 += completed - reported;
+            let n = p.0;
+            p.1.count(n);
+        }
+        Ok(result)
+    }
+    #[cfg(test)]
+    fn build(self, o: &Objects) -> Result<tree::Root> {
+        self.build_with_count(o).map(|(root, _)| root)
     }
 }
 impl Drop for RunBuilder {
     fn drop(&mut self) {
+        while let Some((_, job)) = self.pending.pop_front() {
+            let _ = job.join();
+        }
         let bytes = std::fs::read_dir(self.dir.path())
             .into_iter()
             .flatten()
@@ -346,10 +507,18 @@ impl Drop for RunBuilder {
         self.shared_disk.release(bytes);
     }
 }
+#[derive(Default, Debug, Serialize)]
+pub(super) struct BuildStats {
+    pub directory_inputs: u64,
+    pub directories: u64,
+    pub maximum_buffered_directories: usize,
+}
+const MERGE_DIRECTORIES: usize = 256;
 pub(super) struct Builder {
     parts: Vec<RunBuilder>,
     pub project: Option<String>,
     count: u64,
+    resume: Option<PathBuf>,
 }
 impl Builder {
     pub fn new(root: &Path) -> Result<Self> {
@@ -362,6 +531,18 @@ impl Builder {
                 let mut p = RunBuilder::new(root)?;
                 p.prefix = format!("{n:x}");
                 p.shared_disk = shared.clone();
+                p.asynchronous = match std::env::var("CQ_INDEX_RUN_FLUSH").ok().as_deref() {
+                    Some("sync") => false,
+                    None | Some("async") => true,
+                    _ => {
+                        return Err(Error::new(
+                            "InvalidIndexBudget",
+                            "CQ_INDEX_RUN_FLUSH must be sync or async",
+                        ));
+                    }
+                };
+                // Coarse run tasks overlap sorting/compression/writes with
+                // continued payload admission on the coordinator.
                 Ok(p)
             })
             .collect::<Result<_>>()?;
@@ -369,55 +550,187 @@ impl Builder {
             parts,
             project: None,
             count: 0,
+            resume: None,
         })
     }
     pub fn push(&mut self, directory: &str, key: &str, value: Value) -> Result<()> {
         self.push_many(vec![(directory.into(), key.into(), value)])
     }
     pub fn push_many(&mut self, rows: Vec<(String, String, Value)>) -> Result<()> {
-        let rows = cq_core::compute::map(rows, |(directory, key, value)| {
-            let row = Row {
-                directory: tree::order(&directory),
-                key: tree::order(&key),
-                value,
-            };
-            let bytes = serde_json::to_vec(&row)?.len();
-            Ok((row, bytes))
+        let rows = cq_core::compute::map_records(rows, |(directory, key, value)| {
+            prepare_memberships(vec![directory], key, value)
         })?;
-        for (row, size) in rows {
-            let index = (row.key.as_bytes()[0] as char).to_digit(16).unwrap() as usize;
-            let p = &mut self.parts[index];
-            if !p.rows.is_empty() && p.bytes + size > p.run_bytes {
-                p.flush()?;
-            }
-            p.bytes += size;
-            p.rows.push(row);
-            p.count += 1;
-            self.count += 1;
+        self.push_prepared(rows)
+    }
+    pub fn push_prepared(&mut self, rows: Vec<PreparedRows>) -> Result<()> {
+        let mut partitions: Vec<Vec<(Row, usize)>> =
+            (0..self.parts.len()).map(|_| Vec::new()).collect();
+        let mut count = 0;
+        for (row, size) in rows.into_iter().flat_map(|r| r.0) {
+            let partition: &str = if key_partitioned(row.directory.get(65..).unwrap_or("")) {
+                &row.key
+            } else {
+                &row.directory
+            };
+            let index = (partition.as_bytes()[0] as char).to_digit(16).unwrap() as usize;
+            partitions[index].push((row, size));
+            count += 1;
         }
+        // Independent bucket writers sort/compress/flush on the shared pool.
+        // Rows within each partition keep their original order. This joins all
+        // writes before releasing their temporary directories, including errors.
+        let append = |(p, rows): (&mut RunBuilder, Vec<(Row, usize)>)| {
+            for (row, size) in rows {
+                if !p.rows.is_empty() && p.bytes + size > p.run_bytes {
+                    p.flush()?;
+                }
+                p.bytes += size;
+                p.rows.push(row);
+                p.count += 1;
+            }
+            Ok(())
+        };
+        let parts = self
+            .parts
+            .iter_mut()
+            .zip(partitions)
+            .filter(|(_, rows)| !rows.is_empty())
+            .collect::<Vec<_>>();
+        // The optional queued-flush benchmark admits jobs at the coordinator;
+        // it must not perform admission inside a pool worker.
+        if parts.iter().any(|(p, _)| p.asynchronous) {
+            for part in parts {
+                append(part)?;
+            }
+        } else {
+            cq_core::compute::map(parts, append)?;
+        }
+        self.count += count;
         Ok(())
     }
-    pub fn build(mut self, o: &Objects) -> Result<tree::Root> {
+    pub(crate) fn cancel_with(&mut self, control: cq_core::control::CaptureControl) {
+        for part in &mut self.parts {
+            part.control = Some(control.clone());
+        }
+    }
+    pub(crate) fn resume_in(&mut self, path: PathBuf) -> Result<()> {
+        crate::atomic::create_directory(&path)?;
+        self.resume = Some(path);
+        Ok(())
+    }
+    pub fn build(self, o: &Objects) -> Result<tree::Root> {
+        self.build_profiled(o).map(|(root, _)| root)
+    }
+    pub fn build_pair(
+        mut facts: Self,
+        mut groups: Self,
+        o: &Objects,
+    ) -> Result<(tree::Root, tree::Root)> {
+        let project = facts.project.as_ref().or(groups.project.as_ref()).cloned();
+        let progress = super::limits::root(&o.root)
+            .zip(project.as_ref())
+            .map(|(root, project)| {
+                Mutex::new((
+                    0,
+                    cq_core::progress::Progress::stage_with_workers(
+                        root,
+                        project,
+                        "encode.directories",
+                        "并行构建事实与查询目录",
+                        Some(2),
+                        "索引",
+                        cq_core::compute::workers().unwrap_or(1),
+                    ),
+                ))
+            });
+        if let Some(project) = project {
+            facts.project = Some(format!("{project}:fact-directory"));
+            groups.project = Some(format!("{project}:query-directories"));
+        }
+        let build = |b: Self| {
+            let result = b.build(o);
+            if result.is_ok()
+                && let Some(p) = &progress
+            {
+                let mut p = p.lock().unwrap();
+                p.0 += 1;
+                let n = p.0;
+                p.1.count(n);
+            }
+            result
+        };
+        // Only coordinators are separate: all sorting and hashing still use
+        // the one bounded compute pool. Both builds join on every error path.
+        std::thread::scope(|scope| {
+            let fact = scope.spawn(|| build(facts));
+            let groups = build(groups);
+            let facts = fact
+                .join()
+                .map_err(|_| Error::new("WorkerFailed", "fact directory coordinator panicked"))?;
+            Ok((facts?, groups?))
+        })
+    }
+    fn build_profiled(mut self, o: &Objects) -> Result<(tree::Root, BuildStats)> {
+        // Final buffers and all queued writes are settled by the coordinator.
+        // Range workers never wait for jobs queued behind themselves.
+        if self.parts.iter().any(|p| p.asynchronous) {
+            for p in &mut self.parts {
+                p.flush()?;
+            }
+        } else {
+            self.parts = cq_core::compute::map(self.parts, |mut p| {
+                if p.control.as_ref().is_some_and(|c| c.is_cancelled()) {
+                    return Err(Error::new("Cancelled", "directory sorting paused"));
+                }
+                p.flush()?;
+                Ok(p)
+            })?;
+        }
+        let total = self.parts.iter().map(|p| p.pending.len() as u64).sum();
+        let mut pending_progress = super::limits::root(&o.root)
+            .zip(self.project.as_deref())
+            .map(|(root, project)| {
+                cq_core::progress::Progress::stage_with_workers(
+                    root,
+                    project,
+                    "encode.runs",
+                    "确认索引段写入",
+                    Some(total),
+                    "段",
+                    cq_core::compute::workers().unwrap_or(1),
+                )
+            });
+        let mut done = 0;
+        for p in &mut self.parts {
+            let n = p.pending.len() as u64;
+            p.join_pending()?;
+            done += n;
+            if let Some(progress) = &mut pending_progress {
+                progress.count(done);
+            }
+        }
         let sorting = super::limits::root(&o.root)
             .zip(self.project.as_deref())
             .map(|(root, project)| {
                 Mutex::new((
                     0u64,
-                    cq_core::progress::Progress::stage(
+                    cq_core::progress::Progress::stage_with_workers(
                         root,
                         project,
                         "sort_ranges",
                         "并行排序与归并",
                         Some(16),
                         "范围",
+                        cq_core::compute::workers().unwrap_or(1),
                     ),
                 ))
             });
         self.parts = cq_core::compute::map(self.parts, |mut p| {
             p.flush()?;
             p.compact_levels()?;
-            while p.runs.len() > FAN_IN {
-                p.merge_runs((0..FAN_IN).collect(), 64)?;
+            let fan_in = fan_in()?;
+            while p.runs.len() > fan_in {
+                p.merge_runs((0..fan_in).collect(), 64)?;
             }
             if let Some(progress) = &sorting {
                 let mut progress = progress.lock().unwrap();
@@ -430,13 +743,14 @@ impl Builder {
         let shared = super::limits::root(&o.root)
             .zip(self.project.as_deref())
             .map(|(root, project)| {
-                let mut p = cq_core::progress::Progress::stage(
+                let mut p = cq_core::progress::Progress::stage_with_workers(
                     root,
                     project,
                     "bulk_tree",
                     "并行构建索引目录",
                     Some(self.count),
                     "索引项",
+                    cq_core::compute::workers().unwrap_or(1),
                 );
                 p.detail(
                     "bulk_tree",
@@ -451,60 +765,182 @@ impl Builder {
         for p in &mut self.parts {
             p.shared_progress = shared.clone();
         }
+        let resume = self.resume.clone();
         let roots =
             cq_core::compute::map(self.parts.into_iter().enumerate().collect(), |(n, p)| {
-                Ok((n, p.build(o)?))
+                let checkpoint = resume.as_ref().map(|d| d.join(format!("part-{n}.json")));
+                if let Some(path) = checkpoint.as_ref().filter(|p| p.exists()) {
+                    let (root, count): (tree::Root, u64) =
+                        serde_json::from_reader(File::open(path)?)?;
+                    if let Some(progress) = &p.shared_progress {
+                        let mut progress = progress.lock().unwrap();
+                        progress.0 += p.count;
+                        let done = progress.0;
+                        progress.1.count(done);
+                    }
+                    return Ok((n, root, count));
+                }
+                let (root, count) = p.build_with_count(o)?;
+                if let Some(path) = checkpoint {
+                    o.sync_pending()?;
+                    crate::atomic::immutable_write(&path, &serde_json::to_vec(&(&root, count))?)?;
+                }
+                Ok((n, root, count))
             })?;
-        let mut directories = std::collections::BTreeMap::<String, Vec<(u8, Group)>>::new();
-        for (n, root) in roots {
-            tree::visit(o, &root, |key, value| {
-                directories
-                    .entry(key.into())
-                    .or_default()
-                    .push((n as u8, serde_json::from_value(value.clone())?));
-                Ok(())
-            })?;
-        }
-        let mut combined =
-            cq_core::compute::map(directories.into_iter().collect(), |(directory, parts)| {
-                let count = parts.iter().map(|(_, p)| p.count).sum::<u64>();
-                let root = if count <= 32 {
-                    let mut values = std::collections::BTreeMap::new();
-                    for (_, p) in parts {
-                        if let Some(r) = p.root {
-                            match o.decode::<tree::Node>(
-                                &r,
-                                &mut cq_core::ports::facts::ReadStats::default(),
-                            )? {
-                                tree::Node::Leaf(v) => values.extend(v),
-                                _ => {
-                                    return Err(Error::new(
-                                        "InvalidSortedIndex",
-                                        "small partition is not a leaf",
-                                    ));
+        let total = roots.iter().map(|(_, _, n)| *n).sum();
+        let mut progress = super::limits::root(&o.root)
+            .zip(self.project.as_deref())
+            .map(|(store, project)| {
+                cq_core::progress::Progress::stage_with_workers(
+                    store,
+                    project,
+                    "bulk_merge",
+                    "合并分片目录",
+                    Some(total),
+                    "分片目录",
+                    cq_core::compute::workers().unwrap_or(1),
+                )
+            });
+        let mut merged =
+            DirectoryMerge::new(o, roots.into_iter().map(|(n, r, _)| (n, r)).collect())?;
+        let mut pending = VecDeque::new();
+        let mut stats = BuildStats::default();
+        let mut failed = false;
+        let rows = std::iter::from_fn(|| {
+            if failed {
+                return None;
+            }
+            if pending.is_empty() {
+                let wave = merged
+                    .by_ref()
+                    .take(MERGE_DIRECTORIES)
+                    .collect::<Result<Vec<_>>>();
+                let combined = wave.and_then(|wave| {
+                    stats.maximum_buffered_directories =
+                        stats.maximum_buffered_directories.max(wave.len());
+                    stats.directories += wave.len() as u64;
+                    cq_core::compute::map(wave, |(directory, parts)| {
+                        if !key_partitioned(directory.get(65..).unwrap_or("")) {
+                            if parts.len() != 1 {
+                                return Err(Error::new(
+                                    "InvalidSortedIndex",
+                                    "whole directory spans multiple ranges",
+                                ));
+                            }
+                            let (_, group) = parts.into_iter().next().unwrap();
+                            return Ok((directory, serde_json::to_value(group)?));
+                        }
+                        let count = parts.iter().map(|(_, p)| p.count).sum::<u64>();
+                        let root = if count <= 32 {
+                            let mut values = std::collections::BTreeMap::new();
+                            for (_, part) in parts {
+                                if let Some(r) = part.root {
+                                    match o.decode::<tree::Node>(
+                                        &r,
+                                        &mut cq_core::ports::facts::ReadStats::default(),
+                                    )? {
+                                        tree::Node::Leaf(v) => values.extend(v),
+                                        _ => {
+                                            return Err(Error::new(
+                                                "InvalidSortedIndex",
+                                                "small partition is not a leaf",
+                                            ));
+                                        }
+                                    }
                                 }
                             }
-                        }
+                            if count == 0 {
+                                None
+                            } else {
+                                Some(o.json(&tree::Node::Leaf(values))?)
+                            }
+                        } else {
+                            let children = parts
+                                .into_iter()
+                                .filter_map(|(n, p)| p.root.map(|r| (n, r)))
+                                .collect();
+                            Some(o.json(&tree::Node::Branch(children))?)
+                        };
+                        Ok((directory, serde_json::to_value(Group { root, count })?))
+                    })
+                });
+                match combined {
+                    Ok(rows) => pending.extend(rows),
+                    Err(e) => {
+                        failed = true;
+                        return Some(Err(e));
                     }
-                    if count == 0 {
-                        None
-                    } else {
-                        Some(o.json(&tree::Node::Leaf(values))?)
-                    }
-                } else {
-                    let children = parts
-                        .into_iter()
-                        .filter_map(|(n, p)| p.root.map(|r| (n, r)))
-                        .collect();
-                    Some(o.json(&tree::Node::Branch(children))?)
-                };
-                Ok((
-                    tree::order(&directory),
-                    serde_json::to_value(Group { root, count })?,
-                ))
-            })?;
-        cq_core::compute::sort_by(&mut combined, |a, b| a.0.cmp(&b.0))?;
-        Ok(tree::build_sorted(o, combined.into_iter().map(Ok))?.0)
+                }
+                stats.directory_inputs = merged.consumed;
+                if let Some(progress) = &mut progress {
+                    progress.count(merged.consumed);
+                }
+            }
+            pending.pop_front().map(Ok)
+        });
+        let root = tree::build_sorted(o, rows)?.0;
+        Ok((root, stats))
+    }
+}
+struct DirectoryMerge<'a> {
+    cursors: Vec<tree::Ordered<'a>>,
+    parts: Vec<u8>,
+    heads: Vec<Option<Value>>,
+    heap: BinaryHeap<Reverse<(String, usize)>>,
+    consumed: u64,
+    failed: bool,
+}
+impl<'a> DirectoryMerge<'a> {
+    fn new(o: &'a Objects, roots: Vec<(usize, tree::Root)>) -> Result<Self> {
+        let mut m = Self {
+            cursors: vec![],
+            parts: vec![],
+            heads: vec![],
+            heap: BinaryHeap::new(),
+            consumed: 0,
+            failed: false,
+        };
+        for (part, root) in roots {
+            m.cursors.push(tree::Ordered::new(o, &root));
+            m.parts.push(part as u8);
+            m.heads.push(None);
+        }
+        for i in 0..m.cursors.len() {
+            m.advance(i)?;
+        }
+        Ok(m)
+    }
+    fn advance(&mut self, i: usize) -> Result<()> {
+        if let Some(row) = self.cursors[i].next() {
+            let (key, value) = row?;
+            self.heap.push(Reverse((key, i)));
+            self.heads[i] = Some(value);
+        }
+        Ok(())
+    }
+}
+impl Iterator for DirectoryMerge<'_> {
+    type Item = Result<(String, Vec<(u8, Group)>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        let name = self.heap.peek()?.0.0.clone();
+        let result = (|| {
+            let mut parts = Vec::new();
+            while self.heap.peek().is_some_and(|p| p.0.0 == name) {
+                let Reverse((_, i)) = self.heap.pop().unwrap();
+                let group = serde_json::from_value(self.heads[i].take().unwrap())?;
+                parts.push((self.parts[i], group));
+                self.consumed += 1;
+                self.advance(i)?;
+            }
+            Ok((name, parts))
+        })();
+        if result.is_err() {
+            self.failed = true;
+        }
+        Some(result)
     }
 }
 struct Merge {
@@ -512,18 +948,27 @@ struct Merge {
     rows: Vec<Option<Row>>,
     heap: BinaryHeap<Reverse<(String, String, usize)>>,
     failed: bool,
+    // Release the reservation after readers have closed, including open and
+    // decode errors and early iterator drop.
+    _descriptors: descriptor_budget::Lease<'static>,
 }
 impl Merge {
     fn open(paths: &[PathBuf]) -> Result<Self> {
+        let descriptors = descriptor_budget::acquire(paths.len() + 1)?;
         let readers = paths
             .iter()
-            .map(|p| File::open(p).map(|f| BufReader::new(lz4_flex::frame::FrameDecoder::new(f))))
-            .collect::<std::io::Result<Vec<_>>>()?;
+            .map(|p| {
+                File::open(p)
+                    .map(|f| BufReader::new(lz4_flex::frame::FrameDecoder::new(f)))
+                    .map_err(|e| descriptor_budget::io(e, "open merge input", p))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut s = Self {
             rows: (0..readers.len()).map(|_| None).collect(),
             readers,
             heap: BinaryHeap::new(),
             failed: false,
+            _descriptors: descriptors,
         };
         for i in 0..s.readers.len() {
             s.advance(i)?;
@@ -538,11 +983,11 @@ impl Merge {
         let (directory, key, value): (String, String, Value) = serde_json::from_str(&line)?;
         let row = Row {
             directory: tree::order(&directory),
-            key: tree::order(&key),
-            value,
+            key: Arc::from(tree::order(&key)),
+            value: Arc::new(value),
         };
         self.heap
-            .push(Reverse((row.directory.clone(), row.key.clone(), i)));
+            .push(Reverse((row.directory.clone(), row.key.to_string(), i)));
         self.rows[i] = Some(row);
         Ok(())
     }
@@ -567,6 +1012,195 @@ impl Iterator for Merge {
 mod tests {
     use super::*;
     #[test]
+    fn parallel_merges_respect_os_descriptor_headroom() {
+        const TEST: &str = "facts::bulk::tests::parallel_merges_respect_os_descriptor_headroom";
+        if std::env::var_os("CQ_TEST_MERGE_FD_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([TEST, "--exact", "--nocapture"])
+                .env("CQ_TEST_MERGE_FD_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated descriptor regression:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // The test process alone changes its limit; parallel parent tests and
+        // the user's shell retain their original configuration.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit.rlim_cur = limit.rlim_cur.min(1024);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let held = (0..256)
+            .map(|_| File::open("/dev/null").unwrap())
+            .collect::<Vec<_>>();
+        let temp = tempfile::tempdir().unwrap();
+        let disk = Arc::new(SharedDisk {
+            used: AtomicU64::new(0),
+            limit: 1024 * 1024,
+        });
+        let mut paths = Vec::new();
+        for n in 0..32 {
+            let path = temp.path().join(format!("{n}.lz4"));
+            let mut writer = RunWriter::new(&path, 1024 * 1024, disk.clone()).unwrap();
+            writer
+                .push(&Row {
+                    directory: tree::order("facts"),
+                    key: Arc::from(tree::order(&format!("k{n}"))),
+                    value: Arc::new(serde_json::json!(n)),
+                })
+                .unwrap();
+            writer.finish().unwrap();
+            paths.push(path);
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(33));
+        let result = std::thread::scope(|scope| {
+            let handles = (0..32)
+                .map(|_| {
+                    let barrier = &barrier;
+                    let paths = &paths;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let merged = Merge::open(paths)?;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        let rows = merged.collect::<Result<Vec<_>>>()?;
+                        assert_eq!(rows.len(), 32);
+                        Ok::<_, Error>(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let mut peak = 0;
+            while handles.iter().any(|h| !h.is_finished()) {
+                if let Ok(files) = std::fs::read_dir("/proc/self/fd") {
+                    peak = peak.max(files.count());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let results = handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Result<Vec<_>>>();
+            eprintln!(
+                "descriptor stress: soft_limit={}, concurrent_merges=32, inputs_per_merge=32, unrelated_handles={}, peak_observed={peak}",
+                limit.rlim_cur,
+                held.len()
+            );
+            results
+        });
+        result.unwrap();
+        assert_eq!(descriptor_budget::diagnostics()["merge_reserved"], 0);
+        assert!(Merge::open(&[temp.path().join("missing")]).is_err());
+        assert_eq!(descriptor_budget::diagnostics()["merge_reserved"], 0);
+        let corrupt = temp.path().join("corrupt.lz4");
+        std::fs::write(&corrupt, b"not a valid compressed run").unwrap();
+        assert!(Merge::open(&[corrupt]).is_err());
+        assert_eq!(descriptor_budget::diagnostics()["merge_reserved"], 0);
+        let merged = Merge::open(&paths).unwrap();
+        assert_eq!(descriptor_budget::diagnostics()["merge_reserved"], 33);
+        drop(merged);
+        assert_eq!(descriptor_budget::diagnostics()["merge_reserved"], 0);
+    }
+    #[test]
+    fn abandoned_run_builder_joins_writes_before_removing_its_directory() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let mut builder = RunBuilder::new(temp.path()).unwrap();
+        let directory = builder.dir.path().to_path_buf();
+        let output = directory.join("held-run");
+        let worker_path = output.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropping_tx, dropping_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let job = cq_core::compute::submit(1024, move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            std::fs::write(worker_path, b"completed before cleanup")?;
+            Ok(24)
+        })
+        .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        builder.pending.push_back((output, job));
+        let thread = std::thread::spawn(move || {
+            dropping_tx.send(()).unwrap();
+            drop(builder);
+            dropped_tx.send(()).unwrap();
+        });
+        dropping_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(directory.exists());
+        assert!(matches!(
+            dropped_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        thread.join().unwrap();
+        assert!(!directory.exists());
+    }
+    #[test]
+    fn shared_membership_rows_preserve_exact_json_size_and_values() {
+        let value = serde_json::json!({"quoted":"a\"b","unicode":"路径","nested":[1,true,null]});
+        let rows = prepare_memberships(
+            vec!["all:entity".into(), "document_gram:\"\n路径".into()],
+            "entity:标识\"".into(),
+            value.clone(),
+        )
+        .unwrap();
+        assert_eq!(rows.0.len(), 2);
+        assert!(Arc::ptr_eq(&rows.0[0].0.value, &rows.0[1].0.value));
+        assert!(Arc::ptr_eq(&rows.0[0].0.key, &rows.0[1].0.key));
+        for (row, bytes) in rows.0 {
+            assert_eq!(serde_json::to_vec(&row).unwrap().len(), bytes);
+            assert_eq!(*row.value, value);
+        }
+    }
+    #[test]
+    fn performance_many_directories_stream_in_bounded_waves_with_the_exact_same_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Objects::buffered(temp.path().join("objects")).unwrap();
+        let mut parallel = Builder::new(&o.root).unwrap();
+        assert!(parallel.parts.iter().all(|part| part.asynchronous));
+        let mut serial = RunBuilder::new(&o.root).unwrap();
+        for i in 0..4097 {
+            let key = format!("entity:{i}");
+            for name in [format!("unique:{i}"), "fanout".to_owned()] {
+                let value = serde_json::json!({"row":i});
+                serial.push(&name, &key, value.clone()).unwrap();
+                parallel.push(&name, &key, value).unwrap();
+            }
+        }
+        let expected = serial.build(&o).unwrap();
+        let (actual, stats) = parallel.build_profiled(&o).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stats.directories, 4098);
+        assert!(stats.maximum_buffered_directories <= MERGE_DIRECTORIES);
+        assert_eq!(
+            stats.directory_inputs, 4098,
+            "ordinary directories must not be split into temporary per-key trees"
+        );
+        o.sync_pending().unwrap();
+        let reopened = Objects::new(o.root.clone()).unwrap();
+        let mut count = 0;
+        tree::visit(&reopened, &actual, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 4098);
+    }
+    #[test]
     fn parallel_hash_partitions_preserve_serial_merkle_root_and_group_counts() {
         let temp = tempfile::tempdir().unwrap();
         let o = Objects::buffered(temp.path().join("objects")).unwrap();
@@ -582,6 +1216,10 @@ mod tests {
             ("boundary", 32),
             ("split", 33),
             ("large", 1200),
+            ("all:small", 1),
+            ("all:boundary", 32),
+            ("all:split", 33),
+            ("facts", 1200),
         ] {
             for i in (0..n).rev() {
                 let key = format!("entity:{group}-{i}");
@@ -621,6 +1259,41 @@ mod tests {
             duplicate.build(&o).unwrap_err().code(),
             "InvalidSortedIndex"
         );
+    }
+    #[test]
+    fn queued_write_failure_never_returns_a_root_and_joins_before_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let o = Objects::buffered(temp.path().join("objects")).unwrap();
+        let mut b = Builder::new(&o.root).unwrap();
+        let shared = Arc::new(SharedDisk {
+            used: AtomicU64::new(0),
+            limit: 1,
+        });
+        for p in &mut b.parts {
+            p.shared_disk = shared.clone();
+            p.asynchronous = true;
+            p.run_bytes = 128;
+        }
+        let mut failure = None;
+        for i in 0..100 {
+            if let Err(e) = b.push("g", &format!("entity:{i}"), serde_json::json!({"n":i})) {
+                failure = Some(e);
+                break;
+            }
+        }
+        let result = if let Some(e) = failure {
+            drop(b);
+            Err(e)
+        } else {
+            b.build(&o)
+        };
+        assert_eq!(result.unwrap_err().code(), "IndexBuildBudget");
+        assert!(!std::fs::read_dir(&o.root).unwrap().any(|p| {
+            p.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("initial-index-")
+        }));
     }
     use cq_core::ports::facts::ReadStats;
     use serde_json::json;
@@ -818,6 +1491,57 @@ mod tests {
         );
         o.sync_pending().unwrap();
         std::fs::write(report,serde_json::to_vec_pretty(&serde_json::json!({"input":input,"records":rows.len(),"postings":postings,"feeding_both_oracles_seconds":feeding,"serial_build_seconds":serial_seconds,"parallel_build_seconds":parallel_seconds,"workers":cq_core::compute::workers().unwrap(),"exact_root":actual,"passed":true,"scope":"real retained payload fields and actual indexed groups; synthesized page references; no semantic publication"})).unwrap()).unwrap();
+    }
+    #[test]
+    #[ignore = "CQ_RUN_SAMPLE_LIST and CQ_RUN_REPORT: real retained multi-run pipeline"]
+    fn retained_runs_validate_bounded_writer_pipeline_against_sync_oracle() {
+        let manifest = std::env::var("CQ_RUN_SAMPLE_LIST").unwrap();
+        let output = std::env::var("CQ_RUN_REPORT").unwrap();
+        let samples: Vec<Value> =
+            serde_json::from_reader(BufReader::new(File::open(&manifest).unwrap())).unwrap();
+        let paths = samples
+            .iter()
+            .map(|s| PathBuf::from(s["path"].as_str().unwrap()))
+            .collect::<Vec<_>>();
+        let mut results = Vec::new();
+        let mut root = None;
+        for asynchronous in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let o = Objects::buffered(temp.path().join("objects")).unwrap();
+            let mut b = Builder::new(&o.root).unwrap();
+            for p in &mut b.parts {
+                p.asynchronous = asynchronous;
+            }
+            let started = std::time::Instant::now();
+            let mut count = 0;
+            let mut batch = Vec::new();
+            for row in Merge::open(&paths).unwrap() {
+                let row = row.unwrap();
+                let directory = row.directory.split_once(':').unwrap().1.to_owned();
+                let key = row.key.split_once(':').unwrap().1.to_owned();
+                batch.push((directory, key, Arc::unwrap_or_clone(row.value)));
+                count += 1;
+                if batch.len() == 4096 {
+                    b.push_many(std::mem::take(&mut batch)).unwrap();
+                }
+            }
+            b.push_many(batch).unwrap();
+            let feed = started.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let (actual, merge_stats) = b.build_profiled(&o).unwrap();
+            o.sync_pending().unwrap();
+            let build = t.elapsed().as_secs_f64();
+            if asynchronous {
+                assert_eq!(
+                    actual, root,
+                    "every real membership/ref/count and immutable page must match"
+                );
+            } else {
+                root = actual.clone();
+            }
+            results.push(serde_json::json!({"asynchronous":asynchronous,"postings":count,"feed_seconds":feed,"finish_seconds":build,"total_seconds":feed+build,"root":actual,"merge":merge_stats,"objects":o.resource_stats()}));
+        }
+        std::fs::write(output,serde_json::to_vec_pretty(&serde_json::json!({"scope":"actual checksummed run files from the incomplete Brocade publication; sorted retained posting replay; separate temporary object stores; input cache may differ; compiler and graph import excluded","samples":paths.len(),"passed":true,"results":results})).unwrap()).unwrap();
     }
     #[test]
     fn scratch_limit_is_explicit_and_invalid_limits_fail_closed() {

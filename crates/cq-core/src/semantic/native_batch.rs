@@ -74,7 +74,7 @@ pub fn normalize(
     let mut peak = 0;
     let mut gap_keys = HashSet::new();
     let mut first = true;
-    let catalogue = Catalogue::new(raw);
+    let catalogue = Catalogue::new(raw)?;
     let mut source_state = FrameSources::new(s, mapping);
     let result: Result<()> = (|| {
         for file in primary {
@@ -139,6 +139,7 @@ pub(super) struct FrameSources<'a> {
     by_path: HashMap<&'a str, usize>,
     binding: InputBinding,
     gaps: Vec<Gap>,
+    build_run: Option<String>,
 }
 impl<'a> FrameSources<'a> {
     pub fn new(s: &SemanticSnapshot, mapping: &'a [MaterializedInput]) -> Self {
@@ -163,9 +164,10 @@ impl<'a> FrameSources<'a> {
                 .collect(),
             binding: s.sources.binding.clone(),
             gaps: s.sources.gaps.clone(),
+            build_run: s.builds.last().map(|b| b.id.clone()),
         }
     }
-    fn fragment(
+    pub(super) fn fragment(
         &self,
         s: &SemanticSnapshot,
         frame: &Value,
@@ -188,9 +190,9 @@ impl<'a> FrameSources<'a> {
             }
         }
         let mut fragment = SemanticSnapshot::empty(s.project.clone(), s.root.clone());
-        fragment.builds.extend(s.builds.last().cloned());
-        fragment.providers = s.providers.clone();
-        fragment.provenance_records = s.provenance_records.clone();
+        // Native normalization needs only the build ID, kept in FrameSources.
+        // Build observations/events and provider configuration stay in the
+        // project snapshot. Each frame interns only the provenance it uses.
         fragment.sources =
             SourceSnapshot::seal(local.into_values().collect(), self.binding.clone(), vec![]);
         (fragment, selected)
@@ -211,6 +213,13 @@ impl<'a> FrameSources<'a> {
         }
         Ok(())
     }
+    pub fn checkpoint(&self, s: &mut SemanticSnapshot) {
+        s.sources = SourceSnapshot::seal(
+            self.known.values().cloned().collect(),
+            self.binding.clone(),
+            self.gaps.clone(),
+        );
+    }
     pub fn finish(self, s: &mut SemanticSnapshot) {
         s.sources =
             SourceSnapshot::seal(self.known.into_values().collect(), self.binding, self.gaps);
@@ -218,7 +227,7 @@ impl<'a> FrameSources<'a> {
 }
 type Span = (u64, u64, u64);
 /// Planning retains row numbers only. JSON payloads are materialized after
-/// ordered memory admission, not while other source plans are still running.
+/// bounded memory admission, not while other source plans are still running.
 pub(super) struct FramePlan {
     rows: BTreeMap<&'static str, Vec<usize>>,
 }
@@ -234,9 +243,10 @@ pub(super) struct Catalogue<'a> {
     by_file: HashMap<&'static str, HashMap<u64, Vec<usize>>>,
     by_child: HashMap<&'static str, HashMap<u64, Vec<usize>>>,
     parameters: BTreeMap<Span, Vec<usize>>,
+    dependencies: HashMap<u64, Box<[u64]>>,
 }
 impl<'a> Catalogue<'a> {
-    pub fn new(raw: &'a Value) -> Self {
+    pub fn new(raw: &'a Value) -> Result<Self> {
         let mut c = Self {
             raw,
             tokens: HashMap::new(),
@@ -247,6 +257,7 @@ impl<'a> Catalogue<'a> {
             by_file: HashMap::new(),
             by_child: HashMap::new(),
             parameters: BTreeMap::new(),
+            dependencies: HashMap::new(),
         };
         for (i, v) in rows(raw, "symbols").iter().enumerate() {
             let t = v["token"].as_u64().unwrap();
@@ -299,7 +310,57 @@ impl<'a> Catalogue<'a> {
                 c.parameters.entry(p).or_default().push(i);
             }
         }
-        c
+        // Resolve direct structural dependencies once per export, rather than
+        // rewalking parent/parameter/type JSON for each referencing file.
+        // These are the same closure edges as the per-frame traversal; this
+        // cache contains native token IDs only, never another JSON payload.
+        c.dependencies =
+            crate::compute::map_records(c.tokens.keys().copied().collect(), |token| {
+                Ok((token, c.direct_dependencies(token)))
+            })?
+            .into_iter()
+            .filter(|(_, edges)| !edges.is_empty())
+            .collect();
+        Ok(c)
+    }
+    fn direct_dependencies(&self, token: u64) -> Box<[u64]> {
+        let mut targets = BTreeSet::new();
+        for i in self.child_indices("parents", token) {
+            let parent = &rows(self.raw, "parents")[*i];
+            if let Some(t) = parent["parent_token"].as_u64() {
+                targets.insert(t);
+            } else if let Some(key) = parent["key"].as_str() {
+                targets.extend(self.keys.get(key).into_iter().flatten().copied());
+            }
+        }
+        for i in self.child_indices("nominal_members", token) {
+            if let Some(t) = rows(self.raw, "nominal_members")[*i]["owner"].as_u64() {
+                targets.insert(t);
+            }
+        }
+        if let Some(symbol) = self
+            .tokens
+            .get(&token)
+            .map(|i| &rows(self.raw, "symbols")[*i])
+        {
+            if let Some(p) = span(&symbol["definition"]) {
+                for i in self.parameters.get(&p).into_iter().flatten() {
+                    for slot in rows(&rows(self.raw, "parameters")[*i], "slots") {
+                        for binding in rows(slot, "bindings") {
+                            if let Some(p) = span(binding) {
+                                targets.extend(self.spans.get(&p).into_iter().flatten().copied());
+                            }
+                        }
+                    }
+                }
+            }
+            for nav in rows(symbol, "type_definitions") {
+                if let Some(p) = span(&nav["source"]) {
+                    targets.extend(self.spans.get(&p).into_iter().flatten().copied());
+                }
+            }
+        }
+        targets.into_iter().collect::<Vec<_>>().into_boxed_slice()
     }
     fn file_indices(&self, name: &str, file: Option<u64>) -> &[usize] {
         file.and_then(|f| self.by_file.get(name)?.get(&f))
@@ -403,38 +464,13 @@ impl<'a> Catalogue<'a> {
             }
         }
         while let Some(t) = pending.pop_front() {
-            for i in self.child_indices("parents", t) {
-                let p = &rows(raw, "parents")[*i];
-                if let Some(parent) = p["parent_token"].as_u64() {
-                    add(parent, &mut selected, &mut pending);
-                } else if let Some(k) = p["key"].as_str() {
-                    for parent in self.keys.get(k).into_iter().flatten() {
-                        add(*parent, &mut selected, &mut pending);
-                    }
-                }
-            }
-            for i in self.child_indices("nominal_members", t) {
-                if let Some(owner) = rows(raw, "nominal_members")[*i]["owner"].as_u64() {
-                    add(owner, &mut selected, &mut pending);
-                }
-            }
-            if let Some(symbol) = self.tokens.get(&t).map(|i| &rows(raw, "symbols")[*i]) {
-                if let Some(p) = span(&symbol["definition"]) {
-                    for i in self.parameters.get(&p).into_iter().flatten() {
-                        for slot in rows(&rows(raw, "parameters")[*i], "slots") {
-                            for b in rows(slot, "bindings") {
-                                if let Some(p) = span(b) {
-                                    add_span(p, &mut selected, &mut pending);
-                                }
-                            }
-                        }
-                    }
-                }
-                for nav in rows(symbol, "type_definitions") {
-                    if let Some(p) = span(&nav["source"]) {
-                        add_span(p, &mut selected, &mut pending);
-                    }
-                }
+            for target in self
+                .dependencies
+                .get(&t)
+                .into_iter()
+                .flat_map(|edges| edges.iter())
+            {
+                add(*target, &mut selected, &mut pending);
             }
         }
         let sorted = |indices: Vec<usize>| {
@@ -569,6 +605,42 @@ pub(super) struct FrameOutput {
     pub fragment: SemanticSnapshot,
     pub peak: usize,
 }
+/// Only fields consumed by ordered metadata merge. Build observations and
+/// provider configuration already belong to the project snapshot; copying them
+/// into every queued file result would repeat project-wide evidence on disk.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct FrameMetadata {
+    pub sources: Vec<FileRevision>,
+    pub provenance_records: BTreeMap<ProvenanceId, Provenance>,
+    pub coverage: Vec<CapabilityCoverage>,
+    pub gaps: Vec<Gap>,
+    pub peak: usize,
+}
+impl FrameOutput {
+    fn take_metadata(&mut self) -> FrameMetadata {
+        FrameMetadata {
+            sources: std::mem::take(&mut self.fragment.sources.files),
+            provenance_records: std::mem::take(&mut self.fragment.provenance_records),
+            coverage: std::mem::take(&mut self.fragment.coverage),
+            gaps: std::mem::take(&mut self.fragment.gaps),
+            peak: self.peak,
+        }
+    }
+    pub fn into_metadata(mut self) -> Result<FrameMetadata> {
+        if !self.fragment.entities.is_empty()
+            || !self.fragment.bodies.is_empty()
+            || !self.fragment.occurrences.is_empty()
+            || !self.fragment.relations.is_empty()
+            || !self.fragment.documents.is_empty()
+        {
+            return Err(Error::new(
+                "NonStreamingInput",
+                "metadata staging requires drained facts",
+            ));
+        }
+        Ok(self.take_metadata())
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_frame(
     s: &SemanticSnapshot,
@@ -583,14 +655,17 @@ pub(super) fn prepare_frame(
 ) -> Result<FrameOutput> {
     let raw = frame;
     let (mut fragment, selected_mapping) = source_state.fragment(s, frame);
-    super::normalize::native_graph(
+    super::normalize::native_graph_in_context(
         &mut fragment,
         frame,
         &selected_mapping,
         content,
-        provider,
-        language,
-        version,
+        super::normalize::NativeContext {
+            provider,
+            language,
+            version,
+            build_run: source_state.build_run.as_deref(),
+        },
     )?;
     let peak = fragment.entities.len()
         + fragment.bodies.len()
@@ -724,25 +799,39 @@ pub(super) fn prepare_frame(
 }
 pub(super) fn merge_frame(
     s: &mut SemanticSnapshot,
-    output: FrameOutput,
+    mut output: FrameOutput,
     sink: &dyn Store,
     first: &mut bool,
     gap_keys: &mut HashSet<String>,
     source_state: &mut FrameSources,
 ) -> Result<()> {
-    let mut fragment = output.fragment;
-    source_state.merge(&fragment.sources.files)?;
+    // The sink must see the local provenance and source header while facts
+    // are being drained. Only then transfer those fields to the coordinator,
+    // exactly as workers do before spooling a parallel result.
+    records::drain(&mut output.fragment, sink)?;
+    merge_metadata(s, output.take_metadata(), first, gap_keys, source_state)
+}
+pub(super) fn merge_metadata(
+    s: &mut SemanticSnapshot,
+    mut metadata: FrameMetadata,
+    first: &mut bool,
+    gap_keys: &mut HashSet<String>,
+    source_state: &mut FrameSources,
+) -> Result<()> {
+    source_state.merge(&metadata.sources)?;
     s.provenance_records
-        .extend(fragment.provenance_records.clone());
+        .append(&mut metadata.provenance_records);
     if *first {
-        s.coverage.append(&mut fragment.coverage);
+        s.coverage.append(&mut metadata.coverage);
         *first = false;
     }
-    for g in fragment.gaps.drain(..) {
+    for g in metadata.gaps {
         if gap_keys.insert(serde_json::to_string(&g)?) {
             s.gaps.push(g);
         }
     }
-    records::drain(&mut fragment, sink)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -101,8 +101,41 @@ pub fn native_graph(
     language: Language,
     version: &str,
 ) -> Result<()> {
+    let build_run = snapshot.builds.last().map(|b| b.id.clone());
+    native_graph_in_context(
+        snapshot,
+        raw,
+        mapping,
+        content,
+        NativeContext {
+            provider,
+            language,
+            version,
+            build_run: build_run.as_deref(),
+        },
+    )
+}
+pub(super) struct NativeContext<'a> {
+    pub provider: &'a str,
+    pub language: Language,
+    pub version: &'a str,
+    pub build_run: Option<&'a str>,
+}
+pub(super) fn native_graph_in_context(
+    snapshot: &mut SemanticSnapshot,
+    raw: &Value,
+    mapping: &[MaterializedInput],
+    content: &dyn ContentRepository,
+    context: NativeContext<'_>,
+) -> Result<()> {
+    let NativeContext {
+        provider,
+        language,
+        version,
+        build_run,
+    } = context;
     super::provider_contract::validate(raw)?;
-    let prov=Provenance{provider:provider.into(),version:version.into(),authority:Authority::SemanticResolution,build_run:snapshot.builds.last().map(|b|b.id.clone()),note:"native semantic resolution in captured compilation contexts; executable dynamic targets may remain unknown".into()};
+    let prov=Provenance{provider:provider.into(),version:version.into(),authority:Authority::SemanticResolution,build_run:build_run.map(str::to_owned),note:"native semantic resolution in captured compilation contexts; executable dynamic targets may remain unknown".into()};
     let prov_id = snapshot.intern_provenance(prov.clone());
     let syntax_id = snapshot.intern_provenance(Provenance {
         authority: Authority::RuleDerived,

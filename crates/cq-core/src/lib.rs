@@ -3,6 +3,7 @@ pub mod analyst;
 pub mod compute;
 pub mod control;
 pub mod error;
+pub mod execution;
 pub mod input;
 pub mod model;
 pub mod ports;

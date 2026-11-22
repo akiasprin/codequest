@@ -15,6 +15,8 @@ use std::{
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     #[serde(default)]
+    text: Option<text::TextPlan>,
+    #[serde(default)]
     ranking_after: Option<(f64, String)>,
     #[serde(default)]
     rank_more: bool,
@@ -40,6 +42,8 @@ struct State {
     visited: BTreeSet<String>,
     scheduled: BTreeSet<String>,
     target: Option<String>,
+    #[serde(default)]
+    subject_id: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct CodeScan {
@@ -59,6 +63,8 @@ struct Step {
     after: Option<String>,
     direction: usize,
 }
+mod text;
+
 const RANK_WINDOW: usize = 1000;
 fn rank_order(a: &Value, b: &Value) -> std::cmp::Ordering {
     b["score"]
@@ -153,10 +159,385 @@ impl<'a> Engine<'a> {
             .transpose()
             .map_err(Into::into)
     }
+    fn is_nested_body(e: &Entity) -> bool {
+        e.kind == EntityKind::Body && !matches!(e.name.as_str(), "Function" | "AsyncFunction")
+    }
+    fn root_prefix(&self) -> Option<String> {
+        let root = self.reader.metadata()["root"]["display"]
+            .as_str()
+            .or_else(|| self.reader.metadata()["root"].as_str())?;
+        if root.is_empty() {
+            None
+        } else {
+            Some(format!("{}/", root.trim_end_matches('/')))
+        }
+    }
+    fn display_path(&self, file: &FileRevision, compact: bool) -> String {
+        let p = file.logical_path.display();
+        if compact
+            && let Some(prefix) = self.root_prefix()
+            && let Some(stripped) = p.strip_prefix(&prefix)
+        {
+            return stripped.to_owned();
+        }
+        p
+    }
+    fn anchor_location(
+        &self,
+        anchor: &SourceAnchor,
+        compact: bool,
+    ) -> Result<Option<AnchorLocation>> {
+        let Some(f) = self.file(&anchor.file_revision)? else {
+            return Ok(None);
+        };
+        let path = self.display_path(&f, compact);
+        let pos = if anchor.start <= 8 * 1024 * 1024 && anchor.start <= f.blob.len {
+            let read_end = anchor.start.saturating_add(512).min(f.blob.len);
+            self.reader
+                .source_range(&f.id, 0, read_end)
+                .ok()
+                .map(|bytes| {
+                    let offset = (anchor.start as usize).min(bytes.len());
+                    let prefix = &bytes[..offset];
+                    let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
+                    let line_start = prefix
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    let line_end = bytes[offset..]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map(|i| offset + i)
+                        .unwrap_or(bytes.len());
+                    let col = offset.saturating_sub(line_start) + 1;
+                    let snippet: String = String::from_utf8_lossy(&bytes[line_start..line_end])
+                        .trim()
+                        .chars()
+                        .take(160)
+                        .collect();
+                    (line, col, snippet)
+                })
+        } else {
+            None
+        };
+        Ok(Some((path, pos)))
+    }
+    fn enclosing_owner(&self, id: &str) -> Result<Option<(Entity, Option<String>)>> {
+        let Some(e) = self.entity(id)? else {
+            return Ok(None);
+        };
+        if e.kind == EntityKind::Body {
+            let body_kind =
+                (!matches!(e.name.as_str(), "Function" | "AsyncFunction")).then(|| e.name.clone());
+            if let Some(parent_id) = e.parent.as_deref()
+                && let Some(owner) = self.entity(parent_id)?
+            {
+                return Ok(Some((owner, body_kind)));
+            }
+            return Ok(Some((e, body_kind)));
+        }
+        Ok(Some((e, None)))
+    }
+    fn entity_label(&self, id: &str) -> Result<String> {
+        if let Some(e) = self.entity(id)? {
+            if e.kind == EntityKind::Body
+                && let Some((owner, _)) = self.enclosing_owner(id)?
+                && owner.id != e.id
+            {
+                let owner_name = if owner.qualified_name.is_empty() {
+                    &owner.name
+                } else {
+                    &owner.qualified_name
+                };
+                return Ok(format!("{}({})", e.name, owner_name));
+            }
+            return Ok(if e.qualified_name.is_empty() {
+                e.name
+            } else {
+                e.qualified_name
+            });
+        }
+        Ok(id.to_owned())
+    }
+    fn body_has_matching_call(
+        &self,
+        body_id: &str,
+        q: &QueryRequest,
+        ctx: Option<&AnalysisContext>,
+    ) -> Result<bool> {
+        let mut after = None;
+        let mut checked = 0usize;
+        while checked < 1024 {
+            let batch = self
+                .reader
+                .scan(&group("out", body_id), after.as_deref(), 64)?;
+            for row in batch.rows {
+                checked += 1;
+                let r: Relation = serde_json::from_value(row.value)?;
+                if !self.allowed(&r.provenance, q)? {
+                    continue;
+                }
+                if (r.kind == RelationKind::Calls
+                    || (q.include_candidates
+                        && matches!(r.kind, RelationKind::MayCall | RelationKind::Dispatches)))
+                    && let Some(target) = self.entity(&r.to)?
+                    && self.selected(&target, q, ctx)?
+                {
+                    return Ok(true);
+                }
+            }
+            if batch.complete {
+                break;
+            }
+            after = batch.after;
+        }
+        Ok(false)
+    }
     fn summary(&self, e: &Entity) -> Result<Value> {
-        Ok(
-            json!({"id":e.id,"unit":e.unit,"kind":e.kind,"name":e.name,"qualified_name":e.qualified_name,"file":e.source.as_ref().map(|a|self.file(&a.file_revision)).transpose()?.flatten().map(|f|f.logical_path.display()),"source":e.source,"locations":e.locations,"stable_handle":crate::semantic::identity::query_handle(e),"signature":e.signature.chars().take(512).collect::<String>(),"declaring_scope":e.parent,"external":e.external,"exported":e.exported,"provenance":e.provenance}),
-        )
+        self.summary_for(e, false)
+    }
+    fn summary_for(&self, e: &Entity, compact: bool) -> Result<Value> {
+        let owner_info = if e.kind == EntityKind::Body {
+            e.parent
+                .as_deref()
+                .map(|p| self.entity(p))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        if compact {
+            let loc = e
+                .source
+                .as_ref()
+                .map(|a| self.anchor_location(a, true))
+                .transpose()?
+                .flatten();
+            let mut map = serde_json::Map::new();
+            map.insert("id".into(), json!(e.id));
+            map.insert("kind".into(), json!(e.kind));
+            map.insert("name".into(), json!(e.name));
+            if !e.qualified_name.is_empty() && e.qualified_name != e.name {
+                map.insert("qualified_name".into(), json!(e.qualified_name));
+            }
+            if let Some((path, pos)) = loc {
+                map.insert("file".into(), json!(path));
+                if let Some((line, _, _)) = pos {
+                    map.insert("line".into(), json!(line));
+                }
+            }
+            let sig: String = e.signature.trim().chars().take(200).collect();
+            if !sig.is_empty() {
+                map.insert("signature".into(), json!(sig));
+            }
+            if e.exported {
+                map.insert("exported".into(), json!(true));
+            }
+            if e.external {
+                map.insert("external".into(), json!(true));
+            }
+            if !e.locations.is_empty() {
+                map.insert("locations".into(), json!(e.locations));
+            }
+            if let Some(owner) = owner_info {
+                map.insert("owner_id".into(), json!(owner.id));
+                map.insert(
+                    "owner_name".into(),
+                    json!(if owner.qualified_name.is_empty() {
+                        &owner.name
+                    } else {
+                        &owner.qualified_name
+                    }),
+                );
+                map.insert("owner_kind".into(), json!(owner.kind));
+            }
+            return Ok(Value::Object(map));
+        }
+        let mut value = json!({"id":e.id,"unit":e.unit,"kind":e.kind,"name":e.name,"qualified_name":e.qualified_name,"file":e.source.as_ref().map(|a|self.file(&a.file_revision)).transpose()?.flatten().map(|f|f.logical_path.display()),"source":e.source,"locations":e.locations,"stable_handle":crate::semantic::identity::query_handle(e),"signature":e.signature.chars().take(512).collect::<String>(),"declaring_scope":e.parent,"external":e.external,"exported":e.exported,"provenance":e.provenance});
+        if let Some(owner) = owner_info {
+            value["owner_id"] = json!(owner.id);
+            value["owner_name"] = json!(if owner.qualified_name.is_empty() {
+                &owner.name
+            } else {
+                &owner.qualified_name
+            });
+            value["owner_kind"] = json!(owner.kind);
+        }
+        Ok(value)
+    }
+    fn format_occurrence(&self, o: &Occurrence, subject_id: &str, compact: bool) -> Result<Value> {
+        let loc = self.anchor_location(&o.source, compact)?;
+        let owner_resolved = o
+            .owner
+            .as_deref()
+            .map(|id| self.enclosing_owner(id))
+            .transpose()?
+            .flatten();
+        let owner_name = owner_resolved.as_ref().map(|(e, _)| {
+            if e.qualified_name.is_empty() {
+                e.name.as_str()
+            } else {
+                e.qualified_name.as_str()
+            }
+        });
+        let owner_id = owner_resolved.as_ref().map(|(e, _)| e.id.as_str());
+        let owner_kind = owner_resolved.as_ref().map(|(e, _)| e.kind);
+        let body_kind = owner_resolved.as_ref().and_then(|(_, bk)| bk.as_deref());
+        if compact {
+            let mut map = serde_json::Map::new();
+            map.insert("kind".into(), json!(o.kind));
+            if let Some((path, pos)) = loc {
+                map.insert("file".into(), json!(path));
+                if let Some((line, col, snippet)) = pos {
+                    map.insert("line".into(), json!(line));
+                    map.insert("column".into(), json!(col));
+                    if !snippet.is_empty() {
+                        map.insert("snippet".into(), json!(snippet));
+                    }
+                }
+            }
+            if let Some(name) = owner_name {
+                map.insert("owner".into(), json!(name));
+            }
+            if let Some(id) = owner_id {
+                map.insert("owner_id".into(), json!(id));
+            }
+            if let Some(k) = owner_kind {
+                map.insert("owner_kind".into(), json!(k));
+            }
+            if let Some(bk) = body_kind {
+                map.insert("body_kind".into(), json!(bk));
+            }
+            if o.evaluation != Evaluation::Immediate {
+                map.insert("evaluation".into(), json!(o.evaluation));
+            }
+            if o.dispatch != Dispatch::Direct {
+                map.insert("dispatch".into(), json!(o.dispatch));
+            }
+            if o.declaration.resolved() != Some(subject_id) {
+                if let Some(target_id) = o.declaration.resolved() {
+                    map.insert("target_id".into(), json!(target_id));
+                    map.insert("target".into(), json!(self.entity_label(target_id)?));
+                } else {
+                    map.insert("declaration".into(), json!(o.declaration));
+                }
+            }
+            if !o.locations.is_empty() {
+                map.insert("locations".into(), json!(o.locations));
+            }
+            return Ok(Value::Object(map));
+        }
+        let mut value = json!(o);
+        if let Some((path, pos)) = loc {
+            value["file"] = json!(path);
+            if let Some((line, col, snippet)) = pos {
+                value["line"] = json!(line);
+                value["column"] = json!(col);
+                if !snippet.is_empty() {
+                    value["snippet"] = json!(snippet);
+                }
+            }
+        }
+        if let Some(name) = owner_name {
+            value["owner_name"] = json!(name);
+        }
+        if let Some(id) = owner_id {
+            value["owner_id"] = json!(id);
+        }
+        if let Some(k) = owner_kind {
+            value["owner_kind"] = json!(k);
+        }
+        if let Some(bk) = body_kind {
+            value["body_kind"] = json!(bk);
+        }
+        Ok(value)
+    }
+    fn format_via(&self, r: &Relation, compact: bool) -> Result<Value> {
+        if !compact {
+            return Ok(json!(r));
+        }
+        let mut map = serde_json::Map::new();
+        map.insert("kind".into(), json!(r.kind));
+        map.insert("from".into(), json!(self.entity_label(&r.from)?));
+        map.insert("to".into(), json!(self.entity_label(&r.to)?));
+        let occ: Option<Occurrence> = r
+            .occurrence
+            .as_deref()
+            .map(|id| self.value("occurrence", id))
+            .transpose()?
+            .flatten()
+            .map(serde_json::from_value)
+            .transpose()?;
+        let anchor = occ.as_ref().map(|o| &o.source).or(r.source.as_ref());
+        if let Some(a) = anchor
+            && let Some((path, pos)) = self.anchor_location(a, true)?
+        {
+            map.insert("file".into(), json!(path));
+            if let Some((line, _, snippet)) = pos {
+                map.insert("line".into(), json!(line));
+                if !snippet.is_empty() {
+                    map.insert("snippet".into(), json!(snippet));
+                }
+            }
+        }
+        if let Some(o) = occ {
+            if o.evaluation != Evaluation::Immediate {
+                map.insert("evaluation".into(), json!(o.evaluation));
+            }
+            if o.dispatch != Dispatch::Direct {
+                map.insert("dispatch".into(), json!(o.dispatch));
+            }
+        }
+        Ok(Value::Object(map))
+    }
+    fn format_relation_row(
+        &self,
+        subject_id: &str,
+        target: &Entity,
+        r: &Relation,
+        compact: bool,
+    ) -> Result<Value> {
+        let occ: Option<Occurrence> = r
+            .occurrence
+            .as_deref()
+            .map(|id| self.value("occurrence", id))
+            .transpose()?
+            .flatten()
+            .map(serde_json::from_value)
+            .transpose()?;
+        if compact {
+            let mut map = serde_json::Map::new();
+            map.insert("entity".into(), self.summary_for(target, true)?);
+            map.insert("relation".into(), json!(r.kind));
+            let anchor = occ.as_ref().map(|o| &o.source).or(r.source.as_ref());
+            if let Some(a) = anchor
+                && let Some((path, pos)) = self.anchor_location(a, true)?
+            {
+                map.insert("file".into(), json!(path));
+                if let Some((line, col, snippet)) = pos {
+                    map.insert("line".into(), json!(line));
+                    map.insert("column".into(), json!(col));
+                    if !snippet.is_empty() {
+                        map.insert("snippet".into(), json!(snippet));
+                    }
+                }
+            }
+            if let Some(o) = occ {
+                if o.evaluation != Evaluation::Immediate {
+                    map.insert("evaluation".into(), json!(o.evaluation));
+                }
+                if o.dispatch != Dispatch::Direct {
+                    map.insert("dispatch".into(), json!(o.dispatch));
+                }
+            }
+            return Ok(Value::Object(map));
+        }
+        let occ_val = occ
+            .as_ref()
+            .map(|o| self.format_occurrence(o, subject_id, false))
+            .transpose()?;
+        Ok(json!({"entity":self.summary_for(target, false)?,"relation":r,"occurrence":occ_val}))
     }
     fn context(&self, q: &QueryRequest) -> Result<Option<AnalysisContext>> {
         let Some(id) = &q.context else {
@@ -500,7 +881,14 @@ impl<'a> Engine<'a> {
             } else {
                 text.contains(&q.text)
             };
-            return Ok(matched.then(||json!({"file":scan.file.logical_path.display(),"line":line,"text":text,"next_line":(scan.start<scan.file.blob.len).then_some(line+1),"source":SourceAnchor{file_revision:scan.file.id.clone(),start,end:start+n as u64}})));
+            return Ok(matched.then(|| {
+                let file_name = self.display_path(&scan.file, q.compact);
+                if q.compact {
+                    json!({"file":file_name,"line":line,"text":text})
+                } else {
+                    json!({"file":file_name,"line":line,"text":text,"next_line":(scan.start<scan.file.blob.len).then_some(line+1),"source":SourceAnchor{file_revision:scan.file.id.clone(),start,end:start+n as u64}})
+                }
+            }));
         }
         if scan.offset < scan.file.blob.len {
             let end = (scan.offset + 64 * 1024).min(scan.file.blob.len);
@@ -585,10 +973,19 @@ impl<'a> Engine<'a> {
                 }
             }
             "bodies" => vec![group("body", &self.subject(q)?.id)],
-            "callers" | "implementations" => vec![group("in", &self.subject(q)?.id)],
-            "callees" | "relations" => vec![group("out", &self.subject(q)?.id)],
+            "callers" | "implementations" => {
+                let e = self.subject(q)?;
+                s.subject_id = Some(e.id.clone());
+                vec![group("in", &e.id)]
+            }
+            "callees" | "relations" => {
+                let e = self.subject(q)?;
+                s.subject_id = Some(e.id.clone());
+                vec![group("out", &e.id)]
+            }
             "references" | "occurrences" => {
                 let e = self.subject(q)?;
+                s.subject_id = Some(e.id.clone());
                 let mut g = vec![group("reference", &e.id), group("occurrence_owner", &e.id)];
                 let bodies = self.reader.scan(&group("body", &e.id), None, 1000)?;
                 if !bodies.complete {
@@ -711,6 +1108,7 @@ impl<'a> Engine<'a> {
         v: Value,
         q: &QueryRequest,
         ctx: Option<&AnalysisContext>,
+        subject_id: Option<&str>,
     ) -> Result<Option<Value>> {
         match q.operation.as_str() {
             "search" | "semantic" | "entrypoints" | "outline" | "members" => {
@@ -731,7 +1129,18 @@ impl<'a> Engine<'a> {
                     let score = self.score(&e, q)?;
                     return Ok((score > 0.).then(|| json!({"id":e.id,"score":score})));
                 }
-                let mut value = self.summary(&e)?;
+                if q.operation == "outline"
+                    && (matches!(
+                        e.kind,
+                        EntityKind::Body
+                            | EntityKind::File
+                            | EntityKind::Variable
+                            | EntityKind::Parameter
+                    ) || (q.kind.is_none() && e.kind == EntityKind::DocSection))
+                {
+                    return Ok(None);
+                }
+                let mut value = self.summary_for(&e, q.compact)?;
                 if q.operation == "members" {
                     let owner = self.subject(q)?;
                     let b = self.reader.scan(
@@ -739,20 +1148,20 @@ impl<'a> Engine<'a> {
                         None,
                         1000,
                     )?;
-                    value["membership"] =
-                        json!(b.rows.into_iter().map(|r| r.value).collect::<Vec<_>>());
-                    value["membership_complete"] = json!(b.complete);
-                }
-                if q.operation == "outline"
-                    && matches!(
-                        e.kind,
-                        EntityKind::Body
-                            | EntityKind::File
-                            | EntityKind::Variable
-                            | EntityKind::Parameter
-                    )
-                {
-                    return Ok(None);
+                    if q.compact {
+                        let kinds: Vec<_> = b
+                            .rows
+                            .into_iter()
+                            .filter_map(|r| r.value.get("kind").cloned())
+                            .collect();
+                        if !kinds.is_empty() {
+                            value["membership"] = json!(kinds);
+                        }
+                    } else {
+                        value["membership"] =
+                            json!(b.rows.into_iter().map(|r| r.value).collect::<Vec<_>>());
+                        value["membership_complete"] = json!(b.complete);
+                    }
                 }
 
                 Ok(Some(value))
@@ -773,18 +1182,11 @@ impl<'a> Engine<'a> {
                 if !self.selected(&e, q, ctx)? {
                     return Ok(None);
                 }
-                let occurrence = r
-                    .occurrence
-                    .as_ref()
-                    .map(|id| self.value("occurrence", id))
-                    .transpose()?
-                    .flatten();
-                Ok(Some(
-                    json!({"entity":self.summary(&e)?,"relation":r,"occurrence":occurrence}),
-                ))
+                let subj = subject_id.unwrap_or("");
+                Ok(Some(self.format_relation_row(subj, &e, &r, q.compact)?))
             }
             "references" | "occurrences" => {
-                let o: Occurrence = serde_json::from_value(v.clone())?;
+                let o: Occurrence = serde_json::from_value(v)?;
                 if let Some(path) = &q.file {
                     let f = self
                         .file(&o.source.file_revision)?
@@ -804,7 +1206,8 @@ impl<'a> Engine<'a> {
                 {
                     return Ok(None);
                 }
-                Ok(Some(v))
+                let subj = subject_id.unwrap_or("");
+                Ok(Some(self.format_occurrence(&o, subj, q.compact)?))
             }
             "docs" | "doc_search" | "document" => {
                 let d: DocumentBlock = serde_json::from_value(v)?;
@@ -831,7 +1234,37 @@ impl<'a> Engine<'a> {
                     let lines: Vec<_> = d.text.lines().collect();
                     let start = q.line.unwrap_or(1).saturating_sub(1).min(lines.len());
                     let end = (start + q.max_lines).min(lines.len());
-                    json!({"id":d.id,"kind":d.kind,"title":d.title,"text":lines[start..end].join("\n"),"start_line":start+1,"next_line":(end<lines.len()).then_some(end+1),"total_lines":lines.len(),"owner":d.owner,"source":d.source,"links":d.links,"provenance":d.provenance})
+                    if q.compact {
+                        let loc = self.anchor_location(&d.source, true)?;
+                        let mut row = json!({"id":d.id,"kind":d.kind,"title":d.title,"text":lines[start..end].join("\n"),"start_line":start+1,"next_line":(end<lines.len()).then_some(end+1),"total_lines":lines.len()});
+                        if let Some((path, pos)) = loc {
+                            row["file"] = json!(path);
+                            if let Some((l, _, _)) = pos {
+                                row["line"] = json!(l);
+                            }
+                        }
+                        if let Some(owner) = &d.owner {
+                            row["owner"] = json!(self.entity_label(owner)?);
+                            row["owner_id"] = json!(owner);
+                        }
+                        row
+                    } else {
+                        json!({"id":d.id,"kind":d.kind,"title":d.title,"text":lines[start..end].join("\n"),"start_line":start+1,"next_line":(end<lines.len()).then_some(end+1),"total_lines":lines.len(),"owner":d.owner,"source":d.source,"links":d.links,"provenance":d.provenance})
+                    }
+                } else if q.compact {
+                    let loc = self.anchor_location(&d.source, true)?;
+                    let mut row = json!({"id":d.id,"kind":d.kind,"title":d.title,"excerpt":d.text.chars().take(200).collect::<String>()});
+                    if let Some((path, pos)) = loc {
+                        row["file"] = json!(path);
+                        if let Some((l, _, _)) = pos {
+                            row["line"] = json!(l);
+                        }
+                    }
+                    if let Some(owner) = &d.owner {
+                        row["owner"] = json!(self.entity_label(owner)?);
+                        row["owner_id"] = json!(owner);
+                    }
+                    row
                 } else {
                     json!({"id":d.id,"kind":d.kind,"title":d.title,"excerpt":d.text.chars().take(200).collect::<String>(),"owner":d.owner,"source":d.source,"links":d.links,"provenance":d.provenance})
                 }))
@@ -848,7 +1281,7 @@ impl<'a> Engine<'a> {
         let m = context.as_ref().unwrap_or(self.reader.metadata());
         Ok(match q.operation.as_str() {
             "overview" => vec![
-                json!({"project":self.reader.project(),"revision":self.reader.revision(),"entities":m["counts"]["entities"],"relations":m["counts"]["relations"],"occurrences":m["counts"]["occurrences"],"documents":m["counts"]["documents"],"kinds":m["entity_kinds"],"context_count":m["counts"]["contexts"],"explanation":"Compiler facts in separate contexts; author intent requires separately cited evidence."}),
+                json!({"project":self.reader.project(),"revision":self.reader.revision(),"entities":m["counts"]["entities"],"relations":m["counts"]["relations"],"occurrences":m["counts"]["occurrences"],"documents":m["counts"]["documents"],"kinds":m["entity_kinds"],"context_count":m["counts"]["contexts"],"completion":self.reader.metadata()["completion"],"storage_rejections":self.reader.metadata()["storage_rejections"],"explanation":"Compiler facts in separate contexts; author intent requires separately cited evidence."}),
             ],
             "schema" => vec![
                 json!({"nodes":m["entity_kinds"],"relationships":m["relation_kinds"],"separate_occurrences":true}),
@@ -860,12 +1293,12 @@ impl<'a> Engine<'a> {
                     let mut v = vec![];
                     for id in ids {
                         if let Some(t) = self.entity(&id)? {
-                            v.push(json!({"entity":self.summary(&t)?,"authority":"RuleDerived","meaning":"native USR candidate; linker selection not observed"}));
+                            v.push(json!({"entity":self.summary_for(&t, q.compact)?,"authority":"RuleDerived","meaning":"native USR candidate; linker selection not observed"}));
                         }
                     }
                     v
                 } else {
-                    vec![self.summary(&e)?]
+                    vec![self.summary_for(&e, q.compact)?]
                 }
             }
             "type_definition" => {
@@ -874,7 +1307,7 @@ impl<'a> Engine<'a> {
                 if e.type_navigation.is_empty() {
                     for id in &e.type_definitions {
                         if let Some(t) = self.entity(id)? {
-                            v.push(self.summary(&t)?);
+                            v.push(self.summary_for(&t, q.compact)?);
                         }
                     }
                 } else {
@@ -882,7 +1315,7 @@ impl<'a> Engine<'a> {
                         let mut candidates = vec![];
                         for id in &nav.candidates {
                             if let Some(t) = self.entity(id)? {
-                                candidates.push(self.summary(&t)?);
+                                candidates.push(self.summary_for(&t, q.compact)?);
                             }
                         }
                         v.push(json!({"source":nav.source,"extent":nav.extent,"candidates":candidates,"meaning":"native navigation candidates; not runtime dispatch"}));
@@ -896,7 +1329,7 @@ impl<'a> Engine<'a> {
                 let member_edges = self.reader.count(&group("membership", &e.id))?;
                 let counts = json!({"members":if direct_members==0&&member_edges==0{Some(0)}else{None},"declaring_members":direct_members,"membership_edges":member_edges,"documents":self.reader.count(&group("document",&e.id))?,"bodies":self.reader.count(&group("body",&e.id))?,"references":self.reader.count(&group("reference",&e.id))?});
                 vec![
-                    json!({"entity":self.summary(&e)?,"counts":counts,"hidden":[{"category":"members","count":counts["members"],"continue_with":{"operation":"members","subject":e.id}},{"category":"documents","count":counts["documents"],"continue_with":{"operation":"docs","subject":e.id}},{"category":"references","count":counts["references"],"continue_with":{"operation":"references","subject":e.id}},{"category":"bodies","count":counts["bodies"],"continue_with":{"operation":"bodies","subject":e.id}}]}),
+                    json!({"entity":self.summary_for(&e, q.compact)?,"counts":counts,"hidden":[{"category":"members","count":counts["members"],"continue_with":{"operation":"members","subject":e.id}},{"category":"documents","count":counts["documents"],"continue_with":{"operation":"docs","subject":e.id}},{"category":"references","count":counts["references"],"continue_with":{"operation":"references","subject":e.id}},{"category":"bodies","count":counts["bodies"],"continue_with":{"operation":"bodies","subject":e.id}}]}),
                 ]
             }
             "source" => self.source(q)?,
@@ -995,7 +1428,16 @@ impl<'a> Engine<'a> {
                 let start = offset - carry.len() as u64;
                 let text = String::from_utf8_lossy(&carry[..n]).into_owned();
                 if line >= target && line < target + q.max_lines {
-                    rows.push(json!({"file":file.logical_path.display(),"line":line,"text":text,"next_line":(start+(n as u64)<file.blob.len).then_some(line+1),"source":SourceAnchor{file_revision:file.id.clone(),start,end:start+n as u64}}));
+                    let display_file = self.display_path(&file, q.compact);
+                    if q.compact {
+                        let mut row = json!({"file":display_file,"line":line,"text":text});
+                        if line + 1 == target + q.max_lines && start + (n as u64) < file.blob.len {
+                            row["next_line"] = json!(line + 1);
+                        }
+                        rows.push(row);
+                    } else {
+                        rows.push(json!({"file":display_file,"line":line,"text":text,"next_line":(start+(n as u64)<file.blob.len).then_some(line+1),"source":SourceAnchor{file_revision:file.id.clone(),start,end:start+n as u64}}));
+                    }
                 }
                 carry.drain(..n);
                 line += 1;
@@ -1018,6 +1460,9 @@ impl<'a> Engine<'a> {
         let Some(mut step) = s.walk.pop_front() else {
             return Ok(None);
         };
+        let inbound = q.direction == "inbound" || q.operation == "impact";
+        let both = q.direction == "both";
+        let calls_mode = q.relation.is_none() && q.mode == "calls";
         if !step.reported {
             s.visited.insert(step.id.clone());
             step.reported = true;
@@ -1027,25 +1472,77 @@ impl<'a> Engine<'a> {
             if q.operation == "path" && s.target.as_ref() == Some(&step.id) {
                 s.walk.clear();
                 s.exhausted = true;
+                if q.compact {
+                    let mut hops = Vec::with_capacity(step.path.len());
+                    for id in &step.path {
+                        if let Some(v) = self.value("relation", id)? {
+                            let r: Relation = serde_json::from_value(v)?;
+                            hops.push(self.format_via(&r, true)?);
+                        }
+                    }
+                    return Ok(Some(json!({
+                        "target": self.summary_for(&e, true)?,
+                        "hops": hops,
+                        "meaning": "potential static path, not runtime proof"
+                    })));
+                }
                 return Ok(Some(
-                    json!({"target":self.summary(&e)?,"relation_path":step.path,"meaning":"potential static path, not runtime proof"}),
+                    json!({"target":self.summary_for(&e, false)?,"relation_path":step.path,"meaning":"potential static path, not runtime proof"}),
                 ));
             }
             let row = if q.operation != "path" {
-                Some(
-                    json!({"entity":self.summary(&e)?,"hop":step.hop,"via":step.via.as_ref().map(|id|self.value("relation",id)).transpose()?.flatten(),"path":step.path}),
-                )
+                let via = if let Some(id) = step.via.as_deref() {
+                    self.value("relation", id)?
+                        .map(|v| -> Result<Value> {
+                            if q.compact {
+                                let r: Relation = serde_json::from_value(v)?;
+                                self.format_via(&r, true)
+                            } else {
+                                Ok(v)
+                            }
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                if q.compact {
+                    let mut map = serde_json::Map::new();
+                    map.insert("entity".into(), self.summary_for(&e, true)?);
+                    map.insert("hop".into(), json!(step.hop));
+                    if let Some(v) = via {
+                        map.insert("via".into(), v);
+                    }
+                    Some(Value::Object(map))
+                } else {
+                    Some(
+                        json!({"entity":self.summary_for(&e, false)?,"hop":step.hop,"via":via,"path":step.path}),
+                    )
+                }
             } else {
                 None
             };
-            if step.hop < q.depth {
+            let ascend_body_only = q.depth > 0
+                && step.hop >= q.depth
+                && calls_mode
+                && Self::is_nested_body(&e)
+                && (inbound || both);
+            if step.hop < q.depth || ascend_body_only {
                 s.walk.push_front(step);
             }
             return Ok(row);
         }
-        let inbound = q.direction == "inbound" || q.operation == "impact";
-        let both = q.direction == "both";
-        let back = if both { step.direction == 0 } else { inbound };
+        let cur_entity = self.entity(&step.id)?;
+        let node_is_nested_body =
+            calls_mode && cur_entity.as_ref().is_some_and(Self::is_nested_body);
+        let ascend_body_only =
+            q.depth > 0 && step.hop >= q.depth && node_is_nested_body && (inbound || both);
+        let back = if ascend_body_only {
+            true
+        } else if both {
+            step.direction == 0
+        } else {
+            inbound
+        };
         let p = self.reader.scan(
             &group(if back { "in" } else { "out" }, &step.id),
             step.after.as_deref(),
@@ -1053,7 +1550,26 @@ impl<'a> Engine<'a> {
         )?;
         for row in p.rows {
             let r: Relation = serde_json::from_value(row.value)?;
-            if !self.edge_allowed(&r, q, true)? {
+            let allowed = if ascend_body_only {
+                self.allowed(&r.provenance, q)? && back && r.kind == RelationKind::CreatesBody
+            } else if self.edge_allowed(&r, q, true)? {
+                true
+            } else if calls_mode
+                && r.kind == RelationKind::CreatesBody
+                && self.allowed(&r.provenance, q)?
+            {
+                if back {
+                    node_is_nested_body
+                } else {
+                    self.entity(&r.to)?
+                        .as_ref()
+                        .is_some_and(Self::is_nested_body)
+                        && self.body_has_matching_call(&r.to, q, ctx)?
+                }
+            } else {
+                false
+            };
+            if !allowed {
                 continue;
             }
             let id = if back { &r.from } else { &r.to };
@@ -1069,9 +1585,14 @@ impl<'a> Engine<'a> {
             s.scheduled.insert(id.clone());
             let mut path = step.path.clone();
             path.push(r.id.clone());
+            let next_hop = if r.kind == RelationKind::CreatesBody {
+                step.hop
+            } else {
+                step.hop + 1
+            };
             s.walk.push_back(Step {
                 id: id.clone(),
-                hop: step.hop + 1,
+                hop: next_hop,
                 path,
                 via: Some(r.id),
                 reported: false,
@@ -1082,7 +1603,7 @@ impl<'a> Engine<'a> {
         if !p.complete {
             step.after = p.after;
             s.walk.push_front(step);
-        } else if both && step.direction == 0 {
+        } else if both && !ascend_body_only && step.direction == 0 {
             step.direction = 1;
             step.after = None;
             s.walk.push_front(step);
@@ -1136,10 +1657,22 @@ impl<'a> Engine<'a> {
         if q.regex {
             regex::Regex::new(&q.text).map_err(|e| Error::new("InvalidPattern", e.to_string()))?;
         }
+        if q.operation == "semantic"
+            && (!embeddings::enabled()
+                || self.reader.metadata()["search_index"]["vector_enabled"] == false)
+        {
+            return Err(Error::new(
+                "VectorSearchDisabled",
+                "vector retrieval is experimental and disabled by default",
+            ));
+        }
         let start = Instant::now();
         self.reader.set_timeout(q.timeout_ms);
         let ctx = self.context(q)?;
         let digest = request_digest(q);
+        if q.operation == "search" && !q.regex {
+            return self.execute_text(q, resume, ctx.as_ref(), start, digest);
+        }
         let is_walk = ["trace", "impact", "path"].contains(&q.operation.as_str());
         let ranked = ["search", "semantic", "entrypoints"].contains(&q.operation.as_str());
         let mut state = if let Some(c) = resume {
@@ -1160,7 +1693,7 @@ impl<'a> Engine<'a> {
                 let rows = if ["document", "docs", "doc_search"].contains(&q.operation.as_str()) {
                     std::mem::take(&mut s.pending)
                         .into_iter()
-                        .map(|v| self.transform(v, q, ctx.as_ref()))
+                        .map(|v| self.transform(v, q, ctx.as_ref(), s.subject_id.as_deref()))
                         .collect::<Result<Vec<_>>>()?
                         .into_iter()
                         .flatten()
@@ -1188,7 +1721,7 @@ impl<'a> Engine<'a> {
                 ));
             }
             if let Some(mut v) = state.pending.pop_front() {
-                if ranked && state.ranking_done && v.get("qualified_name").is_none() {
+                if ranked && state.ranking_done && v.get("kind").is_none() {
                     let id = v["id"]
                         .as_str()
                         .ok_or_else(|| Error::new("InvalidCursor", "rank identity"))?
@@ -1197,9 +1730,11 @@ impl<'a> Engine<'a> {
                     let e = self
                         .entity(&id)?
                         .ok_or_else(|| Error::new("MissingEntity", &id))?;
-                    v = self.summary(&e)?;
+                    v = self.summary_for(&e, q.compact)?;
                     v["score"] = json!(score);
-                    v["entity_ref"] = json!(id);
+                    if !q.compact {
+                        v["entity_ref"] = json!(id);
+                    }
                 }
                 let size = serde_json::to_vec(&v)?.len();
                 if size > q.max_bytes && items.is_empty() {
@@ -1381,21 +1916,21 @@ impl<'a> Engine<'a> {
                                 .transpose()?
                                 .flatten()
                                 .as_ref()
-                                .map(|e| self.summary(e))
+                                .map(|e| self.summary_for(e, q.compact))
                                 .transpose()?;
-                            state
-                                .pending
-                                .push_back(json!({"occurrence":o,"definition":definition}));
+                            state.pending.push_back(json!({"occurrence":self.format_occurrence(&o, "", q.compact)?,"definition":definition}));
                         }
                     } else {
                         let e: Entity = serde_json::from_value(row.value)?;
                         if self.selected(&e, q, ctx.as_ref())? && self.allowed(&e.provenance, q)? {
-                            state.pending.push_back(self.summary(&e)?);
+                            state.pending.push_back(self.summary_for(&e, q.compact)?);
                         }
                     }
                     continue;
                 }
-                if let Some(v) = self.transform(row.value, q, ctx.as_ref())? {
+                if let Some(v) =
+                    self.transform(row.value, q, ctx.as_ref(), state.subject_id.as_deref())?
+                {
                     if q.operation == "members" {
                         let id = v["id"]
                             .as_str()
@@ -1413,6 +1948,20 @@ impl<'a> Engine<'a> {
                 }
             }
         }
+        self.finish_page(q, state, items, work, start, digest, ranked)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn finish_page(
+        &self,
+        q: &QueryRequest,
+        state: State,
+        items: Vec<Value>,
+        work: usize,
+        start: Instant,
+        digest: String,
+        ranked: bool,
+    ) -> Result<QueryResult> {
+        let text = state.text.is_some();
         let complete = state.exhausted && state.pending.is_empty() && !state.rank_more;
         let mut hidden = vec![];
         if !complete {
@@ -1444,7 +1993,7 @@ impl<'a> Engine<'a> {
                 hidden.push(HiddenGroup{category:"immediate_dispatch_or_implementation_candidates".into(),count:Some(count as usize),reason:"immediate candidate edges before authority/result filters; hidden by candidate policy".into(),continue_with:json!({"operation":q.operation,"subject":subject.id,"include_candidates":true})});
             }
         }
-        if !q.include_external {
+        if !q.compact && !q.include_external {
             hidden.push(HiddenGroup {
                 category: "external_entities_in_index".into(),
                 count: self.reader.metadata()["counts"]["external"]
@@ -1455,43 +2004,52 @@ impl<'a> Engine<'a> {
             });
         }
         let mut provenance_records = BTreeMap::new();
-        fn ids(v: &Value, found: &mut BTreeSet<String>) {
-            match v {
-                Value::Object(m) => {
-                    for (k, v) in m {
-                        if k == "provenance" {
-                            if let Some(s) = v.as_str() {
-                                found.insert(s.into());
+        if !q.compact {
+            fn ids(v: &Value, found: &mut BTreeSet<String>) {
+                match v {
+                    Value::Object(m) => {
+                        for (k, v) in m {
+                            if k == "provenance" {
+                                if let Some(s) = v.as_str() {
+                                    found.insert(s.into());
+                                }
+                            } else {
+                                ids(v, found);
                             }
-                        } else {
+                        }
+                    }
+                    Value::Array(a) => {
+                        for v in a {
                             ids(v, found);
                         }
                     }
+                    _ => {}
                 }
-                Value::Array(a) => {
-                    for v in a {
-                        ids(v, found);
-                    }
+            }
+            let mut used = BTreeSet::new();
+            for v in &items {
+                ids(v, &mut used);
+            }
+            for id in used {
+                if let Some(p) = self.value("provenance", &id)? {
+                    provenance_records.insert(ProvenanceId(id), serde_json::from_value(p)?);
                 }
-                _ => {}
             }
         }
-        let mut used = BTreeSet::new();
-        for v in &items {
-            ids(v, &mut used);
-        }
-        for id in used {
-            if let Some(p) = self.value("provenance", &id)? {
-                provenance_records.insert(ProvenanceId(id), serde_json::from_value(p)?);
-            }
-        }
-        let coverage = self
-            .reader
-            .scan("all:coverage", None, 3)?
-            .rows
-            .into_iter()
-            .map(|r| serde_json::from_value(r.value).map_err(Into::into))
-            .collect::<Result<_>>()?;
+        let coverage = if q.compact
+            && !matches!(
+                q.operation.as_str(),
+                "coverage" | "capabilities" | "overview"
+            ) {
+            vec![]
+        } else {
+            self.reader
+                .scan("all:coverage", None, 3)?
+                .rows
+                .into_iter()
+                .map(|r| serde_json::from_value(r.value).map_err(Into::into))
+                .collect::<Result<_>>()?
+        };
         let mut gaps: Vec<Gap> = self
             .reader
             .scan("all:gaps", None, 7)?
@@ -1540,6 +2098,7 @@ impl<'a> Engine<'a> {
                 total_kind: "unknown".into(),
                 truncated: !complete,
                 next_cursor: None,
+                ranking: text.then(|| json!({"policy":"exact_name_then_candidate_windows","scope":"candidate_window","globally_sorted":false})),
                 state: if items.is_empty() {
                     if complete {
                         if knowledge_partial {

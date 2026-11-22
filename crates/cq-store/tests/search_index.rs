@@ -97,11 +97,9 @@ fn inverted_terms_substrings_regex_docs_and_filters_match_scan_oracle() {
         }
     }
     let mut meta = indexed.metadata().clone();
-    meta["search_index"]["vector_model"] = Value::String("another-model".into());
-    let mismatch = Scan(&indexed, meta.clone());
     assert_eq!(
         Engine {
-            reader: &mismatch,
+            reader: &indexed,
             model: None,
             control: None
         }
@@ -116,8 +114,9 @@ fn inverted_terms_substrings_regex_docs_and_filters_match_scan_oracle() {
         .err()
         .unwrap()
         .code(),
-        "VectorIndexModelMismatch"
+        "VectorSearchDisabled"
     );
+    assert_eq!(indexed.count("all:entity_vector").unwrap(), 0);
     meta["search_index"] = Value::Null;
     let scan = Scan(&indexed, meta);
     for (text, regex) in [
@@ -139,7 +138,11 @@ fn inverted_terms_substrings_regex_docs_and_filters_match_scan_oracle() {
         };
         let a = collect(&indexed, &q).0;
         let b = collect(&scan, &q).0;
-        assert_eq!(a, b, "{text}");
+        let normalize = |mut rows: Vec<Value>| {
+            rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+            rows
+        };
+        assert_eq!(normalize(a.clone()), normalize(b), "{text}");
         if text == "run" && !regex {
             assert!(
                 a.iter().any(|r| r["name"] == "prune"),
@@ -196,37 +199,6 @@ fn bounded_rank_windows_page_past_one_thousand_without_loss_or_large_cursor() {
         1050
     );
     assert!(bytes < 1024 * 1024, "cursor was {bytes} bytes");
-    let q = QueryRequest {
-        operation: "semantic".into(),
-        text: "output".into(),
-        exact_semantic: true,
-        limit: 100,
-        max_work: 89,
-        ..Default::default()
-    };
-    let (rows, bytes) = collect(&view, &q);
-    assert!(!rows.is_empty());
-    assert!(bytes < 1024 * 1024);
-    let approximate = Engine {
-        reader: &view,
-        model: None,
-        control: None,
-    }
-    .execute(
-        &QueryRequest {
-            exact_semantic: false,
-            ..q
-        },
-        None,
-    )
-    .unwrap();
-    assert!(
-        approximate
-            .page
-            .gaps
-            .iter()
-            .any(|g| g.code == "ApproximateVectorCandidates")
-    );
 }
 #[test]
 fn updated_deleted_and_old_entities_keep_separate_frozen_postings() {
@@ -263,8 +235,8 @@ fn updated_deleted_and_old_entities_keep_separate_frozen_postings() {
     };
     assert_eq!(collect(&new, &q).0.len(), 1);
     assert!(new.get("entity_vector", "f2").unwrap().is_none());
-    assert!(old.get("entity_vector", "f2").unwrap().is_some());
-    assert!(new.get("entity_vector", "f1").unwrap().is_some());
+    assert!(old.get("entity_vector", "f2").unwrap().is_none());
+    assert!(new.get("entity_vector", "f1").unwrap().is_none());
     assert!(
         cq_core::query::architecture::cypher_count(new.metadata(), "MATCH (n) RETURN count(n)")
             .is_some()
@@ -276,4 +248,55 @@ fn updated_deleted_and_old_entities_keep_separate_frozen_postings() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn text_first_page_prioritizes_exact_names_and_keeps_lexical_continuations() {
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let h = StoreHost::open(t.path(), "paged-test").unwrap();
+    let mut s = fixture::fixture(&store, 200, 1);
+    for (i, e) in s.entities.iter_mut().enumerate() {
+        e.name = if i == 199 {
+            "stamp_rule_tags".into()
+        } else {
+            format!("other_rule_{i}")
+        };
+        e.qualified_name = format!("module::{}", e.name);
+    }
+    s.seal().unwrap();
+    let r = fixture::write(&h.objects, &store, &s, None);
+    assert_eq!(h.publish(&r, None).outcome, CommitOutcome::Committed);
+    let view = h.open_view(None).unwrap();
+    let q = QueryRequest {
+        operation: "search".into(),
+        text: "stamp_rule_tags".into(),
+        limit: 1,
+        max_work: 8,
+        ..Default::default()
+    };
+    let first = Engine {
+        reader: &view,
+        model: None,
+        control: None,
+    }
+    .execute(&q, None)
+    .unwrap();
+    assert_eq!(first.page.items.len(), 1);
+    assert_eq!(first.page.items[0]["name"], "stamp_rule_tags");
+    assert_eq!(first.page.items[0]["match_tier"], "exact_name");
+    assert_eq!(
+        first.page.ranking.as_ref().unwrap()["globally_sorted"],
+        false
+    );
+    let all = collect(&view, &q).0;
+    assert_eq!(all.len(), 200);
+    assert_eq!(
+        all.iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        200
+    );
+    assert!(all.iter().skip(1).all(|r| r["match_tier"] == "lexical"));
 }

@@ -396,6 +396,15 @@ pub struct MaterializedInput {
     pub unit: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RejectedField {
+    pub field: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub reason: String,
+    pub report: NativeValue,
+    pub originals: Vec<NativeValue>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildObservation {
     pub id: String,
     pub language: Language,
@@ -405,6 +414,9 @@ pub struct BuildObservation {
     pub outcome: BuildOutcome,
     pub exit: ExitObservation,
     pub events: Vec<Envelope>,
+    /// A rejected collection is unavailable, not an observed empty collection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_fields: Vec<RejectedField>,
     pub captured_report: Option<String>,
     pub gaps: Vec<Gap>,
 }

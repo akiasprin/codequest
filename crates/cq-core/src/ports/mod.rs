@@ -58,6 +58,47 @@ pub trait CaptureReportRepository {
 /// Storage owns capture journals and source materialization. Language analysts
 /// receive these capabilities without depending on a database implementation.
 pub trait AnalysisWorkspace {
+    fn reuse_stage(
+        &self,
+        _stage: crate::execution::Stage,
+        _header: &mut SemanticSnapshot,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    /// Durable workflow capability. A reused stage restores both its metadata
+    /// and record generation before the caller continues to the next stage.
+    fn start_stage(
+        &self,
+        _stage: crate::execution::Stage,
+        _header: &mut SemanticSnapshot,
+    ) -> Result<crate::execution::Entry> {
+        Ok(crate::execution::Entry::default())
+    }
+    fn finish_stage(
+        &self,
+        _stage: crate::execution::Stage,
+        _header: &SemanticSnapshot,
+        _cursor: serde_json::Value,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn checkpoint_stage(
+        &self,
+        _stage: crate::execution::Stage,
+        _header: &SemanticSnapshot,
+        _cursor: serde_json::Value,
+        _done: u64,
+        _total: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn stage_file(
+        &self,
+        _stage: crate::execution::Stage,
+        _name: &str,
+    ) -> Result<Option<std::path::PathBuf>> {
+        Ok(None)
+    }
     fn semantic_records(&self) -> Option<&dyn crate::semantic::records::Store> {
         None
     }

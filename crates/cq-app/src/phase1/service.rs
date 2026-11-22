@@ -587,15 +587,21 @@ impl Service {
                         }
                     }
                 }
-                let mut value = json!(page);
-                if self.store.paged_enabled(project) {
-                    value["execution_path"] = json!("explicit_compatibility_export_job");
-                    value["full_snapshot_decodes"] =
-                        json!(cq_store::snapshot_decode_count() - decodes_before);
+                let mut value = if q.compact {
+                    page.to_compact_json()
                 } else {
-                    value["execution_path"] = json!("legacy_full_snapshot_compatibility");
-                    value["full_snapshot_decodes"] =
-                        json!(cq_store::snapshot_decode_count() - decodes_before);
+                    json!(page)
+                };
+                if !q.compact {
+                    if self.store.paged_enabled(project) {
+                        value["execution_path"] = json!("explicit_compatibility_export_job");
+                        value["full_snapshot_decodes"] =
+                            json!(cq_store::snapshot_decode_count() - decodes_before);
+                    } else {
+                        value["execution_path"] = json!("legacy_full_snapshot_compatibility");
+                        value["full_snapshot_decodes"] =
+                            json!(cq_store::snapshot_decode_count() - decodes_before);
+                    }
                 }
                 Ok(value)
             }
@@ -688,7 +694,7 @@ impl Service {
         }
         if operation == "status" {
             return Ok(Some(
-                json!({"project":project,"revision":reader.revision(),"created_ms":metadata["created_ms"],"counts":metadata["counts"],"database":"Ladybug","format":2,"read_stats":reader.stats()}),
+                json!({"project":project,"revision":reader.revision(),"created_ms":metadata["created_ms"],"counts":metadata["counts"],"database":"Ladybug","format":2,"completion":metadata["completion"],"storage_rejections":metadata["storage_rejections"],"read_stats":reader.stats()}),
             ));
         }
         if operation == "generation" {
@@ -836,10 +842,16 @@ impl Service {
                     }
                 }
             }
-            let mut value = json!(page);
-            value["read_stats"] = json!(reader.stats());
-            value["read_stats_scope"] = json!("request");
-            value["execution_path"] = json!("fixed_view_fact_reader");
+            let mut value = if q.compact {
+                page.to_compact_json()
+            } else {
+                json!(page)
+            };
+            if !q.compact {
+                value["read_stats"] = json!(reader.stats());
+                value["read_stats_scope"] = json!("request");
+                value["execution_path"] = json!("fixed_view_fact_reader");
+            }
             return Ok(Some(value));
         }
         // Remaining global/compatibility operations are explicit, bounded jobs;
@@ -991,4 +1003,4 @@ fn compare(a: &SemanticSnapshot, b: &SemanticSnapshot) -> Value {
     json!({"base":a.revision,"target":b.revision,"added_files":added,"removed_files":removed,"modified_files":modified,"entity_delta":b.entities.len() as i64-a.entities.len() as i64,"relation_delta":b.relations.len() as i64-a.relations.len() as i64,"matching":"content paths; symbol instances remain compilation-context scoped"})
 }
 
-pub use super::languages::{index_cpp, index_go};
+pub use super::languages::{index_cpp, index_go, index_ts};

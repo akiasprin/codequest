@@ -26,7 +26,9 @@ use std::{
     io::{Seek, SeekFrom, Write},
     sync::{Arc, Mutex},
 };
-#[derive(Clone)]
+#[cfg(test)]
+pub(crate) mod encoding_reproduction;
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Entry {
     offset: u64,
     length: u64,
@@ -34,10 +36,29 @@ struct Entry {
     scope: Arc<ScopeKey>,
     shard: Arc<str>,
 }
+struct SpoolFile {
+    file: std::fs::File,
+    temporary: Option<tempfile::NamedTempFile>,
+}
+impl SpoolFile {
+    fn temporary() -> Result<Self> {
+        let temporary = tempfile::NamedTempFile::new()?;
+        Ok(Self {
+            file: temporary.reopen()?,
+            temporary: Some(temporary),
+        })
+    }
+    fn as_file(&self) -> &std::fs::File {
+        &self.file
+    }
+    fn as_file_mut(&mut self) -> &mut std::fs::File {
+        &mut self.file
+    }
+}
 pub struct Spool {
     diagnostic_header: SemanticSnapshot,
     diagnostic_root: Option<std::path::PathBuf>,
-    file: Mutex<tempfile::NamedTempFile>,
+    file: Mutex<SpoolFile>,
     entries: BTreeMap<Arc<str>, Entry>,
     units: BTreeSet<String>,
     pub universe: String,
@@ -203,12 +224,14 @@ impl Base for ScopeBase {
         }))
     }
 }
+mod resume;
 pub struct Prepared {
     pub header: SemanticSnapshot,
     pub spool: Spool,
     pub base: ScopeBase,
     pub generation: Value,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Statistics {
     pub counts: Value,
     pub entity_kinds: BTreeMap<String, u64>,
@@ -346,7 +369,7 @@ impl Spool {
         Ok(Self {
             diagnostic_header: header.metadata(),
             diagnostic_root: None,
-            file: Mutex::new(tempfile::NamedTempFile::new()?),
+            file: Mutex::new(SpoolFile::temporary()?),
             entries: BTreeMap::new(),
             units: cq_core::semantic::identity::compilation_identities(
                 &header.units,
@@ -580,13 +603,14 @@ impl Spool {
         let scope_progress = self.diagnostic_root.as_ref().map(|root| {
             Mutex::new((
                 0u64,
-                cq_core::progress::Progress::stage(
+                cq_core::progress::Progress::stage_with_workers(
                     root,
                     &header.project,
                     "prepare.scopes",
                     "校验范围与封存",
                     Some(scopes.len() as u64),
                     "范围",
+                    cq_core::compute::workers().unwrap_or(1),
                 ),
             ))
         });
@@ -660,29 +684,44 @@ impl Spool {
             let mut at = 0;
             let mut sequence = 0;
             while at < keys.len() {
-                let first = at;
-                let mut bytes = 0;
-                while at < keys.len() && at - first < production::BATCH_ROWS {
-                    let length = self.entries[keys[at].as_str()].length;
-                    if at > first && bytes + length > production::BATCH_BYTES as u64 {
+                let first_read = at;
+                let mut lengths = Vec::with_capacity(8);
+                // Read/decode a bounded wave on the pool, then deliver the
+                // original byte- and row-limited batches in the original order.
+                // No protocol batch is enlarged and scopes never overlap.
+                for _ in 0..8 {
+                    if at == keys.len() {
                         break;
                     }
-                    bytes += length;
-                    at += 1;
+                    let first = at;
+                    let mut bytes = 0;
+                    while at < keys.len() && at - first < production::BATCH_ROWS {
+                        let length = self.entries[keys[at].as_str()].length;
+                        if at > first && bytes + length > production::BATCH_BYTES as u64 {
+                            break;
+                        }
+                        bytes += length;
+                        at += 1;
+                    }
+                    lengths.push(at - first);
                 }
-                let requested = keys[first..at]
+                let requested = keys[first_read..at]
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>();
                 let values = self.read_many(&requested)?;
-                let batch = keys[first..at]
+                let mut decoded = keys[first_read..at]
                     .iter()
                     .cloned()
                     .zip(values)
-                    .map(|(key, value)| production::Record { key, value })
-                    .collect::<Vec<_>>();
-                sink.batch(&descriptor.key, sequence, &batch)?;
-                sequence += 1;
+                    .map(|(key, value)| production::Record { key, value });
+                let count = lengths.len() as u64;
+                let batches = lengths
+                    .into_iter()
+                    .map(|length| decoded.by_ref().take(length).collect())
+                    .collect();
+                sink.batch_wave(&descriptor.key, sequence, batches)?;
+                sequence += count;
             }
             sink.end(&descriptor.key, sequence)?;
         }
@@ -767,22 +806,16 @@ impl Spool {
     }
     pub fn counts(&self) -> Value {
         let mut counts = json!({"entities":0,"relations":0,"occurrences":0,"bodies":0,"documents":0,"external":0});
-        for family in ["entity", "relation", "occurrence", "body", "document"] {
-            let name = match family {
-                "entity" => "entities",
-                "body" => "bodies",
-                _ => match family {
-                    "relation" => "relations",
-                    "occurrence" => "occurrences",
-                    _ => "documents",
-                },
+        for (scope, keys) in &self.by_scope {
+            let key = match scope.family {
+                FactFamily::Entity => "entities",
+                FactFamily::Body => "bodies",
+                FactFamily::Occurrence => "occurrences",
+                FactFamily::Relation => "relations",
+                FactFamily::Document => "documents",
+                FactFamily::Metadata => continue,
             };
-            counts[name] = json!(
-                self.entries
-                    .keys()
-                    .filter(|k| k.starts_with(&format!("{family}:")))
-                    .count()
-            );
+            counts[key] = json!(counts[key].as_u64().unwrap() + keys.len() as u64);
         }
         counts
     }
@@ -882,13 +915,14 @@ impl Spool {
         let mut manifest = Vec::with_capacity(self.sources.len());
         let shards = self.sources.iter().collect::<Vec<_>>();
         let mut progress = self.diagnostic_root.as_ref().map(|root| {
-            cq_core::progress::Progress::stage(
+            cq_core::progress::Progress::stage_with_workers(
                 root,
                 &self.diagnostic_header.project,
                 "prepare.shard_hashes",
                 "封存事实分片",
                 Some(shards.len() as u64),
                 "分片",
+                cq_core::compute::workers().unwrap_or(1),
             )
         });
         for wave in shards.chunks(cq_core::compute::workers()?.min(8)) {
@@ -953,6 +987,7 @@ impl LocalStore {
         mut header: SemanticSnapshot,
         source: &dyn cq_core::semantic::records::Source,
     ) -> Result<Prepared> {
+        crate::facts::limits::reject_oversized_build_events(&self.root, &mut header)?;
         cq_core::semantic::record_projection::validate(&header, source, &self.content)?;
         if header.previous.is_some() && !self.paged_enabled(&header.project) {
             self.migrate_paged(&header.project)?;
@@ -962,6 +997,9 @@ impl LocalStore {
         let base = ScopeBase::open(self, &header.project, header.previous.as_deref())?;
         let projection =
             cq_core::semantic::record_projection::canonicalize(&mut header, source, &mut spool)?;
+        if let Some(e) = &self.execution {
+            e.stable_metadata_metrics(&mut header)?;
+        }
         spool.finish(&mut header, projection, &base)?;
         let generation = spool.legacy_generation(base.manifest())?;
         Ok(Prepared {
@@ -972,6 +1010,7 @@ impl LocalStore {
         })
     }
     pub fn prepare_analysis(&self, mut snapshot: SemanticSnapshot) -> Result<Prepared> {
+        crate::facts::limits::reject_oversized_build_events(&self.root, &mut snapshot)?;
         if snapshot.previous.is_some() && !self.paged_enabled(&snapshot.project) {
             self.migrate_paged(&snapshot.project)?;
         }

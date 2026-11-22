@@ -248,6 +248,18 @@ fn compare_observations(
             })
             .unwrap();
         assert_eq!(a, b, "canonical family {family}");
+        let field = match family {
+            "entity" => "entities",
+            "body" => "bodies",
+            "occurrence" => "occurrences",
+            "relation" => "relations",
+            _ => "documents",
+        };
+        assert_eq!(
+            actual.spool.counts()[field].as_u64(),
+            Some(a.len() as u64),
+            "scope-directory count for {family}"
+        );
     }
     assert_eq!(actual.spool.sources, expected.spool.sources);
 }
