@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     Error, Result,
-    ports::facts::{FactBatch, FactReader, FactRow, ReadStats, group},
+    ports::facts::{FactReader, FactRow, group},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -96,53 +96,6 @@ pub struct Engine<'a> {
     pub model: Option<Arc<embeddings::TokenVectors>>,
     pub control: Option<&'a crate::control::CaptureControl>,
 }
-struct CachedReader<'a> {
-    inner: &'a dyn FactReader,
-    cache: std::sync::Mutex<(usize, BTreeMap<String, FactRow>)>,
-}
-impl FactReader for CachedReader<'_> {
-    fn project(&self) -> &str {
-        self.inner.project()
-    }
-    fn revision(&self) -> &str {
-        self.inner.revision()
-    }
-    fn metadata(&self) -> &Value {
-        self.inner.metadata()
-    }
-    fn get(&self, family: &str, id: &str) -> Result<Option<FactRow>> {
-        let key = format!("{family}:{id}");
-        if let Some(v) = self.cache.lock().unwrap().1.get(&key).cloned() {
-            return Ok(Some(v));
-        }
-        let value = self.inner.get(family, id)?;
-        if let Some(v) = &value {
-            let n = serde_json::to_vec(v)?.len();
-            if n < 128 * 1024 {
-                let mut c = self.cache.lock().unwrap();
-                if c.0 + n > 1024 * 1024 {
-                    c.0 = 0;
-                    c.1.clear();
-                }
-                c.0 += n;
-                c.1.insert(key, v.clone());
-            }
-        }
-        Ok(value)
-    }
-    fn scan(&self, g: &str, a: Option<&str>, n: usize) -> Result<FactBatch> {
-        self.inner.scan(g, a, n)
-    }
-    fn count(&self, g: &str) -> Result<u64> {
-        self.inner.count(g)
-    }
-    fn source_range(&self, f: &str, a: u64, b: u64) -> Result<Vec<u8>> {
-        self.inner.source_range(f, a, b)
-    }
-    fn stats(&self) -> ReadStats {
-        self.inner.stats()
-    }
-}
 impl<'a> Engine<'a> {
     fn value(&self, family: &str, id: &str) -> Result<Option<Value>> {
         Ok(self.reader.get(family, id)?.map(|r| r.value))
@@ -191,36 +144,11 @@ impl<'a> Engine<'a> {
             return Ok(None);
         };
         let path = self.display_path(&f, compact);
-        let pos = if anchor.start <= 8 * 1024 * 1024 && anchor.start <= f.blob.len {
-            let read_end = anchor.start.saturating_add(512).min(f.blob.len);
-            self.reader
-                .source_range(&f.id, 0, read_end)
-                .ok()
-                .map(|bytes| {
-                    let offset = (anchor.start as usize).min(bytes.len());
-                    let prefix = &bytes[..offset];
-                    let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
-                    let line_start = prefix
-                        .iter()
-                        .rposition(|&b| b == b'\n')
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                    let line_end = bytes[offset..]
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map(|i| offset + i)
-                        .unwrap_or(bytes.len());
-                    let col = offset.saturating_sub(line_start) + 1;
-                    let snippet: String = String::from_utf8_lossy(&bytes[line_start..line_end])
-                        .trim()
-                        .chars()
-                        .take(160)
-                        .collect();
-                    (line, col, snippet)
-                })
-        } else {
-            None
-        };
+        let pos = self
+            .reader
+            .source_position(&f.id, anchor.start, f.blob.len)
+            .ok()
+            .flatten();
         Ok(Some((path, pos)))
     }
     fn enclosing_owner(&self, id: &str) -> Result<Option<(Entity, Option<String>)>> {
@@ -318,6 +246,17 @@ impl<'a> Engine<'a> {
             map.insert("id".into(), json!(e.id));
             map.insert("kind".into(), json!(e.kind));
             map.insert("name".into(), json!(e.name));
+            map.insert("unit".into(), json!(e.unit));
+            if let Some(unit) = self.value("unit", &e.unit)? {
+                let unit: BuildUnit = serde_json::from_value(unit)?;
+                map.insert(
+                    "build_context".into(),
+                    super::presentation::symbol_context(&unit),
+                );
+            }
+            if let Some(a) = &e.source {
+                map.insert("file_revision".into(), json!(a.file_revision));
+            }
             if !e.qualified_name.is_empty() && e.qualified_name != e.name {
                 map.insert("qualified_name".into(), json!(e.qualified_name));
             }
@@ -387,6 +326,7 @@ impl<'a> Engine<'a> {
         if compact {
             let mut map = serde_json::Map::new();
             map.insert("kind".into(), json!(o.kind));
+            map.insert("file_revision".into(), json!(o.source.file_revision));
             if let Some((path, pos)) = loc {
                 map.insert("file".into(), json!(path));
                 if let Some((line, col, snippet)) = pos {
@@ -473,6 +413,7 @@ impl<'a> Engine<'a> {
         if let Some(a) = anchor
             && let Some((path, pos)) = self.anchor_location(a, true)?
         {
+            map.insert("file_revision".into(), json!(a.file_revision));
             map.insert("file".into(), json!(path));
             if let Some((line, _, snippet)) = pos {
                 map.insert("line".into(), json!(line));
@@ -514,6 +455,7 @@ impl<'a> Engine<'a> {
             if let Some(a) = anchor
                 && let Some((path, pos)) = self.anchor_location(a, true)?
             {
+                map.insert("file_revision".into(), json!(a.file_revision));
                 map.insert("file".into(), json!(path));
                 if let Some((line, col, snippet)) = pos {
                     map.insert("line".into(), json!(line));
@@ -546,12 +488,19 @@ impl<'a> Engine<'a> {
         if let Some(v) = self.value("context", id)? {
             return Ok(Some(serde_json::from_value(v)?));
         }
-        let p = self.reader.scan("all:context", None, 1000)?;
-        for row in p.rows {
-            let c: AnalysisContext = serde_json::from_value(row.value)?;
-            if c.entry_unit == *id {
-                return Ok(Some(c));
+        let mut after = None;
+        loop {
+            let p = self.reader.scan("all:context", after.as_deref(), 128)?;
+            for row in p.rows {
+                let c: AnalysisContext = serde_json::from_value(row.value)?;
+                if c.entry_unit == *id {
+                    return Ok(Some(c));
+                }
             }
+            if p.complete {
+                break;
+            }
+            after = p.after;
         }
         Err(Error::new("MissingContext", id))
     }
@@ -569,20 +518,24 @@ impl<'a> Engine<'a> {
         }
         if q.kind
             .as_ref()
-            .is_some_and(|k| !e.kind.label().eq_ignore_ascii_case(k))
+            .is_some_and(|k| !super::presentation::kind_matches(e.kind, k))
         {
             return Ok(false);
         }
-        if let Some(path) = &q.file {
+        if q.file.is_some() || q.directory.is_some() {
             let f = e
                 .source
                 .as_ref()
                 .map(|a| self.file(&a.file_revision))
                 .transpose()?
                 .flatten();
+            let (path, directory) = q
+                .file
+                .as_ref()
+                .map(|p| (p, false))
+                .unwrap_or_else(|| (q.directory.as_ref().unwrap(), true));
             if !f.is_some_and(|f| {
-                let p = f.logical_path.display();
-                p == *path || p.ends_with(&format!("/{path}"))
+                crate::ports::facts::path_matches(&f.logical_path.display(), path, directory)
             }) {
                 return Ok(false);
             }
@@ -737,31 +690,33 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        if let Some(path) = &q.file {
-            let mut after = None;
-            let mut result = vec![];
-            loop {
-                let b = self.reader.scan("all:file", after.as_deref(), 256)?;
-                for row in b.rows {
-                    let f: FileRevision = serde_json::from_value(row.value)?;
-                    if f.logical_path.display() == *path
-                        || f.logical_path.display().ends_with(&format!("/{path}"))
-                    {
-                        result.push(group("file_entity", &f.id));
-                    }
-                }
-                if b.complete {
-                    break;
-                }
-                after = b.after;
+        if q.file.is_some() || q.directory.is_some() {
+            let (path, directory) = if let Some(path) = &q.file {
+                (path, false)
+            } else {
+                (q.directory.as_ref().unwrap(), true)
+            };
+            let files = self.reader.named_files(path, directory)?;
+            if !directory && files.is_empty() && !self.reader.named_files(path, true)?.is_empty() {
+                return Err(Error::new(
+                    "DirectoryPassedAsFile",
+                    "file requires an exact file path; use directory for a subtree",
+                ));
             }
-            return Ok(result);
+            return Ok(files.iter().map(|f| group("file_entity", &f.id)).collect());
         }
         if let Some(c) = self.context(q)? {
             return Ok(c.units.iter().map(|u| group("unit", u)).collect());
         }
         if let Some(kind) = &q.kind {
-            return Ok(vec![group("kind_entity", &kind.to_ascii_lowercase())]);
+            return Ok(if kind.eq_ignore_ascii_case("Callable") {
+                vec![
+                    group("kind_entity", "function"),
+                    group("kind_entity", "method"),
+                ]
+            } else {
+                vec![group("kind_entity", &kind.to_ascii_lowercase())]
+            });
         }
         Ok(vec![
             if q.include_external {
@@ -773,27 +728,13 @@ impl<'a> Engine<'a> {
         ])
     }
     fn file_named(&self, path: &str) -> Result<FileRevision> {
-        let mut after = None;
-        let mut found = None;
-        loop {
-            let b = self.reader.scan("all:file", after.as_deref(), 128)?;
-            for row in b.rows {
-                let f: FileRevision = serde_json::from_value(row.value)?;
-                let name = f.logical_path.display();
-                if name == path || name.ends_with(&format!("/{path}")) {
-                    if found.is_some() {
-                        return Err(Error::new("AmbiguousFile", path));
-                    }
-                    found = Some(f);
-                }
-            }
-            if b.complete {
-                break;
-            }
-            after = b.after;
+        let mut files = self.reader.named_files(path, false)?;
+        if files.len() > 1 {
+            return Err(Error::new("AmbiguousFile", path));
         }
-        found.ok_or_else(|| Error::new("MissingFile", path))
+        files.pop().ok_or_else(|| Error::new("MissingFile", path))
     }
+
     fn byte_at(&self, file: &FileRevision, q: &QueryRequest) -> Result<u64> {
         let target = q.line.unwrap_or(1);
         let column = q.column.unwrap_or(1) as u64 - 1;
@@ -1126,6 +1067,9 @@ impl<'a> Engine<'a> {
                     return Ok(None);
                 }
                 if ["search", "semantic", "entrypoints"].contains(&q.operation.as_str()) {
+                    if !disclosure::visible(&e, q) {
+                        return Ok(None);
+                    }
                     let score = self.score(&e, q)?;
                     return Ok((score > 0.).then(|| json!({"id":e.id,"score":score})));
                 }
@@ -1269,6 +1213,30 @@ impl<'a> Engine<'a> {
                     json!({"id":d.id,"kind":d.kind,"title":d.title,"excerpt":d.text.chars().take(200).collect::<String>(),"owner":d.owner,"source":d.source,"links":d.links,"provenance":d.provenance})
                 }))
             }
+            "contexts" => {
+                let c: AnalysisContext = serde_json::from_value(v)?;
+                if q.context
+                    .as_ref()
+                    .is_some_and(|id| c.id != *id && c.entry_unit != *id)
+                {
+                    return Ok(None);
+                }
+                if !q.compact {
+                    return Ok(Some(json!(c)));
+                }
+                let mut row = if let Some(u) = self.value("unit", &c.entry_unit)? {
+                    super::presentation::unit_summary(&serde_json::from_value(u)?)
+                } else {
+                    json!({"entry_unit":c.entry_unit})
+                };
+                row["id"] = json!(c.id);
+                row["entry_unit"] = json!(c.entry_unit);
+                row["status"] = json!(c.status);
+                row["dependency_units"] = json!(c.units.len());
+                row["continue_with"] =
+                    json!({"operation":"contexts","context":c.id,"compact":false});
+                Ok(Some(row))
+            }
             _ => Ok(Some(v)),
         }
     }
@@ -1345,14 +1313,23 @@ impl<'a> Engine<'a> {
                     self.value("unit", &e.unit)?
                         .ok_or_else(|| Error::new("MissingUnit", id))?
                 };
-                vec![json!({"unit":unit})]
+                if q.compact && q.configuration_view == "summary" {
+                    vec![super::presentation::unit_summary(&serde_json::from_value(
+                        unit,
+                    )?)]
+                } else {
+                    vec![json!({"unit":unit})]
+                }
             }
             _ => vec![],
         })
     }
     fn source(&self, q: &QueryRequest) -> Result<Vec<Value>> {
         let mut anchor_start = None;
-        let file = if q.subject.is_some() {
+        let file = if let Some(id) = &q.file_revision {
+            self.file(id)?
+                .ok_or_else(|| Error::new("MissingFile", "unknown frozen file revision"))?
+        } else if q.subject.is_some() {
             let e = self.subject(q)?;
             let a = e
                 .extent
@@ -1616,16 +1593,74 @@ impl<'a> Engine<'a> {
         resume: Option<QueryContinuation>,
     ) -> Result<QueryResult> {
         let request = self.reader.request_view()?;
-        let cached = CachedReader {
-            inner: request.as_deref().unwrap_or(self.reader),
-            cache: std::sync::Mutex::new((0, BTreeMap::new())),
-        };
-        Engine {
+        let inner = request.as_deref().unwrap_or(self.reader);
+        let cache = self.reader.query_cache().unwrap_or_else(|| {
+            Arc::new(crate::ports::facts::ReadCache::new(
+                inner.project(),
+                inner.revision(),
+            ))
+        });
+        let cached = crate::ports::facts::CachedReader::new(inner, cache)?;
+        let mut result = Engine {
             reader: &cached,
             model: self.model.clone(),
             control: self.control,
         }
-        .execute_inner(q, resume)
+        .execute_inner(q, resume)?;
+        if disclosure::is_overview(q) {
+            let engine = Engine {
+                reader: &cached,
+                model: self.model.clone(),
+                control: self.control,
+            };
+            for item in &mut result.page.items {
+                if let Some(id) = item["id"].as_str()
+                    && let Some(e) = engine.entity(id)?
+                {
+                    item["_search_unit"] = json!(e.unit);
+                    item["_search_module"] =
+                        disclosure::module(&e, |id| engine.entity(id))?.unwrap_or(Value::Null);
+                }
+            }
+        }
+        {
+            let deferred = disclosure::apply(&mut result.page, q)?;
+            if !deferred.is_empty() {
+                let mut state = if let Some(c) = result.continuation.take() {
+                    match c.state {
+                        ContinuationState::Store { state, .. } => {
+                            serde_json::from_value::<State>(state)?
+                        }
+                        _ => {
+                            return Err(Error::new(
+                                "InvalidCursor",
+                                "grouped search needs a store cursor",
+                            ));
+                        }
+                    }
+                } else {
+                    State {
+                        exhausted: true,
+                        ranking_done: true,
+                        text: (q.operation == "search" && !q.regex).then(text::TextPlan::finished),
+                        ..Default::default()
+                    }
+                };
+                for item in deferred.into_iter().rev() {
+                    state.pending.push_front(item);
+                }
+                result.continuation = Some(QueryContinuation {
+                    request: q.clone(),
+                    revision: result.page.revision.clone(),
+                    query_digest: request_digest(q),
+                    state: ContinuationState::Store {
+                        project: self.reader.project().into(),
+                        state: serde_json::to_value(state)?,
+                    },
+                });
+            }
+        }
+        Ok(result)
     }
     fn execute_inner(
         &self,
@@ -1666,8 +1701,19 @@ impl<'a> Engine<'a> {
                 "vector retrieval is experimental and disabled by default",
             ));
         }
+        super::presentation::validate_scope(q)?;
         let start = Instant::now();
         self.reader.set_timeout(q.timeout_ms);
+        if let Some(path) = &q.file
+            && ["search", "semantic", "outline"].contains(&q.operation.as_str())
+            && self.reader.named_files(path, false)?.is_empty()
+            && !self.reader.named_files(path, true)?.is_empty()
+        {
+            return Err(Error::new(
+                "DirectoryPassedAsFile",
+                "file requires an exact file path; use directory for a subtree",
+            ));
+        }
         let ctx = self.context(q)?;
         let digest = request_digest(q);
         if q.operation == "search" && !q.regex {
@@ -2036,28 +2082,19 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        let coverage = if q.compact
-            && !matches!(
-                q.operation.as_str(),
-                "coverage" | "capabilities" | "overview"
-            ) {
-            vec![]
-        } else {
+        let coverage = if disclosure::reports_coverage(q) {
             self.reader
                 .scan("all:coverage", None, 3)?
                 .rows
                 .into_iter()
                 .map(|r| serde_json::from_value(r.value).map_err(Into::into))
                 .collect::<Result<_>>()?
+        } else {
+            vec![]
         };
-        let mut gaps: Vec<Gap> = self
-            .reader
-            .scan("all:gaps", None, 7)?
-            .rows
-            .into_iter()
-            .map(|r| serde_json::from_value(r.value).map_err(Into::into))
-            .collect::<Result<_>>()?;
-        gaps.extend(state.extra_gaps.clone());
+        // Query-local failures remain visible; index-wide diagnostics are
+        // available through operation=gaps without taxing every result page.
+        let mut gaps = state.extra_gaps.clone();
         if q.operation == "semantic"
             && !q.exact_semantic
             && state.groups.iter().any(|g| g.starts_with("vector_bucket:"))
@@ -2065,7 +2102,9 @@ impl<'a> Engine<'a> {
             gaps.push(Gap::new("ApproximateVectorCandidates",self.reader.revision(),"LSH candidate retrieval; exact_semantic=true scans the frozen vectors with bounded resumable ranking"));
         }
         let knowledge_partial = self.reader.metadata()["production"]["partial"] == true;
-        if knowledge_partial {
+        let uncertain_absence =
+            knowledge_partial && disclosure::compilation_absence(q, items.is_empty(), complete);
+        if uncertain_absence {
             gaps.push(Gap::new("IncompleteKnowledge",self.reader.project(),"partial compilation coverage: an exhausted query does not establish absence in unavailable scopes"));
         }
         let continuation = if complete {
@@ -2101,7 +2140,7 @@ impl<'a> Engine<'a> {
                 ranking: text.then(|| json!({"policy":"exact_name_then_candidate_windows","scope":"candidate_window","globally_sorted":false})),
                 state: if items.is_empty() {
                     if complete {
-                        if knowledge_partial {
+                        if uncertain_absence {
                             "unknown_due_to_incomplete_compilation"
                         } else {
                             "no_matches_in_declared_scope"

@@ -19,6 +19,91 @@ use std::collections::BTreeSet;
 mod paged_fixture;
 use paged_fixture::{fixture, write};
 #[test]
+fn large_frozen_catalogue_detects_directory_misuse_within_query_budget() {
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let h = StoreHost::open(t.path(), "paged-test").unwrap();
+    let mut snapshot = fixture(&store, 2, 1);
+    let mut files = snapshot.sources.files.clone();
+    for i in 0..10000 {
+        let mut file = files[0].clone();
+        file.logical_path = NativeValue::new(format!("/frozen/repo/src/file{i}.rs"));
+        file.id = digest(&serde_json::to_vec(&(&file.logical_path, &file.blob)).unwrap());
+        files.push(file);
+    }
+    snapshot.sources = SourceSnapshot::seal(files, InputBinding::ImmutableScopeVerified, vec![]);
+    snapshot.seal().unwrap();
+    let revision = write(&h.objects, &store, &snapshot, None);
+    assert_eq!(h.publish(&revision, None).outcome, CommitOutcome::Committed);
+    let view = h.open_view(None).unwrap();
+    let started = std::time::Instant::now();
+    let error = Engine {
+        reader: &view,
+        model: None,
+        control: None,
+    }
+    .execute(
+        &QueryRequest {
+            operation: "search".into(),
+            text: "f0".into(),
+            file: Some("src".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code(), "DirectoryPassedAsFile", "{error}");
+    eprintln!(
+        "10001-file catalogue: {:?}; native queries: {}",
+        started.elapsed(),
+        view.stats().database_queries
+    );
+}
+#[test]
+fn payload_locality_keeps_authenticated_keyset_order_across_page_sizes() {
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let h = StoreHost::open(t.path(), "paged-test").unwrap();
+    let mut snapshot = fixture(&store, 200, 1);
+    for entity in &mut snapshot.entities {
+        entity.attributes.insert("padding".into(), "p".repeat(8192));
+    }
+    snapshot.seal().unwrap();
+    let r = write(&h.objects, &store, &snapshot, None);
+    assert_eq!(h.publish(&r, None).outcome, CommitOutcome::Committed);
+    let view = h.open_view(None).unwrap();
+    let collect = |size| {
+        let mut after = None;
+        let mut rows = vec![];
+        loop {
+            let batch = view.scan("all:entity", after.as_deref(), size).unwrap();
+            rows.extend(batch.rows.into_iter().map(|row| {
+                let id = row.key.strip_prefix("entity:").unwrap();
+                let direct = view.get("entity", id).unwrap().unwrap();
+                assert_eq!(row.reference, direct.reference);
+                assert_eq!(row.value, direct.value);
+                (row.key, row.reference)
+            }));
+            if batch.complete {
+                break;
+            }
+            assert_ne!(after, batch.after);
+            after = batch.after;
+        }
+        rows
+    };
+    let small = collect(7);
+    let large = collect(131);
+    assert_eq!(small, large);
+    assert_eq!(small.len(), snapshot.entities.len());
+    let keys: Vec<_> = small
+        .iter()
+        .map(|(key, _)| digest(key.as_bytes()))
+        .collect();
+    assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+}
+#[test]
 fn resolve_restores_first_publication_registration_without_reindexing() {
     let t = tempfile::tempdir().unwrap();
     let store = LocalStore::open(t.path()).unwrap();

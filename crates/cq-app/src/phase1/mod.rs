@@ -52,6 +52,8 @@ impl Options {
                 "--include-candidates",
                 "--include-external",
                 "--auto-refresh",
+                "--compact",
+                "--full-output",
                 "--watch",
                 "--help",
             ]
@@ -279,9 +281,10 @@ pub fn run(args: Vec<OsString>) -> Result<(Value, i32)> {
             Ok((json!({"state":"repl_closed"}), 0))
         }
         "mcp" => {
-            let compact = options.yes("--compact")
-                || std::env::var("CQ_MCP_COMPACT")
-                    .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            let compact = !options.yes("--full-output")
+                && (options.yes("--compact")
+                    || std::env::var("CQ_MCP_COMPACT")
+                        .map_or(true, |v| v != "0" && !v.eq_ignore_ascii_case("false")));
             mcp::run(service, options.yes("--auto-refresh"), compact)?;
             Ok((Value::Null, 0))
         }

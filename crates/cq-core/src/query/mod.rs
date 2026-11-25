@@ -1,18 +1,33 @@
 pub mod architecture;
+mod disclosure;
 pub mod embeddings;
 mod engine;
 pub mod paged;
+pub mod presentation;
 pub mod search;
 use crate::model::*;
 pub use engine::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn is_summary(v: &str) -> bool {
+    v == "summary"
+}
+
 pub(crate) type AnchorLocation = (String, Option<(usize, usize, String)>);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchView {
+    Overview,
+    #[default]
+    Symbols,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QueryRequest {
+    pub search_view: SearchView,
     pub authority: Option<Authority>,
     pub mode: String,
     pub document_kind: Option<String>,
@@ -23,6 +38,12 @@ pub struct QueryRequest {
     pub text: String,
     pub context: Option<String>,
     pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// Compact summaries are the default; raw compiler arguments are opt-in.
+    #[serde(skip_serializing_if = "is_summary")]
+    pub configuration_view: String,
+    pub file_revision: Option<String>,
     pub kind: Option<String>,
     pub relation: Option<String>,
     pub direction: String,
@@ -45,6 +66,7 @@ pub struct QueryRequest {
 impl Default for QueryRequest {
     fn default() -> Self {
         Self {
+            search_view: SearchView::Symbols,
             authority: None,
             mode: "calls".into(),
             document_kind: None,
@@ -55,6 +77,9 @@ impl Default for QueryRequest {
             text: String::new(),
             context: None,
             file: None,
+            directory: None,
+            configuration_view: "summary".into(),
+            file_revision: None,
             kind: None,
             relation: None,
             direction: "outbound".into(),
@@ -115,6 +140,7 @@ impl QueryPage {
             map.insert("ranking".into(), ranking.clone());
         }
         map.insert("state".into(), serde_json::json!(self.state));
+        map.insert("total_kind".into(), serde_json::json!(self.total_kind));
         if !self.coverage.is_empty() {
             map.insert("coverage".into(), serde_json::json!(self.coverage));
         }

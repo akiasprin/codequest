@@ -108,6 +108,28 @@ search {"text":"matched","file":"crates/printer/src/json.rs","kind":"Method"}
 trace {"subject":"完整实体ID","depth":5,"include_candidates":true}
 ```
 
+MCP 默认返回紧凑结果，保留版本、构建上下文、影响当前查询的缺口、计数含义及续页入口。普通查询不附带全局缺口样本；完整索引诊断通过 `gaps`／`coverage` 单独查询。编译覆盖不完整且语义查询穷尽后仍无结果时，明确返回无法确认，不能据此宣称不存在。单次查询传 `compact: false` 可查看完整来源和字节位置。启动时传 `--full-output` 或设置 `CQ_MCP_COMPACT=0` 可使用完整输出作为默认值。
+
+MCP 的 `search_graph` 默认先展示声明概览：按编译器模块组织，没有模块事实时明确按源码文件组织；每组展示最多三个声明。参数、局部变量和 body 先收起，可用返回的 `continue_with` 展开，或传 `search_view: "symbols"` 查询完整平铺结果。指定 `kind`、`file` 或 `directory` 时默认返回平铺结果，也可显式选择概览。分组及收起数量只针对当前页，不代表模块总数，不跨编译实例合并。分组包装也计入字节预算；大页放不下时自动缩短本页，将其余声明放入续页，而不是丢弃或要求 Agent 重新搜索。CLI／REPL 可用 JSON 参数 `search_view: "overview"`，CLI 也支持 `--search-view overview`。分页的 `limit` 仍按匹配声明计数；概览不改变事实、可达性或完整符号查询的结果。
+
+紧凑符号结果包含 `unit` 和 `build_context`（crate、target、role、features、test、显式 cfg），同名声明的编译变体分别保留。需要特定编译配置时，先查看 `contexts`，再显式传 `context`；不能依据返回顺序选择目标架构。`build_configuration` 默认返回扁平摘要，完整编译参数用 `configuration_view: "full"` 或 `compact: false` 查看。
+
+`file` 只匹配文件路径或路径后缀，子树查询使用 `directory`，二者互斥；把已索引目录传给 `file` 会返回 `DirectoryPassedAsFile`。`kind: "Function"` 保持只匹配函数，`kind: "Callable"` 同时匹配函数和方法；精确同名声明被类型过滤排除时，结果附带局部提示。指定文件的语义查询会检查语言覆盖：支持但本版本未索引时返回 `language_not_indexed`，不支持时返回 `unsupported_semantic_language`，均不表示符号不存在；可改用冻结源码读取或文本检索。
+
+`changes` 和 `compare` 的路径集合按 `max_bytes` 与 `limit` 分页，`counts` 为本次完整采样各集合的数量；沿 `next_cursor` 获取同一次采样的后续记录，续页不会重新扫描工作区。状态和其他 MCP 读取响应同样遵守字节预算，预算不足会明确返回错误。
+
+分页查询的行号与片段使用源码前缀和换行索引缓存，按 64 KiB 合并读取；源码缓冲与换行索引的缓存额度合计最多 8 MiB（键和容器元数据另计），读取仍经过冻结证据的原有校验。当前只为源码前 8 MiB 提供该位置展示，未缓存部分不据此宣称不存在。
+
+同一服务按项目和不可变 revision 复用有界查询缓存，最多保留两个版本：文件目录最多 32 MiB／65536 文件，事实最多 4 MiB／8192 项，已验证查询页最多 8 MiB／512 页，分组计数最多 4096 项。键和容器开销另计；失败读取不缓存为缺失，跨版本不会复用。首次文件查询需要加载冻结文件目录，后续查询复用目录及已验证页。
+
+MCP 查询可附带最多两个冻结源码窗口，总计不超过 4 KiB，包含文件版本、字节范围及证据 ID。窗口默认显示定位点前后各四行，`complete_control_flow: false` 明确表示没有证明完整条件分支；需要时沿 `continue_with` 展开。`evidence: false` 关闭附带窗口，`context_lines` 调整上下文。
+
+`get_code_snippet` 默认读取 24 行并合并为源码块，`file_revision` 可直接定位图里返回的冻结文件；`source_view: "lines"` 保留逐行表示。同一 MCP 连接按项目、仓库版本及冻结文件版本记录已交付的行，重叠请求只返回新增文本和 `reused` 证据引用；完全重叠时可直接使用会话回执。`force_repeat: true` 强制重读，`dedup: false` 关闭去重。上下文压缩后可调用 `query_codequest` 的 `reset_evidence` 操作清除回执。回执只记录交付情况，不写进事实图；失败或超出输出预算的响应不提交回执。源码回执最多保留 4096 行，文件别名最多 256 个，续页显示选项最多 128 个；达到容量时重新交付内容，不把未缓存内容当作不存在。源码交付、回执重置及写操作按请求顺序执行，并等待此前的导航完成，以保证引用的证据先于回执交付。显式 `evidence: false` 的独立符号搜索最多四项并行，可按 JSON-RPC ID 乱序返回；其他操作保持有序。
+
+独立查询可一次发送 `query_codequest {"project":"NAME","queries":[{"operation":"callers","subject":"ID1"},{"operation":"references","subject":"ID2"}]}`，源码可用 `get_code_snippet {"project":"NAME","ranges":[{"file_revision":"FILE_ID","line":120,"max_lines":16},{"file":"src/other.rs","line":30,"max_lines":12}]}`。每批最多八项，共用固定版本、时间与输出预算；每项分别返回 `ok`、`error` 或 `deferred`。未执行或未交付的项保留 `continue_with`，不能把部分完成当作查全。批量操作仅接受读取，索引、删除和标注写入不在批量入口内。
+
+各 MCP 工具仅公布相关参数，原有调用和扩展参数仍可使用。默认精简重复诊断信息；`diagnostics: true` 保留读取统计，`compact: false` 查看完整表示。缺口详情通过 `gaps` 操作按需读取；查询自身遇到的读取失败或不确定性仍随结果返回。`investigate` MCP 提示模板提供使用约定：文本定位使用宿主的 Grep／Read，类型消歧、精确引用和多跳关系使用 CodeQuest；先给结论与关键证据，再按需展开理由，始终明示未确认部分。
+
 终端中按 `Ctrl+C`：正在查询时请求取消，空闲时退出；也可输入 `quit` 或按 `Ctrl+D` 退出。活客户端的空闲会话保留固定版本，并为仍有效的会话租约续期。共享 StoreHost 使用独立进程组，一个终端的中断或退出不会终止其他客户端。
 
 交互终端会显示启动阶段、耗时、已就绪状态和 `cq[项目]>` 提示符；慢查询每两秒提示等待时间。提示写入 stderr，stdout 保留 JSON 响应。后台 StoreHost 的启动、慢请求和错误日志保存在 store 目录的 `store-host.log`。
@@ -120,6 +142,8 @@ target/release/cq index --root /path/to/cxx-repo --language cpp --name cpp-demo 
 ```
 
 C/C++ 会真实重放 compilation database 中的编译命令，包含原有编译输出的写入。应使用项目自己的分析构建目录。索引也会执行项目的 build script、proc macro 或 Go 构建工具。
+
+Rust 原生静态关系同时携带两端的编译器身份、定义种类和来源位置。宏生成成员没有独立符号行时，按 HIR 明确提供的端点信息补充声明；同键候选可由精确来源位置消歧。端点缺失记录为 `StaticRelationBindingMissing`，仍有多个解释时记录为 `StaticRelationBindingAmbiguous`，不按名称或任取一个候选建立关系。
 
 ### 大仓库索引与检索
 

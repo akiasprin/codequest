@@ -300,3 +300,361 @@ fn text_first_page_prioritizes_exact_names_and_keeps_lexical_continuations() {
     );
     assert!(all.iter().skip(1).all(|r| r["match_tier"] == "lexical"));
 }
+
+#[test]
+fn overview_groups_compiler_modules_preserves_expansion_and_scope_in_both_engines() {
+    use cq_core::{
+        ports::ContentReader,
+        query::{QueryEngine, SearchView},
+    };
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let h = StoreHost::open(t.path(), "paged-test").unwrap();
+    let mut s = fixture::fixture(&store, 18, 1);
+    for (i, e) in s.entities.iter_mut().enumerate() {
+        e.name = "dns".into();
+        e.qualified_name = format!("module_{}::dns_{i}", i % 2);
+        e.kind = if i < 2 {
+            EntityKind::Module
+        } else if i < 12 {
+            EntityKind::Parameter
+        } else {
+            EntityKind::Function
+        };
+        if i >= 2 {
+            e.parent = Some(format!("f{}", i % 2));
+        }
+        e.source = Some(SourceAnchor {
+            file_revision: s.sources.files[0].id.clone(),
+            start: 0,
+            end: 3,
+        });
+        e.unit = if i == 17 { "different-config" } else { "unit" }.into();
+    }
+    s.seal().unwrap();
+    let r = fixture::write(&h.objects, &store, &s, None);
+    assert_eq!(h.publish(&r, None).outcome, CommitOutcome::Committed);
+    let view = h.open_view(None).unwrap();
+    let memory = QueryEngine::new(&s, &store.content as &dyn ContentReader);
+    let engine = Engine {
+        reader: &view,
+        model: None,
+        control: None,
+    };
+    let q = QueryRequest {
+        operation: "search".into(),
+        text: "dns".into(),
+        compact: true,
+        search_view: SearchView::Overview,
+        limit: 100,
+        ..Default::default()
+    };
+    for result in [
+        memory.execute(&q, None).unwrap(),
+        engine.execute(&q, None).unwrap(),
+    ] {
+        let p = result.page;
+        assert_eq!(
+            p.items.len(),
+            3,
+            "configurations must not be merged: {:?}",
+            p.items
+        );
+        assert_eq!(
+            p.items
+                .iter()
+                .map(|g| g["matches_in_page"].as_u64().unwrap())
+                .sum::<u64>(),
+            8
+        );
+        assert!(p.items.iter().all(|g| g["kind"] == "ModuleMatches"));
+        assert!(
+            p.items
+                .iter()
+                .flat_map(|g| g["symbols"].as_array().unwrap())
+                .all(|e| e["kind"] != "Parameter")
+        );
+        assert!(
+            p.items
+                .iter()
+                .any(|g| g["collapsed_in_page"].as_u64().unwrap() > 0)
+        );
+        let hidden = p
+            .hidden
+            .iter()
+            .find(|h| h.category == "local_symbols")
+            .unwrap();
+        assert_eq!(hidden.count, None);
+        let expand: QueryRequest = serde_json::from_value(hidden.continue_with.clone()).unwrap();
+        let all = collect(&view, &expand).0;
+        assert_eq!(all.len(), 18, "all local facts remain reachable");
+        for g in &p.items {
+            let expand: QueryRequest = serde_json::from_value(g["continue_with"].clone()).unwrap();
+            assert_eq!(expand.search_view, SearchView::Symbols);
+            assert_eq!(collect(&view, &expand).0.len(), 18);
+        }
+    }
+    let mut narrow = q.clone();
+    narrow.kind = Some("Parameter".into());
+    let p = engine.execute(&narrow, None).unwrap().page;
+    assert_eq!(
+        p.items
+            .iter()
+            .map(|g| g["matches_in_page"].as_u64().unwrap())
+            .sum::<u64>(),
+        10
+    );
+    assert!(!p.hidden.iter().any(|h| h.category == "local_symbols"));
+    let mut tiny = q.clone();
+    tiny.limit = 1;
+    tiny.max_work = 2;
+    let rows = collect(&view, &tiny).0;
+    assert_eq!(
+        rows.iter()
+            .map(|g| g["matches_in_page"].as_u64().unwrap())
+            .sum::<u64>(),
+        8
+    );
+    let first = engine.execute(&tiny, None).unwrap();
+    if let Some(cursor) = first.continuation {
+        let mut changed = tiny.clone();
+        changed.search_view = SearchView::Symbols;
+        assert_eq!(
+            engine.execute(&changed, Some(cursor)).err().unwrap().code(),
+            "StaleCursor"
+        );
+    }
+}
+
+#[test]
+fn paged_line_positions_share_one_verified_source_read() {
+    use cq_core::ports::ContentRepository;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    struct Count<'a> {
+        inner: &'a dyn FactReader,
+        reads: AtomicU64,
+        bytes: AtomicU64,
+    }
+    impl FactReader for Count<'_> {
+        fn project(&self) -> &str {
+            self.inner.project()
+        }
+        fn revision(&self) -> &str {
+            self.inner.revision()
+        }
+        fn metadata(&self) -> &Value {
+            self.inner.metadata()
+        }
+        fn get(&self, f: &str, id: &str) -> cq_core::Result<Option<FactRow>> {
+            self.inner.get(f, id)
+        }
+        fn scan(&self, g: &str, a: Option<&str>, n: usize) -> cq_core::Result<FactBatch> {
+            self.inner.scan(g, a, n)
+        }
+        fn count(&self, g: &str) -> cq_core::Result<u64> {
+            self.inner.count(g)
+        }
+        fn source_range(&self, f: &str, a: u64, b: u64) -> cq_core::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.bytes.fetch_add(b - a, Ordering::Relaxed);
+            self.inner.source_range(f, a, b)
+        }
+        fn stats(&self) -> ReadStats {
+            self.inner.stats()
+        }
+    }
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let host = StoreHost::open(t.path(), "paged-test").unwrap();
+    let mut s = fixture::fixture(&store, 200, 1);
+    let text = "let value = 1;\n".repeat(20000);
+    let f = &mut s.sources.files[0];
+    f.blob = store.content.put(text.as_bytes(), 1024 * 1024).unwrap();
+    f.id = digest(&serde_json::to_vec(&(&f.logical_path, &f.blob)).unwrap());
+    for (i, e) in s.entities.iter_mut().enumerate() {
+        e.source = Some(SourceAnchor {
+            file_revision: f.id.clone(),
+            start: 200000 + i as u64,
+            end: 200001 + i as u64,
+        });
+    }
+    let file = f.logical_path.display();
+    s.seal().unwrap();
+    let rev = fixture::write(&host.objects, &store, &s, None);
+    assert_eq!(host.publish(&rev, None).outcome, CommitOutcome::Committed);
+    let view = host.open_view(None).unwrap();
+    let count = Count {
+        inner: &view,
+        reads: AtomicU64::new(0),
+        bytes: AtomicU64::new(0),
+    };
+    let engine = Engine {
+        reader: &count,
+        model: None,
+        control: None,
+    };
+    let q = QueryRequest {
+        operation: "outline".into(),
+        file: Some(file),
+        compact: true,
+        limit: 200,
+        max_bytes: 1024 * 1024,
+        timeout_ms: 60000,
+        ..Default::default()
+    };
+    let page = engine.execute(&q, None).unwrap().page;
+    assert_eq!(page.items.len(), 200);
+    assert!(page.items.iter().all(|e| e["line"].as_u64().is_some()));
+    assert_eq!(count.reads.load(Ordering::Relaxed), 1);
+    let after = count.bytes.load(Ordering::Relaxed);
+    let before = (0..200u64).map(|i| 200000 + i + 512).sum::<u64>();
+    assert!(after * 100 < before);
+    println!(
+        "LINE_READ_BENEFIT {}",
+        serde_json::json!({"results":200,"legacy_prefix_bytes":before,
+        "cached_requested_bytes":after,"source_range_calls":count.reads.load(Ordering::Relaxed)})
+    );
+}
+
+#[test]
+fn grouped_byte_budget_requeues_every_declaration_in_both_engines() {
+    use cq_core::query::{QueryEngine, SearchView};
+    use std::collections::BTreeSet;
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let host = StoreHost::open(t.path(), "paged-test").unwrap();
+    let mut s = fixture::fixture(&store, 80, 1);
+    for (i, e) in s.entities.iter_mut().enumerate() {
+        e.name = "needle".into();
+        e.qualified_name = format!("module_{i}::needle");
+        e.unit = format!("unit_{i}");
+    }
+    s.seal().unwrap();
+    let r = fixture::write(&host.objects, &store, &s, None);
+    assert_eq!(host.publish(&r, None).outcome, CommitOutcome::Committed);
+    let view = host.open_view(None).unwrap();
+    let memory = QueryEngine::new(&s, &store.content);
+    let paged = Engine {
+        reader: &view,
+        model: None,
+        control: None,
+    };
+    for compact in [false, true] {
+        for regex in [false, true] {
+            let q = QueryRequest {
+                operation: "search".into(),
+                text: "needle".into(),
+                search_view: SearchView::Overview,
+                limit: 60,
+                max_bytes: 8192,
+                compact,
+                regex,
+                ..Default::default()
+            };
+            for engine in 0..2 {
+                let mut cursor = None;
+                let mut ids = vec![];
+                let mut byte_limited = false;
+                for _ in 0..100 {
+                    let r = if engine == 0 {
+                        memory.execute(&q, cursor).unwrap()
+                    } else {
+                        paged.execute(&q, cursor).unwrap()
+                    };
+                    let output = if compact {
+                        r.page.to_compact_json()
+                    } else {
+                        serde_json::to_value(&r.page).unwrap()
+                    };
+                    assert!(serde_json::to_vec(&output).unwrap().len() <= q.max_bytes);
+                    byte_limited |=
+                        r.page.ranking.as_ref().unwrap()["disclosure"]["byte_limited"] == true;
+                    for g in r.page.items {
+                        for e in g["symbols"].as_array().unwrap() {
+                            ids.push(e["id"].as_str().unwrap().to_owned());
+                        }
+                    }
+                    cursor = r.continuation;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                assert!(cursor.is_none(), "continuation must finish");
+                assert!(
+                    byte_limited,
+                    "counterexample must exercise grouped budget deferral"
+                );
+                assert_eq!(
+                    ids.len(),
+                    80,
+                    "lost or repeated declarations: compact={compact} regex={regex} engine={engine}"
+                );
+                assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), 80);
+            }
+        }
+    }
+}
+
+#[test]
+fn frozen_file_identity_reads_are_version_bound_in_both_engines() {
+    use cq_core::{ports::ContentRepository, query::QueryEngine};
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let host = StoreHost::open(t.path(), "paged-test").unwrap();
+    let a = fixture::fixture(&store, 2, 1);
+    let old_file = a.sources.files[0].id.clone();
+    let rev = fixture::write(&host.objects, &store, &a, None);
+    assert_eq!(host.publish(&rev, None).outcome, CommitOutcome::Committed);
+    let old = host.open_view(None).unwrap();
+    let q = QueryRequest {
+        operation: "source".into(),
+        file_revision: Some(old_file.clone()),
+        line: Some(1),
+        max_lines: 2,
+        limit: 2,
+        compact: true,
+        ..Default::default()
+    };
+    let memory = QueryEngine::new(&a, &store.content);
+    let paged = Engine {
+        reader: &old,
+        model: None,
+        control: None,
+    };
+    for p in [
+        memory.execute(&q, None).unwrap().page,
+        paged.execute(&q, None).unwrap().page,
+    ] {
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(p.items[0]["text"], "frozen source\n");
+    }
+    let mut b = a.clone();
+    let f = &mut b.sources.files[0];
+    f.blob = store.content.put(b"changed source\n", 1024).unwrap();
+    f.id = digest(&serde_json::to_vec(&(&f.logical_path, &f.blob)).unwrap());
+    b.seal().unwrap();
+    let next = fixture::write(&host.objects, &store, &b, Some(&rev));
+    assert_eq!(
+        host.publish(&next, Some(&rev.revision)).outcome,
+        CommitOutcome::Committed
+    );
+    let latest = host.open_view(None).unwrap();
+    assert!(
+        Engine {
+            reader: &latest,
+            model: None,
+            control: None
+        }
+        .execute(&q, None)
+        .is_err()
+    );
+    assert!(
+        QueryEngine::new(&b, &store.content)
+            .execute(&q, None)
+            .is_err()
+    );
+    assert_eq!(
+        paged.execute(&q, None).unwrap().page.items[0]["text"],
+        "frozen source\n"
+    );
+}

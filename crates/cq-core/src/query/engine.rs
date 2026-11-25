@@ -249,8 +249,18 @@ impl<'a> QueryEngine<'a> {
             map.insert("id".into(), json!(e.id));
             map.insert("kind".into(), json!(e.kind));
             map.insert("name".into(), json!(e.name));
+            map.insert("unit".into(), json!(e.unit));
+            if let Some(unit) = self.snapshot.units.iter().find(|u| u.id == e.unit) {
+                map.insert(
+                    "build_context".into(),
+                    super::presentation::symbol_context(unit),
+                );
+            }
             if !e.qualified_name.is_empty() && e.qualified_name != e.name {
                 map.insert("qualified_name".into(), json!(e.qualified_name));
+            }
+            if let Some(a) = &e.source {
+                map.insert("file_revision".into(), json!(a.file_revision));
             }
             if let Some(f) = file {
                 map.insert("file".into(), json!(f));
@@ -327,6 +337,7 @@ impl<'a> QueryEngine<'a> {
         if compact {
             let mut map = serde_json::Map::new();
             map.insert("kind".into(), json!(o.kind));
+            map.insert("file_revision".into(), json!(o.source.file_revision));
             if let Some((path, pos)) = loc {
                 map.insert("file".into(), json!(path));
                 if let Some((line, col, snippet)) = pos {
@@ -439,6 +450,7 @@ impl<'a> QueryEngine<'a> {
             if let Some(a) = anchor
                 && let Some((path, pos)) = self.anchor_location(a, true)
             {
+                map.insert("file_revision".into(), json!(a.file_revision));
                 map.insert("file".into(), json!(path));
                 if let Some((line, col, snippet)) = pos {
                     map.insert("line".into(), json!(line));
@@ -477,6 +489,7 @@ impl<'a> QueryEngine<'a> {
         if let Some(a) = anchor
             && let Some((path, pos)) = self.anchor_location(a, true)
         {
+            map.insert("file_revision".into(), json!(a.file_revision));
             map.insert("file".into(), json!(path));
             if let Some((line, _, snippet)) = pos {
                 map.insert("line".into(), json!(line));
@@ -557,7 +570,7 @@ impl<'a> QueryEngine<'a> {
         }
         if q.kind
             .as_ref()
-            .is_some_and(|kind| !e.kind.label().eq_ignore_ascii_case(kind))
+            .is_some_and(|kind| !super::presentation::kind_matches(e.kind, kind))
         {
             return false;
         }
@@ -569,6 +582,17 @@ impl<'a> QueryEngine<'a> {
                 .is_some_and(|f| {
                     let p = f.logical_path.display();
                     p == *file || p.ends_with(&format!("/{file}"))
+                })
+        {
+            return false;
+        }
+        if let Some(directory) = &q.directory
+            && !e
+                .source
+                .as_ref()
+                .and_then(|a| self.file(&a.file_revision))
+                .is_some_and(|f| {
+                    crate::ports::facts::path_matches(&f.logical_path.display(), directory, true)
                 })
         {
             return false;
@@ -692,6 +716,37 @@ impl<'a> QueryEngine<'a> {
         }) {
             return Err(Error::new("MissingContext", "unknown build context"));
         }
+        super::presentation::validate_scope(q)?;
+        let languages: Vec<_> = self.snapshot.units.iter().map(|u| u.language).collect();
+        if let Some(gap) = super::presentation::semantic_file_language(q, &languages) {
+            return Ok(QueryResult {
+                page: super::presentation::unavailable_language_page(
+                    &self.snapshot.revision,
+                    gap,
+                    q,
+                )?,
+                continuation: None,
+            });
+        }
+        if let Some(path) = &q.file
+            && !self
+                .snapshot
+                .sources
+                .files
+                .iter()
+                .any(|f| crate::ports::facts::path_matches(&f.logical_path.display(), path, false))
+            && self
+                .snapshot
+                .sources
+                .files
+                .iter()
+                .any(|f| crate::ports::facts::path_matches(&f.logical_path.display(), path, true))
+        {
+            return Err(Error::new(
+                "DirectoryPassedAsFile",
+                "file requires an exact file path; use directory for a subtree",
+            ));
+        }
         let started = Instant::now();
         let hash = request_digest(q);
         if let Some(c) = &resume
@@ -785,16 +840,41 @@ impl<'a> QueryEngine<'a> {
         if offset > rows.len() {
             return Err(Error::new("InvalidCursor", "row offset out of bounds"));
         }
-        let coverage: Vec<_> = if q.compact
-            && !matches!(
-                q.operation.as_str(),
-                "coverage" | "capabilities" | "overview"
-            ) {
-            vec![]
-        } else {
+        let coverage: Vec<_> = if disclosure::reports_coverage(q) {
             self.snapshot.coverage.iter().take(3).cloned().collect()
+        } else {
+            vec![]
         };
-        let gaps: Vec<_> = self.snapshot.gaps.iter().take(7).cloned().collect();
+        let knowledge_partial = self.snapshot.production.as_ref().is_some_and(|p| p.partial);
+        let uncertain_absence =
+            knowledge_partial && disclosure::compilation_absence(q, rows.is_empty(), complete);
+        // Global gaps are explicitly pageable through operation=gaps, never a
+        // sample attached to unrelated reads (or charged to their byte budget).
+        let mut gaps = if uncertain_absence {
+            vec![Gap::new(
+                "IncompleteKnowledge",
+                &self.snapshot.project,
+                "partial compilation coverage: an exhausted query does not establish absence in unavailable scopes",
+            )]
+        } else {
+            vec![]
+        };
+        if q.operation == "search"
+            && let Some(kind) = &q.kind
+        {
+            let mut scope = q.clone();
+            scope.kind = None;
+            if self.snapshot.entities.iter().any(|e| {
+                (e.name.eq_ignore_ascii_case(&q.text)
+                    || e.qualified_name.eq_ignore_ascii_case(&q.text))
+                    && !super::presentation::kind_matches(e.kind, kind)
+                    && self.selected(e, &scope)
+                    && self.allowed(&e.provenance, q)
+            }) {
+                gaps.push(Gap::new("KindFilterExcludesExactName",q.file.as_deref().unwrap_or(&q.text),
+                    "exact-name matches were excluded by kind; omit kind or use Callable for functions and methods"));
+            }
+        }
         let mut provenance_records = std::collections::BTreeMap::new();
         let metadata = serde_json::to_vec(
             &json!({"revision":self.snapshot.revision,"context":q.context,"coverage":coverage,"gaps":gaps}),
@@ -926,7 +1006,7 @@ impl<'a> QueryEngine<'a> {
                     hidden.push(HiddenGroup{category:"external_entities_in_index".into(),count:Some(count),reason:"project boundary; count is index-wide, query matches may be fewer".into(),continue_with:json!({"operation":q.operation,"subject":q.subject,"text":q.text,"include_external":true})});
                 }
             }
-            if coverage.len() < self.snapshot.coverage.len() {
+            if disclosure::reports_coverage(q) && coverage.len() < self.snapshot.coverage.len() {
                 hidden.push(HiddenGroup {
                     category: "capability_details".into(),
                     count: Some(self.snapshot.coverage.len() - coverage.len()),
@@ -934,18 +1014,8 @@ impl<'a> QueryEngine<'a> {
                     continue_with: json!({"operation":"coverage"}),
                 });
             }
-            if gaps.len() < self.snapshot.gaps.len() {
-                hidden.push(HiddenGroup {
-                    category: "coverage_gaps".into(),
-                    count: Some(self.snapshot.gaps.len() - gaps.len()),
-                    reason:
-                        "progressive disclosure; absence from this page is not absence from the index"
-                            .into(),
-                    continue_with: json!({"operation":"gaps"}),
-                });
-            }
         }
-        Ok(QueryResult {
+        let mut result = QueryResult {
             page: QueryPage {
                 ranking: None,
                 provenance_records,
@@ -953,7 +1023,11 @@ impl<'a> QueryEngine<'a> {
                 context: q.context.clone(),
                 state: if items.is_empty() {
                     if complete {
-                        "no_matches_in_declared_scope"
+                        if uncertain_absence {
+                            "unknown_due_to_incomplete_compilation"
+                        } else {
+                            "no_matches_in_declared_scope"
+                        }
                     } else {
                         "not_exhaustively_searched"
                     }
@@ -973,7 +1047,35 @@ impl<'a> QueryEngine<'a> {
                 elapsed_ms: started.elapsed().as_millis() as u64,
             },
             continuation: next,
-        })
+        };
+        if disclosure::is_overview(q) {
+            for item in &mut result.page.items {
+                if let Some(e) = item["id"].as_str().and_then(|id| self.entity(id)) {
+                    item["_search_unit"] = json!(e.unit);
+                    item["_search_module"] =
+                        disclosure::module(e, |id| Ok(self.entity(id).cloned()))?
+                            .unwrap_or(Value::Null);
+                }
+            }
+        }
+        {
+            let deferred = disclosure::apply(&mut result.page, q)?;
+            if !deferred.is_empty() {
+                result.continuation = Some(QueryContinuation {
+                    request: q.clone(),
+                    revision: result.page.revision.clone(),
+                    query_digest: request_digest(q),
+                    state: ContinuationState::Rows {
+                        rows: deferred,
+                        offset: 0,
+                        total: result.page.total,
+                        complete: true,
+                        after: result.continuation.take().map(|c| Box::new(c.state)),
+                    },
+                });
+            }
+        }
+        Ok(result)
     }
     fn rows(
         &self,
@@ -1059,13 +1161,42 @@ impl<'a> QueryEngine<'a> {
                             .and_then(|e| self.snapshot.units.iter().find(|u| u.id == e.unit))
                     })
                     .ok_or_else(|| Error::new("MissingUnit", subject))?;
-                result.push(json!({"unit":unit,"dependencies":self.snapshot.build_dependencies.iter().filter(|d|d.consumer==unit.id).collect::<Vec<_>>()}));
+                result.push(if q.compact && q.configuration_view == "summary" { super::presentation::unit_summary(unit) }
+                    else { json!({"unit":unit,"dependencies":self.snapshot.build_dependencies.iter().filter(|d|d.consumer==unit.id).collect::<Vec<_>>()}) });
             }
             "capabilities" | "coverage" => {
                 result = self.snapshot.coverage.iter().map(|c| json!(c)).collect()
             }
             "gaps" => result = self.snapshot.gaps.iter().map(|g| json!(g)).collect(),
-            "contexts" => result = self.snapshot.contexts.iter().map(|c| json!(c)).collect(),
+            "contexts" => {
+                result = self
+                    .snapshot
+                    .contexts
+                    .iter()
+                    .filter(|c| {
+                        q.context
+                            .as_ref()
+                            .is_none_or(|id| c.id == *id || c.entry_unit == *id)
+                    })
+                    .map(|c| {
+                        if !q.compact {
+                            return json!(c);
+                        }
+                        let mut v = self
+                            .snapshot
+                            .units
+                            .iter()
+                            .find(|u| u.id == c.entry_unit)
+                            .map(super::presentation::unit_summary)
+                            .unwrap_or(json!({}));
+                        v["id"] = json!(c.id);
+                        v["entry_unit"] = json!(c.entry_unit);
+                        v["status"] = json!(c.status);
+                        v["dependency_units"] = json!(c.units.len());
+                        v
+                    })
+                    .collect()
+            }
             "hotspots" => result = architecture::hotspots(graph),
             "cycles" => result = architecture::cycles(graph),
             "clusters" => result = architecture::clusters(graph),
@@ -1115,6 +1246,7 @@ impl<'a> QueryEngine<'a> {
                     if (!q.include_external && e.external)
                         || !self.selected(e, q)
                         || !self.allowed(&e.provenance, q)
+                        || !disclosure::visible(e, q)
                     {
                         continue;
                     }
@@ -1421,7 +1553,14 @@ impl<'a> QueryEngine<'a> {
                 result = entries.into_iter().map(|(_, v)| v).collect();
             }
             "source" | "search_code" => {
-                let files: Vec<_> = if q.operation == "source" && q.subject.is_some() {
+                let files: Vec<_> = if q.operation == "source" && q.file_revision.is_some() {
+                    vec![
+                        self.file(q.file_revision.as_deref().unwrap())
+                            .ok_or_else(|| {
+                                Error::new("MissingFile", "unknown frozen file revision")
+                            })?,
+                    ]
+                } else if q.operation == "source" && q.subject.is_some() {
                     let e = self.subject(q)?;
                     vec![
                         self.file(

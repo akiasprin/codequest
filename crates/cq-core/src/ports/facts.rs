@@ -2,6 +2,10 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+mod cache;
+pub(crate) mod locations;
+pub use cache::{CachedReader, ReadCache};
+pub type SourcePosition = (usize, usize, String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectRef {
@@ -38,6 +42,27 @@ pub struct FactBatch {
 /// A view cannot be modified after admission. Implementations bind every read
 /// to these coordinates and retain an execution pin for the reader's lifetime.
 pub trait FactReader: Send + Sync {
+    fn query_cache(&self) -> Option<std::sync::Arc<ReadCache>> {
+        None
+    }
+    /// Exact file/suffix lookup, or an explicit directory scope. No live reads.
+    fn named_files(&self, path: &str, directory: bool) -> Result<Vec<crate::model::FileRevision>> {
+        let mut result = vec![];
+        let mut after = None;
+        loop {
+            let b = self.scan("all:file", after.as_deref(), 256)?;
+            for row in b.rows {
+                let f: crate::model::FileRevision = serde_json::from_value(row.value)?;
+                if path_matches(&f.logical_path.display(), path, directory) {
+                    result.push(f);
+                }
+            }
+            if b.complete {
+                return Ok(result);
+            }
+            after = b.after;
+        }
+    }
     /// A request budget includes queueing and native database acquisition.
     fn set_timeout(&self, _timeout_ms: u64) {}
     /// Derive a request pin from an already admitted session. Implementations
@@ -52,7 +77,23 @@ pub trait FactReader: Send + Sync {
     fn scan(&self, group: &str, after: Option<&str>, limit: usize) -> Result<FactBatch>;
     fn count(&self, group: &str) -> Result<u64>;
     fn source_range(&self, file: &str, start: u64, end: u64) -> Result<Vec<u8>>;
+    /// Derived coordinates over immutable evidence; UTF-8 byte columns, one-based.
+    /// Implementations may cache prefixes without changing source verification.
+    fn source_position(&self, file: &str, offset: u64, len: u64) -> Result<Option<SourcePosition>> {
+        locations::SourceLocations::default()
+            .lookup(file, offset, len, |a, b| self.source_range(file, a, b))
+    }
     fn stats(&self) -> ReadStats;
+}
+
+pub fn path_matches(path: &str, scope: &str, directory: bool) -> bool {
+    if directory {
+        let scope = scope.trim_end_matches('/');
+        path.starts_with(&format!("{scope}/"))
+            || !scope.starts_with('/') && path.contains(&format!("/{scope}/"))
+    } else {
+        path == scope || path.ends_with(&format!("/{scope}"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

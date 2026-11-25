@@ -867,101 +867,102 @@ pub(super) fn native_graph_in_context(
         all_keys.entry(key).or_default().extend(ids.clone());
     }
     for relation in list(raw, "relations") {
-        let unit = files
-            .get(&n(relation, "file"))
-            .map(|(_, u)| u.clone())
-            .unwrap_or_default();
-        let from_candidates = semantic_keys
-            .get(&(unit.clone(), s(relation, "from")))
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|id| {
-                relation["from_definition_kind"].as_str().is_none_or(|tag| {
-                    snapshot.entities[entity_index[id]]
-                        .attributes
+        let mut endpoints = Vec::new();
+        let mut counts = Vec::new();
+        for side in ["from", "to"] {
+            let key = s(relation, side);
+            // The relation's owning file can differ from either declaration.
+            // Missing optional file IDs must not accidentally select file 0.
+            let file_id = relation[format!("{side}_file")].as_u64().or_else(|| {
+                (side == "from")
+                    .then(|| relation["file"].as_u64())
+                    .flatten()
+            });
+            let endpoint_unit = file_id.and_then(|id| files.get(&id)).map(|(_, u)| u);
+            let source = anchor(&relation[format!("{side}_source")], &files);
+            let definition_kind = relation[format!("{side}_definition_kind")].as_str();
+            let mut candidates = if let Some(unit) = endpoint_unit {
+                semantic_keys
+                    .get(&(unit.clone(), key.clone()))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                all_keys.get(key.as_str()).cloned().unwrap_or_default()
+            };
+            candidates.retain(|id| {
+                let e = &snapshot.entities[entity_index[id]];
+                definition_kind.is_none_or(|tag| {
+                    e.attributes
                         .get("definition_kind")
                         .is_some_and(|actual| actual == tag)
-                })
-            })
-            .collect::<Vec<_>>();
-        let from = if from_candidates.len() == 1 {
-            Some(from_candidates[0].clone())
-        } else {
-            None
-        };
-        let target_unit = files.get(&n(relation, "to_file")).map(|(_, u)| u);
-        let key = s(relation, "to");
-        let mut to = if let Some(unit) = target_unit {
-            semantic_keys
-                .get(&(unit.clone(), key))
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            all_keys.get(key.as_str()).cloned().unwrap_or_default()
-        };
-        to.retain(|id| {
-            relation["to_definition_kind"].as_str().is_none_or(|tag| {
-                snapshot.entities[entity_index[id]]
-                    .attributes
-                    .get("definition_kind")
-                    .is_some_and(|actual| actual == tag)
-            })
-        });
-        to.sort();
-        to.dedup();
-        if to.is_empty() {
-            let key = s(relation, "to");
-            if !key.is_empty() {
-                let source = anchor(&relation["to_source"], &files);
-                let target_unit = target_unit.cloned().unwrap_or_else(|| "external".into());
-                let id = native_relation_target_id(&target_unit, &key, &source)?;
+                }) && source.as_ref().is_none_or(|a| e.source.as_ref() == Some(a))
+            });
+            candidates.sort();
+            candidates.dedup();
+            // HIR can describe generated impl members that have no source-token
+            // row. Materialize only the producer's exact endpoint identity and
+            // coordinates, never a name-based guess or an arbitrary candidate.
+            if candidates.is_empty()
+                && !key.is_empty()
+                && (side == "to" || relation["from_kind"].is_string())
+            {
+                let endpoint_unit = endpoint_unit.cloned().unwrap_or_else(|| "external".into());
+                let id = native_relation_target_id(&endpoint_unit, &key, &source)?;
                 if !entity_index.contains_key(&id) {
+                    let mut attributes = BTreeMap::new();
+                    if let Some(tag) = definition_kind {
+                        attributes.insert("definition_kind".into(), tag.into());
+                    }
+                    attributes.insert("native_relation_endpoint".into(), "true".into());
                     entity_index.insert(id.clone(), snapshot.entities.len());
                     snapshot.entities.push(Entity {
                         stable_handle: None,
                         locations: Default::default(),
                         id: id.clone(),
-                        unit: target_unit,
+                        unit: endpoint_unit,
                         provider_id: key,
-                        name: s(relation, "to_name"),
-                        qualified_name: s(relation, "to_qn"),
-                        kind: kind(&s(relation, "to_kind")),
+                        name: s(relation, &format!("{side}_name")),
+                        qualified_name: s(relation, &format!("{side}_qn")),
+                        kind: kind(&s(relation, &format!("{side}_kind"))),
                         source,
                         extent: None,
-                        signature: s(relation, "to_signature"),
+                        signature: s(relation, &format!("{side}_signature")),
                         parent: None,
-                        external: relation["to_external"].as_bool().unwrap_or(true),
+                        external: relation[format!("{side}_external")]
+                            .as_bool()
+                            .unwrap_or(true),
                         exported: false,
-                        attributes: BTreeMap::new(),
+                        attributes,
                         type_definitions: vec![],
                         type_navigation: vec![],
                         provenance: prov_id.clone(),
                     });
                 }
-                to.push(id);
+                candidates.push(id);
             }
+            counts.push(candidates.len());
+            endpoints.push((candidates.len() == 1).then(|| candidates[0].clone()));
         }
-        if from.is_none() || to.len() != 1 {
+        let from = endpoints[0].clone();
+        let to = endpoints[1].clone();
+        if counts.iter().any(|n| *n != 1) {
             snapshot.gaps.push(Gap::new(
-                "StaticRelationBindingAmbiguous",
-                format!("{provider}:{}", s(relation, "from")),
+                if counts.iter().any(|n| *n > 1) {
+                    "StaticRelationBindingAmbiguous"
+                } else {
+                    "StaticRelationBindingMissing"
+                },
+                from.clone()
+                    .unwrap_or_else(|| format!("{provider}:{}", s(relation, "from"))),
                 format!(
                     "native relationship {} has {} source and {} target interpretations",
                     s(relation, "kind"),
-                    from_candidates.len(),
-                    to.len()
+                    counts[0],
+                    counts[1]
                 ),
             ));
         }
-        if let (Some(from), Some(target)) = (
-            from,
-            if to.len() == 1 {
-                Some(to[0].clone())
-            } else {
-                None
-            },
-        ) {
+        if let (Some(from), Some(target)) = (from, to) {
             let kind = match relation["kind"].as_str() {
                 Some("Implements") => RelationKind::Implements,
                 Some("Overrides") => RelationKind::Overrides,

@@ -18,8 +18,12 @@ pub fn arguments(options: &Options) -> Result<Value> {
         ("--operation", "operation"),
         ("--authority", "authority"),
         ("--mode", "mode"),
+        ("--search-view", "search_view"),
         ("--text", "text"),
         ("--file", "file"),
+        ("--directory", "directory"),
+        ("--configuration-view", "configuration_view"),
+        ("--file-revision", "file_revision"),
         ("--context", "context"),
         ("--kind", "kind"),
         ("--document-kind", "document_kind"),
@@ -105,4 +109,25 @@ pub fn request(operation: &str, args: Value) -> Result<QueryRequest> {
         args["document_kind"] = json!("Rustdoc");
     }
     Ok(serde_json::from_value(args)?)
+}
+
+/// Leave room for cursor hashes and service diagnostics when packing groups.
+/// Saved continuations retain the caller's budget, not this execution allowance.
+pub fn execution_budget(q: &QueryRequest) -> Result<QueryRequest> {
+    let mut run = q.clone();
+    {
+        // Two 64-byte cursor occurrences plus diagnostics fit these bounds.
+        let envelope = if q.compact { 512 } else { 1024 };
+        run.max_bytes = q
+            .max_bytes
+            .checked_sub(envelope)
+            .filter(|n| *n >= 128)
+            .ok_or_else(|| {
+                Error::new(
+                    "OutputBudgetTooSmall",
+                    "grouped output needs room for cursor and diagnostics",
+                )
+            })?;
+    }
+    Ok(run)
 }

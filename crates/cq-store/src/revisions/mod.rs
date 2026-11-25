@@ -1075,8 +1075,8 @@ impl FactReader for View {
             limit,
             &mut self.stats.lock().unwrap(),
         )?;
-        let mut rows = vec![];
-        for (_, key, value) in p.rows {
+        let mut pending = vec![];
+        for (position, (_, key, value)) in p.rows.into_iter().enumerate() {
             let r: FactRef = serde_json::from_value(value)?;
             // A corrupted secondary directory cannot attach a foreign fact.
             let current = tree::get(
@@ -1091,6 +1091,20 @@ impl FactReader for View {
                     "secondary membership mismatch",
                 ));
             }
+            pending.push((position, key, r));
+        }
+        // Secondary keys are hash ordered. Decode each payload page together
+        // instead of repeatedly evicting it while jumping between objects.
+        // Canonical membership was checked above; restore the public key order
+        // after all per-record digests and directory scopes are verified.
+        pending.sort_by(|a, b| {
+            a.2.object
+                .hash
+                .cmp(&b.2.object.hash)
+                .then(a.2.offset.cmp(&b.2.offset))
+        });
+        let mut rows = vec![];
+        for (position, key, r) in pending {
             let row = self.row(key, r)?;
             let family = row
                 .key
@@ -1106,10 +1120,11 @@ impl FactReader for View {
                     "directory scope does not match record",
                 ));
             }
-            rows.push(row);
+            rows.push((position, row));
         }
+        rows.sort_by_key(|(position, _)| *position);
         Ok(FactBatch {
-            rows,
+            rows: rows.into_iter().map(|(_, row)| row).collect(),
             after: p.after,
             complete: p.complete,
         })

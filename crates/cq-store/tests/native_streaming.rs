@@ -284,6 +284,124 @@ fn source_backed_relation_target_without_symbol_row_is_not_lost() {
     compare_mapping(raw.clone(), Language::Rust, true);
     compare(raw, Language::Rust);
 }
+
+fn normalize_relation_fixture(raw: &Value) -> SemanticSnapshot {
+    let t = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(t.path()).unwrap();
+    let mut s = SemanticSnapshot::empty("relation-test".into(), NativeValue::from("/repo"));
+    semantic::normalize::native_graph(
+        &mut s,
+        raw,
+        &[],
+        &store.content,
+        "native-test",
+        Language::Rust,
+        "1",
+    )
+    .unwrap();
+    s
+}
+
+#[test]
+fn generated_relation_source_uses_native_metadata_without_a_symbol_row() {
+    let mut raw = frame();
+    raw["relations"] = json!([{"from":"generated-eq","to":"target","file":0,
+        "from_file":0,"from_source":{"file":0,"start":3,"end":6},
+        "from_kind":"Method","from_name":"eq","from_qn":"Generated::eq",
+        "from_signature":"fn eq(&self, other: &Self) -> bool","from_external":false,
+        "from_definition_kind":"Function","to_file":1,"kind":"Overrides"}]);
+    let s = normalize_relation_fixture(&raw);
+    let source = s
+        .entities
+        .iter()
+        .find(|e| e.provider_id == "generated-eq")
+        .unwrap();
+    assert_eq!(source.kind, EntityKind::Method);
+    assert!(!source.external);
+    assert_eq!(source.source.as_ref().unwrap().start, 3);
+    assert!(
+        s.relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Overrides && r.from == source.id)
+    );
+    assert!(
+        s.gaps
+            .iter()
+            .all(|g| !g.code.starts_with("StaticRelationBinding"))
+    );
+    compare_mapping(raw.clone(), Language::Rust, true);
+    compare(raw, Language::Rust);
+}
+
+#[test]
+fn exact_native_source_disambiguates_endpoints_but_true_duplicates_remain_unresolved() {
+    let mut raw = frame();
+    let mut other = raw["symbols"][0].clone();
+    other["token"] = json!(2);
+    other["definition"] = json!({"file":0,"start":9,"end":15});
+    raw["symbols"].as_array_mut().unwrap().push(other);
+    raw["relations"] = json!([{"from":"run","to":"target","file":0,
+        "from_source":{"file":0,"start":3,"end":6},"to_file":null,"kind":"Overrides"}]);
+    let s = normalize_relation_fixture(&raw);
+    let expected = s
+        .entities
+        .iter()
+        .find(|e| e.provider_id == "run" && e.source.as_ref().is_some_and(|a| a.start == 3))
+        .unwrap();
+    let target = s
+        .entities
+        .iter()
+        .find(|e| e.provider_id == "target")
+        .unwrap();
+    assert!(
+        s.relations.iter().any(|r| r.kind == RelationKind::Overrides
+            && r.from == expected.id
+            && r.to == target.id)
+    );
+    assert!(
+        s.gaps
+            .iter()
+            .all(|g| !g.code.starts_with("StaticRelationBinding"))
+    );
+    compare(raw.clone(), Language::Rust);
+    raw["symbols"][2]["definition"] = raw["symbols"][0]["definition"].clone();
+    let ambiguous = normalize_relation_fixture(&raw);
+    assert!(
+        ambiguous
+            .gaps
+            .iter()
+            .any(|g| g.code == "StaticRelationBindingAmbiguous")
+    );
+    assert!(
+        !ambiguous
+            .relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Overrides)
+    );
+}
+
+#[test]
+fn absent_legacy_relation_source_is_reported_as_missing_not_ambiguous() {
+    let mut raw = frame();
+    raw["relations"] = json!([{"from":"absent-generated-method","to":"target","file":0,"to_file":1,"kind":"Overrides"}]);
+    let s = normalize_relation_fixture(&raw);
+    assert!(
+        s.gaps
+            .iter()
+            .any(|g| g.code == "StaticRelationBindingMissing"
+                && g.message.contains("0 source and 1 target"))
+    );
+    assert!(
+        s.gaps
+            .iter()
+            .all(|g| g.code != "StaticRelationBindingAmbiguous")
+    );
+    assert!(
+        !s.relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Overrides)
+    );
+}
 #[test]
 fn source_backed_parent_without_symbol_row_is_not_lost() {
     let mut raw = frame();

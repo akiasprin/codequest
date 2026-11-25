@@ -4,11 +4,22 @@ use super::*;
 const WINDOW: usize = 32;
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct TextPlan {
+    #[serde(default)]
+    filtered_kinds: BTreeSet<String>,
     version: u8,
     phase: u8,
     streams: Option<Vec<Stream>>,
     window: Vec<Value>,
     window_work: usize,
+}
+impl TextPlan {
+    pub(super) fn finished() -> Self {
+        Self {
+            version: 1,
+            phase: 2,
+            ..Default::default()
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Stream {
@@ -78,12 +89,19 @@ impl Engine<'_> {
             .into(),
         ]];
         if let Some(kind) = &q.kind {
-            facets.push(vec![group("kind_entity", &kind.to_ascii_lowercase())]);
+            facets.push(if kind.eq_ignore_ascii_case("Callable") {
+                vec![
+                    group("kind_entity", "function"),
+                    group("kind_entity", "method"),
+                ]
+            } else {
+                vec![group("kind_entity", &kind.to_ascii_lowercase())]
+            });
         }
         if let Some(ctx) = self.context(q)? {
             facets.push(ctx.units.iter().map(|u| group("unit", u)).collect());
         }
-        if q.file.is_some() {
+        if q.file.is_some() || q.directory.is_some() {
             let mut scoped = q.clone();
             scoped.operation = "outline".into();
             facets.push(self.entity_groups(&scoped)?);
@@ -114,7 +132,24 @@ impl Engine<'_> {
         if plan.streams.is_none() {
             let groups = if plan.phase == 0 {
                 if self.reader.metadata()["search_index"]["version"] == 1 && !q.text.is_empty() {
-                    vec![group("lookup_folded", &q.text.to_lowercase())]
+                    let exact = group("lookup_folded", &q.text.to_lowercase());
+                    let best = self.reader.count(&exact)?;
+                    let mut groups = vec![exact];
+                    // A scoped exact-name pass must still see excluded kinds
+                    // for diagnostics. Compare file/context scopes, not kind.
+                    if q.file.is_some() || q.directory.is_some() || q.context.is_some() {
+                        let mut scoped = q.clone();
+                        scoped.operation = "outline".into();
+                        scoped.kind = None;
+                        let candidates = self.entity_groups(&scoped)?;
+                        let count = candidates.iter().try_fold(0u64, |n, g| {
+                            Ok::<_, Error>(n.saturating_add(self.reader.count(g)?))
+                        })?;
+                        if count < best {
+                            groups = candidates;
+                        }
+                    }
+                    groups
                 } else if !q.text.is_empty() {
                     self.text_groups(q)?
                 } else {
@@ -266,10 +301,22 @@ impl Engine<'_> {
                     let e: Entity = serde_json::from_value(row.value)?;
                     let exact = e.name.eq_ignore_ascii_case(&q.text)
                         || e.qualified_name.eq_ignore_ascii_case(&q.text);
+                    if exact
+                        && q.kind.as_ref().is_some_and(|kind| {
+                            !super::super::presentation::kind_matches(e.kind, kind)
+                        })
+                    {
+                        let mut scope = q.clone();
+                        scope.kind = None;
+                        if self.selected(&e, &scope, ctx)? && self.allowed(&e.provenance, q)? {
+                            plan.filtered_kinds.insert(e.kind.label());
+                        }
+                    }
                     if (plan.phase == 0 && !exact)
                         || (plan.phase == 1 && exact && !q.text.is_empty())
                         || !self.selected(&e, q, ctx)?
                         || !self.allowed(&e.provenance, q)?
+                        || !disclosure::visible(&e, q)
                     {
                         continue;
                     }
@@ -300,6 +347,15 @@ impl Engine<'_> {
             }
         }
         state.exhausted = plan.phase == 2;
+        if !plan.filtered_kinds.is_empty()
+            && !state
+                .extra_gaps
+                .iter()
+                .any(|g| g.code == "KindFilterExcludesExactName")
+        {
+            state.extra_gaps.push(Gap::new("KindFilterExcludesExactName", q.file.as_deref().unwrap_or(&q.text),
+                format!("exact-name matches of kind {:?} were excluded by kind={}; omit kind or use Callable for functions and methods",plan.filtered_kinds,q.kind.as_deref().unwrap_or(""))));
+        }
         state.text = Some(plan);
         self.finish_page(q, state, items, work, start, digest, false)
     }

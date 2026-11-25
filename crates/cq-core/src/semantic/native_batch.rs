@@ -31,6 +31,9 @@ fn file_refs(v: &Value, out: &mut BTreeSet<u64>) {
             if let Some(f) = v["to_file"].as_u64() {
                 out.insert(f);
             }
+            if let Some(f) = v["from_file"].as_u64() {
+                out.insert(f);
+            }
             for v in m.values() {
                 file_refs(v, out);
             }

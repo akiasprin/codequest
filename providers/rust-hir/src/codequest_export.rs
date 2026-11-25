@@ -106,7 +106,8 @@ fn emit(
             jobs.push((unit.clone(), chunk.to_vec()));
         }
     }
-    let configured = std::env::var("CQ_WORKERS").or_else(|_|std::env::var("CQ_HIR_WORKERS"))
+    let configured = std::env::var("CQ_WORKERS")
+        .or_else(|_| std::env::var("CQ_HIR_WORKERS"))
         .ok()
         .map(|s| s.parse::<usize>())
         .transpose()?;
@@ -116,7 +117,10 @@ fn emit(
             .saturating_mul(2)
             .min(128)
     });
-    anyhow::ensure!((1..=128).contains(&workers), "CQ_WORKERS / CQ_HIR_WORKERS must be 1..128");
+    anyhow::ensure!(
+        (1..=128).contains(&workers),
+        "CQ_WORKERS / CQ_HIR_WORKERS must be 1..128"
+    );
     let workers = workers.min(jobs.len().max(1));
     let report = |phase: &str, done: usize, total: usize, shard: Value| -> anyhow::Result<()> {
         if let Some(id) = progress {
@@ -370,10 +374,13 @@ fn emit_part(
     }
     let mut relations = vec![];
     for r in &index.relations {
+        if let Some(file) = r.from_definition_file {
+            file_ids.insert(file);
+        }
         if let Some(file) = r.to_definition_file {
             file_ids.insert(file);
         }
-        relations.push(json!({"from":r.from,"to":r.to,"from_definition_kind":r.from_definition_kind,"to_definition_kind":r.to_definition_kind,"to_source":r.to_definition_range.map(|(file,start,end)|json!({"file":file.index(),"start":start,"end":end})),"file":r.file_id.index(),"kind":format!("{:?}",r.kind),"to_name":r.to_display_name,"to_qn":r.to_qualified_name,"to_file":r.to_definition_file.map(|f|f.index()),"to_kind":format!("{:?}",r.to_kind),"to_signature":r.to_signature}));
+        relations.push(json!({"from":r.from,"to":r.to,"from_definition_kind":r.from_definition_kind,"to_definition_kind":r.to_definition_kind,"from_source":r.from_definition_range.map(|(file,start,end)|json!({"file":file.index(),"start":start,"end":end})),"from_name":r.from_display_name,"from_qn":r.from_qualified_name,"from_file":r.from_definition_file.map(|f|f.index()),"from_kind":format!("{:?}",r.from_kind),"from_signature":r.from_signature,"from_external":r.from_external,"to_source":r.to_definition_range.map(|(file,start,end)|json!({"file":file.index(),"start":start,"end":end})),"file":r.file_id.index(),"kind":format!("{:?}",r.kind),"to_name":r.to_display_name,"to_qn":r.to_qualified_name,"to_file":r.to_definition_file.map(|f|f.index()),"to_kind":format!("{:?}",r.to_kind),"to_signature":r.to_signature,"to_external":r.to_external}));
     }
     let mut inner_docs = std::collections::BTreeMap::<(u32, u32), Value>::new();
     let nominal_members = index

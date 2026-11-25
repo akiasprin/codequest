@@ -70,8 +70,8 @@ fn sketch(v: &mut Value) {
                         // supplied contract fields. Removing those would turn
                         // corrupt evidence into apparently absent evidence.
                         "text" | "id" | "token" | "target" | "call_index" | "child" | "owner"
-                        | "parent_token" | "file" | "to_file" | "start" | "end" | "external"
-                        | "exported" | "local" | "trait_member" | "const_function"
+                        | "parent_token" | "file" | "to_file" | "from_file" | "start" | "end"
+                        | "external" | "exported" | "local" | "trait_member" | "const_function"
                         | "is_definition" => *v = json!(""),
                         // Full strings remain in the raw row on disk. They do
                         // not need an allocated empty placeholder in every

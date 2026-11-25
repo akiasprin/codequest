@@ -2,6 +2,7 @@ use super::{
     index::{IndexRequest, index_repository},
     query,
 };
+mod collections;
 use cq_core::{
     Error, Result, control::CaptureControl, model::*, ports::ContentRepository, query::QueryEngine,
 };
@@ -17,6 +18,8 @@ pub struct Service {
     pub store: LocalStore,
     jobs: Mutex<HashMap<String, Job>>,
     model: Option<Arc<cq_core::query::embeddings::TokenVectors>>,
+    read_caches:
+        Mutex<std::collections::VecDeque<(String, String, Arc<cq_core::ports::facts::ReadCache>)>>,
 }
 struct ReadExecution<'a> {
     control: &'a CaptureControl,
@@ -33,6 +36,7 @@ impl Service {
             store: LocalStore::open(root)?,
             jobs: Mutex::new(HashMap::new()),
             model,
+            read_caches: Mutex::new(Default::default()),
         })
     }
     pub fn snapshot(&self, project: &str, revision: Option<&str>) -> Result<Arc<SemanticSnapshot>> {
@@ -408,6 +412,19 @@ impl Service {
             .or(revision)
             .or(target_revision);
         let decodes_before = cq_store::snapshot_decode_count();
+        if let Some(c) = &cursor
+            && let cq_core::query::ContinuationState::Store { state, .. } = &c.state
+            && state["page_kind"] == "collections_v1"
+        {
+            return self.collection_page(
+                project,
+                operation,
+                &args,
+                &c.revision,
+                Value::Null,
+                Some(c),
+            );
+        }
         if self.store.paged_enabled(project)
             && let Some(mut value) = self.dispatch_paged(
                 project,
@@ -450,13 +467,27 @@ impl Service {
                 let c = changes(&snapshot);
                 json!({"project":project,"revision":snapshot.revision,"created_ms":snapshot.created_ms,"counts":index_summary(&snapshot),"changes":{"stale":c["stale"],"added_count":c["added"].as_array().map(Vec::len),"modified_count":c["modified"].as_array().map(Vec::len),"removed_count":c["removed"].as_array().map(Vec::len),"continue_with":{"operation":"changes"}},"coverage":snapshot.coverage.iter().take(3).collect::<Vec<_>>(),"gaps":snapshot.gaps.iter().take(7).collect::<Vec<_>>(),"hidden":[{"category":"coverage","count":snapshot.coverage.len().saturating_sub(3),"continue_with":{"operation":"coverage"}},{"category":"gaps","count":snapshot.gaps.len().saturating_sub(7),"continue_with":{"operation":"gaps"}}]})
             }),
-            "changes" => Ok(changes(&snapshot)),
+            "changes" => self.collection_page(
+                project,
+                operation,
+                &args,
+                &snapshot.revision,
+                changes(&snapshot),
+                None,
+            ),
             "compare" => {
                 let base = args["base"]
                     .as_str()
                     .ok_or_else(|| Error::new("MissingBase", "compare needs base revision"))?;
                 let old = self.snapshot(project, Some(base))?;
-                Ok(compare(&old, &snapshot))
+                self.collection_page(
+                    project,
+                    operation,
+                    &args,
+                    &snapshot.revision,
+                    compare(&old, &snapshot),
+                    None,
+                )
             }
             "generation" => {
                 let generation = self
@@ -575,8 +606,11 @@ impl Service {
                     },
                     self.model.clone(),
                 ));
-                let result = QueryEngine::with_search(&snapshot, &self.store.content, search)
-                    .execute(&q, cursor)?;
+                let mut result = QueryEngine::with_search(&snapshot, &self.store.content, search)
+                    .execute(&query::execution_budget(&q)?, cursor)?;
+                if let Some(c) = &mut result.continuation {
+                    c.request.max_bytes = q.max_bytes;
+                }
                 let mut page = result.page;
                 if let Some(c) = result.continuation {
                     page.next_cursor = Some(self.store.save_cursor(&c)?);
@@ -637,6 +671,27 @@ impl Service {
             owned.as_ref().unwrap()
         };
         let metadata = reader.metadata();
+        let cached_reader;
+        let reader: &dyn FactReader = {
+            let mut caches = self.read_caches.lock().unwrap();
+            let cache = caches
+                .iter()
+                .find(|(p, r, _)| p == project && r == reader.revision())
+                .map(|(_, _, c)| c.clone())
+                .unwrap_or_else(|| {
+                    let c = Arc::new(cq_core::ports::facts::ReadCache::new(
+                        project,
+                        reader.revision(),
+                    ));
+                    if caches.len() >= 2 {
+                        caches.pop_front();
+                    }
+                    caches.push_back((project.into(), reader.revision().into(), c.clone()));
+                    c
+                });
+            cached_reader = cq_core::ports::facts::CachedReader::new(reader, cache)?;
+            &cached_reader
+        };
         if operation == "cypher"
             && let Some((column, count)) = cq_core::query::architecture::cypher_count(
                 metadata,
@@ -754,9 +809,8 @@ impl Service {
                 .keys()
                 .filter(|p| !current.contains_key(*p))
                 .collect::<Vec<_>>();
-            return Ok(Some(
-                json!({"revision":reader.revision(),"stale":!modified.is_empty()||!added.is_empty()||!removed.is_empty(),"modified":modified,"added":added,"removed":removed,"sampled_ms":cq_capture_protocol::now_ms(),"scope":"live input manifest compared with fixed facts"}),
-            ));
+            return Ok(Some(self.collection_page(project, operation, &args, reader.revision(),
+                json!({"revision":reader.revision(),"stale":!modified.is_empty()||!added.is_empty()||!removed.is_empty(),"modified":modified,"added":added,"removed":removed,"sampled_ms":cq_capture_protocol::now_ms(),"scope":"live input manifest compared with fixed facts"}), None)?));
         }
         if operation == "compare" {
             let base = args["base"]
@@ -781,9 +835,8 @@ impl Service {
             };
             let a = files(&old)?;
             let b = files(reader)?;
-            return Ok(Some(
-                json!({"base":base,"target":reader.revision(),"added_files":b.keys().filter(|p|!a.contains_key(*p)).collect::<Vec<_>>(),"removed_files":a.keys().filter(|p|!b.contains_key(*p)).collect::<Vec<_>>(),"modified_files":b.iter().filter(|(p,v)|a.get(*p).is_some_and(|x|x!=*v)).map(|(p,_)|p).collect::<Vec<_>>(),"entity_delta":metadata["counts"]["entities"].as_i64().unwrap_or(0)-old.metadata()["counts"]["entities"].as_i64().unwrap_or(0),"relation_delta":metadata["counts"]["relations"].as_i64().unwrap_or(0)-old.metadata()["counts"]["relations"].as_i64().unwrap_or(0)}),
-            ));
+            return Ok(Some(self.collection_page(project, operation, &args, reader.revision(),
+                json!({"base":base,"target":reader.revision(),"added_files":b.keys().filter(|p|!a.contains_key(*p)).collect::<Vec<_>>(),"removed_files":a.keys().filter(|p|!b.contains_key(*p)).collect::<Vec<_>>(),"modified_files":b.iter().filter(|(p,v)|a.get(*p).is_some_and(|x|x!=*v)).map(|(p,_)|p).collect::<Vec<_>>(),"entity_delta":metadata["counts"]["entities"].as_i64().unwrap_or(0)-old.metadata()["counts"]["entities"].as_i64().unwrap_or(0),"relation_delta":metadata["counts"]["relations"].as_i64().unwrap_or(0)-old.metadata()["counts"]["relations"].as_i64().unwrap_or(0)}), None)?));
         }
         if [
             "search_code",
@@ -826,13 +879,53 @@ impl Service {
         ]
         .contains(&operation)
         {
+            let diagnostics = args["diagnostics"] == true;
             let q = query::request(operation, args)?;
-            let result = cq_core::query::paged::Engine {
+            cq_core::query::presentation::validate_scope(&q)?;
+            let run = query::execution_budget(&q)?;
+            let mut languages = vec![];
+            if q.file.is_some() {
+                let info = self.store.project_info(project)?;
+                if info.head.as_deref() == Some(reader.revision()) {
+                    languages = info.languages;
+                } else {
+                    // Project metadata describes HEAD, never a historical pin.
+                    reader.set_timeout(q.timeout_ms);
+                    let mut after = None;
+                    loop {
+                        let batch = reader.scan("all:unit", after.as_deref(), 128)?;
+                        for row in batch.rows {
+                            languages.push(serde_json::from_value(row.value["language"].clone())?);
+                        }
+                        if batch.complete {
+                            break;
+                        }
+                        after = batch.after;
+                    }
+                }
+            }
+            if let Some(gap) = cq_core::query::presentation::semantic_file_language(&q, &languages)
+            {
+                let page = cq_core::query::presentation::unavailable_language_page(
+                    reader.revision(),
+                    gap,
+                    &q,
+                )?;
+                return Ok(Some(if q.compact {
+                    page.to_compact_json()
+                } else {
+                    json!(page)
+                }));
+            }
+            let mut result = cq_core::query::paged::Engine {
                 reader,
                 model: self.model.clone(),
                 control: Some(control),
             }
-            .execute(&q, cursor)?;
+            .execute(&run, cursor)?;
+            if let Some(c) = &mut result.continuation {
+                c.request.max_bytes = q.max_bytes;
+            }
             let mut page = result.page;
             if let Some(state) = result.continuation {
                 page.next_cursor = Some(self.store.save_cursor(&state)?);
@@ -847,7 +940,9 @@ impl Service {
             } else {
                 json!(page)
             };
-            if !q.compact {
+            if !q.compact || diagnostics {
+                value["work"] = json!(page.work);
+                value["elapsed_ms"] = json!(page.elapsed_ms);
                 value["read_stats"] = json!(reader.stats());
                 value["read_stats_scope"] = json!("request");
                 value["execution_path"] = json!("fixed_view_fact_reader");
